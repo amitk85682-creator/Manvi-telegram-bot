@@ -70,6 +70,82 @@ if GEMINI_API_KEY:
         gemini_model = None
 else:
     gemini_model = None
+# Add this section after the imports and before the database utilities
+
+# ==============================================================================
+# >> GREETINGS AND SPECIAL COMMANDS HANDLING <<
+# ==============================================================================
+
+GREETINGS = {
+    'hello', 'hi', 'hey', 'hola', 'namaste', 'hello manvi', 'hi manvi', 'hey manvi',
+    'hii', 'helloo', 'hellooo', 'hi there', 'hello there', 'hey there', 'good morning',
+    'good afternoon', 'good evening', 'good night', 'sup', 'what\'s up', 'yo'
+}
+
+async def handle_greeting(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles greeting messages with personalized responses."""
+    user = update.effective_user
+    greeting_message = random.choice([
+        f"Hey {user.first_name}! 👋 Manvi here! What movie are you looking for today?",
+        f"Hi {user.first_name}! 😊 Ready to find some awesome movies? Just tell me what you're looking for!",
+        f"Hello {user.first_name}! 🎬 Your movie expert Manvi is here! What can I find for you?",
+        f"Hey there {user.first_name}! 🍿 Manvi at your service! What movie would you like to watch?",
+        f"Hi {user.first_name}! ✨ Manvi here! Let's find something great to watch! What's on your mind?"
+    ])
+    await update.message.reply_text(greeting_message)
+
+# Then modify the handle_text_message function:
+
+async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles regular text messages from users to search for movies."""
+    if not update.message or not update.message.text:
+        return
+    
+    user_message = update.message.text.strip().lower()
+    user: User = update.effective_user
+    chat: Chat = update.effective_chat
+    
+    if not user_message:
+        return
+    
+    # Check if it's a greeting
+    if user_message in GREETINGS:
+        await handle_greeting(update, context)
+        return
+        
+    # Check if it's a thank you message
+    if any(word in user_message for word in ['thank', 'thanks', 'gracias', 'merci']):
+        await update.message.reply_text("You're welcome! 😊 Let me know if you need anything else!")
+        return
+        
+    # Check if it's a how are you message
+    if any(word in user_message for word in ['how are you', 'how do you do', 'how\'s it going']):
+        await update.message.reply_text("I'm doing great! Ready to help you find some awesome movies! 🎬 What are you in the mood for?")
+        return
+    
+    logger.info(f"User {user.id} ({user.username}) in chat {chat.id} searched for: '{user_message}'")
+    
+    movie = search_movie(user_message)
+    
+    if movie:
+        title = movie['title']
+        link = movie['link']
+        
+        response_text = await generate_response('movie_found', movie_title=title)
+        keyboard = [[InlineKeyboardButton("🍿 Get Link / Watch Now 🍿", url=link)]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await update.message.reply_text(
+            response_text,
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.MARKDOWN
+        )
+    else:
+        group_id = chat.id if chat.type in [Chat.GROUP, Chat.SUPERGROUP] else None
+        add_user_request(user.id, user.username, user_message, group_id)
+        
+        response_text = await generate_response('movie_not_found', movie_title=user_message)
+        await update.message.reply_text(response_text)
 
 # ==============================================================================
 # >> DATABASE UTILITIES <<
