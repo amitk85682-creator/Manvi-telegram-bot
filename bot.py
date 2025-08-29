@@ -36,12 +36,8 @@ DB_PASSWORD = os.getenv("DB_PASSWORD")
 DB_PORT = os.getenv("DB_PORT", "5432")
 
 # Construct DATABASE_URL from individual components
-if all([DB_HOST, DB_NAME, DB_USER, DB_PASSWORD]):
-    DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-else:
-    DATABASE_URL = os.getenv("DATABASE_URL")
-    if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
-        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+# This ensures the URL is always in the correct format for psycopg2.
+DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 BLOGGER_API_KEY = os.getenv("BLOGGER_API_KEY")
@@ -88,7 +84,6 @@ async def handle_greeting(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     
     if chat.type in [Chat.GROUP, Chat.SUPERGROUP]:
-        # In groups, we don't know the actual user's first name if sent via anonymous bot
         greeting_message = random.choice([
             "Hey everyone! 👋 Manvi here! What movie are you looking for today?",
             "Hi friends! 😊 Ready to find some awesome movies? Just tell me what you're looking for!",
@@ -174,6 +169,7 @@ def setup_database():
             # Check if user_requests table exists
             cur.execute("""
             SELECT column_name, data_type 
+            FROM information_schema.columns 
             FROM information_schema.columns 
             WHERE table_name = 'user_requests';
             """)
@@ -443,8 +439,8 @@ async def addmovie_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     title = " ".join(context.args[:-1])
     
     if not link.startswith(('http://', 'https://')):
-         await update.message.reply_text("That doesn't look like a valid link.")
-         return
+        await update.message.reply_text("That doesn't look like a valid link.")
+        return
 
     is_new = add_movie(title, link)
     if is_new:
@@ -511,14 +507,32 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         link = movie['link']
         
         response_text = await generate_response('movie_found', movie_title=title)
-        keyboard = [[InlineKeyboardButton("🍿 Get Link / Watch Now 🍿", url=link)]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # Check if the link is a valid URL before creating the button
+        if link and link.startswith(('http://', 'https://')):
+            try:
+                keyboard = [[InlineKeyboardButton("🍿 Get Link / Watch Now 🍿", url=link)]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                await update.message.reply_text(
+                    response_text,
+                    reply_markup=reply_markup,
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            except BadRequest as e:
+                logger.error(f"Failed to create inline keyboard for movie '{title}': {e}")
+                response_text += f"\n\n🔗 Link: {link}"
+                await update.message.reply_text(
+                    response_text,
+                    parse_mode=ParseMode.MARKDOWN
+                )
+        else:
+            logger.warning(f"Invalid link for movie '{title}': {link}")
+            response_text += f"\n\n🔗 Link: {link}" if link else "\n\nSorry, no link available."
+            await update.message.reply_text(
+                response_text,
+                parse_mode=ParseMode.MARKDOWN
+            )
 
-        await update.message.reply_text(
-            response_text,
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.MARKDOWN
-        )
     else:
         group_id = chat.id if chat.type in [Chat.GROUP, Chat.SUPERGROUP] else None
         add_user_request(user.id, user.username, user_message, group_id)
