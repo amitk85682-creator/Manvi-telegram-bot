@@ -27,7 +27,10 @@ from googleapiclient.discovery import build
 load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+# Fix for Render's PostgreSQL connection string format
 DATABASE_URL = os.getenv("DATABASE_URL")
+if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 BLOGGER_API_KEY = os.getenv("BLOGGER_API_KEY")
 BLOG_ID = os.getenv("BLOG_ID")
@@ -59,7 +62,7 @@ else:
     gemini_model = None
 
 # ==============================================================================
-# >> DATABASE UTILITIES (No changes in this section) <<
+# >> DATABASE UTILITIES (Fixed schema issue) <<
 # ==============================================================================
 
 def get_db_connection():
@@ -75,108 +78,155 @@ def setup_database():
     """Creates the necessary tables if they don't already exist."""
     conn = get_db_connection()
     if not conn:
+        logger.error("Failed to connect to database during setup")
         return
     
-    with conn.cursor() as cur:
-        # Movies table
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS movies (
-            id SERIAL PRIMARY KEY,
-            title TEXT NOT NULL,
-            link TEXT NOT NULL,
-            CONSTRAINT unique_movie_title UNIQUE (title)
-        );
-        """)
-        
-        # User requests table
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS user_requests (
-            id SERIAL PRIMARY KEY,
-            user_id BIGINT NOT NULL,
-            username VARCHAR(255),
-            movie_title TEXT NOT NULL,
-            group_id BIGINT,
-            notified BOOLEAN DEFAULT FALSE,
-            timestamp TIMESTAMPTZ DEFAULT NOW(),
-            CONSTRAINT unique_user_request UNIQUE (user_id, movie_title)
-        );
-        """)
-    conn.commit()
-    conn.close()
-    logger.info("Database tables verified/created successfully. 🐘")
+    try:
+        with conn.cursor() as cur:
+            # Movies table
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS movies (
+                id SERIAL PRIMARY KEY,
+                title TEXT NOT NULL,
+                link TEXT NOT NULL,
+                CONSTRAINT unique_movie_title UNIQUE (title)
+            );
+            """)
+            
+            # User requests table
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS user_requests (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                username VARCHAR(255),
+                movie_title TEXT NOT NULL,
+                group_id BIGINT,
+                notified BOOLEAN DEFAULT FALSE,
+                timestamp TIMESTAMPTZ DEFAULT NOW()
+            );
+            """)
+            
+            # Add unique constraint if it doesn't exist
+            cur.execute("""
+            DO $$ 
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.table_constraints 
+                    WHERE constraint_name = 'unique_user_request'
+                ) THEN
+                    ALTER TABLE user_requests 
+                    ADD CONSTRAINT unique_user_request UNIQUE (user_id, movie_title);
+                END IF;
+            END $$;
+            """)
+        conn.commit()
+        logger.info("Database tables verified/created successfully. 🐘")
+    except Exception as e:
+        logger.error(f"Error setting up database: {e}")
+        conn.rollback()
+    finally:
+        conn.close()
 
 def search_movie(title: str) -> Dict[str, Any] | None:
     """Searches for a movie in the database with case-insensitive partial matching."""
     conn = get_db_connection()
     if not conn: return None
     
-    with conn.cursor(cursor_factory=DictCursor) as cur:
-        cur.execute("SELECT title, link FROM movies WHERE title ILIKE %s;", (f'%{title}%',))
-        result = cur.fetchone()
-    conn.close()
-    return result
+    try:
+        with conn.cursor(cursor_factory=DictCursor) as cur:
+            cur.execute("SELECT title, link FROM movies WHERE title ILIKE %s;", (f'%{title}%',))
+            result = cur.fetchone()
+        return result
+    except Exception as e:
+        logger.error(f"Error searching for movie: {e}")
+        return None
+    finally:
+        conn.close()
 
 def add_movie(title: str, link: str) -> bool:
     """Adds or updates a movie in the database. Returns True if a new movie was added."""
     conn = get_db_connection()
     if not conn: return False
     
-    with conn.cursor() as cur:
-        cur.execute("""
-        INSERT INTO movies (title, link) VALUES (%s, %s)
-        ON CONFLICT (title) DO UPDATE SET link = EXCLUDED.link;
-        """, (title.strip(), link.strip()))
-        
-        is_new = cur.rowcount > 0
-    conn.commit()
-    conn.close()
-    return is_new
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+            INSERT INTO movies (title, link) VALUES (%s, %s)
+            ON CONFLICT (title) DO UPDATE SET link = EXCLUDED.link
+            RETURNING (xmax = 0) AS inserted;
+            """, (title.strip(), link.strip()))
+            
+            result = cur.fetchone()
+            is_new = result[0] if result else False
+        conn.commit()
+        return is_new
+    except Exception as e:
+        logger.error(f"Error adding movie: {e}")
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
 
 def add_user_request(user_id: int, username: str, movie_title: str, group_id: int | None):
     """Adds a user's movie request to the database, avoiding duplicates."""
     conn = get_db_connection()
     if not conn: return
     
-    with conn.cursor() as cur:
-        cur.execute("""
-        INSERT INTO user_requests (user_id, username, movie_title, group_id)
-        VALUES (%s, %s, %s, %s)
-        ON CONFLICT (user_id, movie_title) DO NOTHING;
-        """, (user_id, username, movie_title.strip(), group_id))
-    conn.commit()
-    conn.close()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+            INSERT INTO user_requests (user_id, username, movie_title, group_id)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (user_id, movie_title) DO NOTHING;
+            """, (user_id, username, movie_title.strip(), group_id))
+        conn.commit()
+    except Exception as e:
+        logger.error(f"Error adding user request: {e}")
+        conn.rollback()
+    finally:
+        conn.close()
 
 def get_pending_requests(movie_title: str) -> list[Dict[str, Any]]:
     """Gets all users who requested a specific movie and have not been notified."""
     conn = get_db_connection()
     if not conn: return []
     
-    with conn.cursor(cursor_factory=DictCursor) as cur:
-        cur.execute("""
-        SELECT user_id, username, group_id FROM user_requests
-        WHERE movie_title ILIKE %s AND notified = FALSE;
-        """, (f'%{movie_title}%',))
-        results = cur.fetchall()
-    conn.close()
-    return results
+    try:
+        with conn.cursor(cursor_factory=DictCursor) as cur:
+            cur.execute("""
+            SELECT user_id, username, group_id FROM user_requests
+            WHERE movie_title ILIKE %s AND notified = FALSE;
+            """, (f'%{movie_title}%',))
+            results = cur.fetchall()
+        return results
+    except Exception as e:
+        logger.error(f"Error getting pending requests: {e}")
+        return []
+    finally:
+        conn.close()
 
 def mark_request_as_notified(user_id: int, movie_title: str):
     """Marks a user's request as notified."""
     conn = get_db_connection()
     if not conn: return
     
-    with conn.cursor() as cur:
-        cur.execute("""
-        UPDATE user_requests SET notified = TRUE
-        WHERE user_id = %s AND movie_title ILIKE %s;
-        """, (user_id, f'%{movie_title}%'))
-    conn.commit()
-    conn.close()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+            UPDATE user_requests SET notified = TRUE
+            WHERE user_id = %s AND movie_title ILIKE %s;
+            """, (user_id, f'%{movie_title}%'))
+        conn.commit()
+    except Exception as e:
+        logger.error(f"Error marking request as notified: {e}")
+        conn.rollback()
+    finally:
+        conn.close()
 
 # ==============================================================================
-# >> MANVI'S PERSONALITY & AI INTEGRATION (No changes in this section) <<
+# >> MANVI'S PERSONALITY & AI INTEGRATION <<
 # ==============================================================================
-# ... (This whole section is the same as before, no need to copy it here again)
+
 FALLBACK_RESPONSES = {
     'welcome': [
         "Hey there! Manvi here. 😉 What movie are you looking for today? Just type the name!",
@@ -189,7 +239,7 @@ FALLBACK_RESPONSES = {
         "Look what I found! ✨ Hope you like it.",
     ],
     'movie_not_found': [
-        "Arre yaar! 😫 This one isn’t in my collection yet. But don’t worry, I’ll let you know first as soon as I get it. Pinky promise! 🤙",
+        "Arre yaar! 😫 This one isn't in my collection yet. But don't worry, I'll let you know first as soon as I get it. Pinky promise! 🤙",
         "Uff, sorry! 😥 I couldn't find '{movie_title}'. I've added it to my list and will ping you the moment it's here.",
         "Oh no! My collection is missing this gem. 💎 But I promise, you'll be the first to know when I find it.",
     ],
@@ -226,9 +276,9 @@ async def generate_response(prompt_type: str, **kwargs) -> str:
         return fallback
 
 # ==============================================================================
-# >> NOTIFICATION & BLOGGER LOGIC (No changes in this section) <<
+# >> NOTIFICATION & BLOGGER LOGIC <<
 # ==============================================================================
-# ... (This whole section is the same as before, no need to copy it here again)
+
 async def notify_users(context: ContextTypes.DEFAULT_TYPE, title: str, link: str):
     """Finds and notifies users waiting for a specific movie."""
     logger.info(f"Starting notification process for movie: {title}")
@@ -294,9 +344,9 @@ async def notify_users(context: ContextTypes.DEFAULT_TYPE, title: str, link: str
             logger.error(f"Failed to send group notification to {group_id}: {e}")
 
 # ==============================================================================
-# >> TELEGRAM HANDLERS (No changes in this section) <<
+# >> TELEGRAM HANDLERS <<
 # ==============================================================================
-# ... (This whole section is the same as before, no need to copy it here again)
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler for the /start command."""
     welcome_message = await generate_response('welcome')
@@ -320,10 +370,12 @@ async def addmovie_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
          await update.message.reply_text("That doesn't look like a valid link.")
          return
 
-    add_movie(title, link)
-    await update.message.reply_text(f"Alright, boss! Added/updated '{title}'. Notifying users now...")
-    
-    asyncio.create_task(notify_users(context, title, link))
+    is_new = add_movie(title, link)
+    if is_new:
+        await update.message.reply_text(f"Alright, boss! Added '{title}'. Notifying users now...")
+        asyncio.create_task(notify_users(context, title, link))
+    else:
+        await update.message.reply_text(f"Updated '{title}' in the database.")
 
 
 async def notify_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -430,8 +482,19 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 def main() -> None:
     """Initializes and runs the bot via Webhook."""
-    if not all([TELEGRAM_BOT_TOKEN, DATABASE_URL, ADMIN_USER_ID, APP_BASE_URL]):
-        logger.critical("🚨 CRITICAL: Missing essential environment variables. Bot cannot start.")
+    # Check for essential environment variables
+    missing_vars = []
+    if not TELEGRAM_BOT_TOKEN:
+        missing_vars.append("TELEGRAM_BOT_TOKEN")
+    if not DATABASE_URL:
+        missing_vars.append("DATABASE_URL")
+    if not ADMIN_USER_ID:
+        missing_vars.append("ADMIN_USER_ID")
+    if not APP_BASE_URL:
+        missing_vars.append("APP_BASE_URL")
+    
+    if missing_vars:
+        logger.critical(f"🚨 CRITICAL: Missing essential environment variables: {', '.join(missing_vars)}. Bot cannot start.")
         return
 
     # Ensure database is ready before starting
@@ -440,7 +503,7 @@ def main() -> None:
     # Set up the Telegram bot application
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
-    # Add handlers (same as before)
+    # Add handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("addmovie", addmovie_command))
     application.add_handler(CommandHandler("notify", notify_command))
@@ -457,7 +520,6 @@ def main() -> None:
     webhook_full_url = f"{APP_BASE_URL}{webhook_path}"
 
     # Set up and run the webhook server
-    # This single command sets the webhook and starts a web server
     application.run_webhook(
         listen="0.0.0.0",
         port=PORT,
