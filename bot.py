@@ -157,7 +157,7 @@ def setup_database():
                 CREATE TABLE movies (
                     id SERIAL PRIMARY KEY,
                     title TEXT NOT NULL,
-                    link TEXT NOT NULL,
+                    link TEXT,
                     CONSTRAINT unique_movie_title UNIQUE (title)
                 );
                 """)
@@ -169,7 +169,6 @@ def setup_database():
             # Check if user_requests table exists
             cur.execute("""
             SELECT column_name, data_type 
-            FROM information_schema.columns 
             FROM information_schema.columns 
             WHERE table_name = 'user_requests';
             """)
@@ -508,7 +507,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         response_text = await generate_response('movie_found', movie_title=title)
         
-        # Check if the link is a valid URL before creating the button
+        # Validate the link before creating the button
         if link and link.startswith(('http://', 'https://')):
             try:
                 keyboard = [[InlineKeyboardButton("🍿 Get Link / Watch Now 🍿", url=link)]]
@@ -520,6 +519,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 )
             except BadRequest as e:
                 logger.error(f"Failed to create inline keyboard for movie '{title}': {e}")
+                # Fallback: send the link as plain text
                 response_text += f"\n\n🔗 Link: {link}"
                 await update.message.reply_text(
                     response_text,
@@ -527,7 +527,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 )
         else:
             logger.warning(f"Invalid link for movie '{title}': {link}")
-            response_text += f"\n\n🔗 Link: {link}" if link else "\n\nSorry, no link available."
+            response_text += f"\n\nSorry, the link for this movie is not available right now."
             await update.message.reply_text(
                 response_text,
                 parse_mode=ParseMode.MARKDOWN
