@@ -305,7 +305,8 @@ async def notify_in_group(context: ContextTypes.DEFAULT_TYPE, movie_title):
                 notification_text = "Hey! आपकी requested movie अब आ गई है! 🥳\n\n"
                 notified_users = []
                 for user_id, username, first_name, message_id in users:
-                    mention = f"@{username}" if username else first_name
+                    # Use first name if username is not available
+                    mention = first_name or f"user_{user_id}"
                     notification_text += f"**{mention}**, "
                     notified_users.append(user_id)
 
@@ -349,13 +350,14 @@ async def group_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("गलत फॉर्मेट! ऐसे इस्तेमाल करें:\n/group @username Movie Title")
         return
     
-    username = context.args[0]
+    user_identifier = context.args[0]
     movie_title = " ".join(context.args[1:])
     
     movie_found = get_movie_from_db(movie_title)
     if movie_found:
         title, url = movie_found
-        message_text = f"Hi {username}, aapki movie '{title}' ab available hai! {url} Enjoy. 🙂"
+        # Use the identifier provided by admin (could be username or first name)
+        message_text = f"Hi {user_identifier}, aapki movie '{title}' ab available hai! {url} Enjoy. 🙂"
         
         try:
             await context.bot.send_message(chat_id=GROUP_CHAT_ID, text=message_text)
@@ -491,11 +493,12 @@ async def handle_forward_to_notify(update: Update, context: ContextTypes.DEFAULT
             except Exception as e:
                 logger.error(f"Could not send PM to {original_user.id}: {e}")
                 if original_chat:
-                    user_mention = original_user.mention_html()
+                    # Use first name if username is not available
+                    user_mention = original_user.first_name or f"user_{original_user.id}"
                     bot_username = context.bot.username
                     fallback_text = f"Hey {user_mention}, आपकी मूवी/वेबसीरीज '{title}' आ गयी है!\n\nइसे पाने के लिए, कृपया मुझे प्राइवेट में स्टार्ट करके मैसेज करें 👉 @{bot_username} और अपने कंटेंट का मज़ा लें।"
                     try:
-                        await context.bot.send_message(chat_id=original_chat.id, text=fallback_text, parse_mode='HTML')
+                        await context.bot.send_message(chat_id=original_chat.id, text=fallback_text)
                         await update.message.reply_text(f"⚠️ यूजर ({original_user.first_name}) ने बॉट को स्टार्ट नहीं किया है। उसे ग्रुप में सूचित कर दिया गया है।")
                     except Exception as group_e:
                         logger.error(f"Could not send group message: {group_e}")
