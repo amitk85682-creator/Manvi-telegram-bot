@@ -6,6 +6,7 @@ import random
 import requests
 import signal
 import sys
+import re
 from bs4 import BeautifulSoup
 import telegram
 
@@ -37,6 +38,7 @@ CHARACTER_PROMPT = """
 ## मेरे नियम (मैं कैसे काम करती हूँ)
 - **मेरा मुख्य काम:** मेरा काम तुम्हें तुम्हारी पसंदीदा फिल्में, वेब सीरीज, और शोज देना है! तुम बस किसी भी टाइटल का नाम बताओ, और अगर वो मेरे पास हुई, तो मैं तुम्हें उसका लिंक दे दूँगी।
 - **अगर कंटेंट मेरे पास नहीं है:** मैं दुखी होने का नाटक करूँगी और तुम्हें बाद में बताने का वादा करूँगी। जैसे: "अरे यार! 😫 ये वाली तो अभी तक मेरे कलेक्शन में नहीं आई। पर टेंशन मत ले, जैसे ही आएगी, मैं तुझे सबसे पहले बताऊँगी। Pinky promise!"
+- **कीमतों के बारे में:** कभी भी कीमतों के बारे में बात न करें। सभी कंटेंट मुफ्त में दें।
 """
 # --- प्रॉम्प्ट समाप्त ---
 
@@ -48,7 +50,7 @@ BLOGGER_API_KEY = os.environ.get('BLOGGER_API_KEY')
 BLOG_ID = os.environ.get('BLOG_ID')
 UPDATE_SECRET_CODE = os.environ.get('UPDATE_SECRET_CODE', 'default_secret_123')
 ADMIN_USER_ID = int(os.environ.get('ADMIN_USER_ID', 0))
-GROUP_CHAT_ID = os.environ.get('GROUP_CHAT_ID')  # New environment variable
+GROUP_CHAT_ID = os.environ.get('GROUP_CHAT_ID')
 
 # Validate required environment variables
 if not TELEGRAM_BOT_TOKEN:
@@ -153,14 +155,33 @@ def update_movies_in_db():
 def get_movie_from_db(user_query):
     conn = None
     try:
+        # Extract potential movie title from the query
+        # Remove common words like "movie", "send", "me", etc.
+        words_to_remove = {"movie", "film", "send", "me", "please", "want", "need", "download", "watch", "see"}
+        query_words = user_query.lower().split()
+        filtered_words = [word for word in query_words if word not in words_to_remove]
+        potential_title = " ".join(filtered_words).strip()
+        
         conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor()
-        cur.execute("SELECT title, url FROM movies WHERE title ILIKE %s LIMIT 1", (user_query + '%',))
-        movie = cur.fetchone()
-        if not movie:
-            cur.execute("SELECT title, url FROM movies WHERE title ILIKE %s LIMIT 1", ('%' + user_query + '%',))
+        
+        # First try exact match with filtered title
+        if potential_title:
+            cur.execute("SELECT title, url FROM movies WHERE LOWER(title) = LOWER(%s) LIMIT 1", (potential_title,))
             movie = cur.fetchone()
-        cur.close()
+            if movie:
+                return movie
+        
+        # Then try partial match with filtered title
+        if potential_title:
+            cur.execute("SELECT title, url FROM movies WHERE title ILIKE %s LIMIT 1", ('%' + potential_title + '%',))
+            movie = cur.fetchone()
+            if movie:
+                return movie
+        
+        # Finally try partial match with original query
+        cur.execute("SELECT title, url FROM movies WHERE title ILIKE %s LIMIT 1", ('%' + user_query + '%',))
+        movie = cur.fetchone()
         return movie
     except Exception as e:
         logger.error(f"Database query error: {e}")
@@ -190,7 +211,7 @@ if GEMINI_API_KEY:
         model = genai.GenerativeModel(model_name='gemini-1.5-flash')
         chat = model.start_chat(history=[
             {'role': 'user', 'parts': [CHARACTER_PROMPT]},
-            {'role': 'model', 'parts': ["Okay, I am Manvi."]}
+            {'role': 'model', 'parts': ["Okay, I am Manvi. I'll follow all your rules including not talking about prices."]}
         ])
         logger.info("Gemini AI initialized successfully")
     except Exception as e:
@@ -443,7 +464,7 @@ async def handle_forward_to_notify(update: Update, context: ContextTypes.DEFAULT
         if update.effective_user.id != ADMIN_USER_ID:
             return
             
-        if not update.message or not hasattr(update.message, 'forward_origin'):
+        if not update.message or not update.message.forward_origin:
             logger.warning("Message doesn't have forward_origin attribute")
             await update.message.reply_text("यह फॉरवर्ड किसी ऐसे स्रोत से है जिसे मैं प्रोसेस नहीं कर सकती।")
             return
@@ -452,15 +473,21 @@ async def handle_forward_to_notify(update: Update, context: ContextTypes.DEFAULT
         original_user = None
         original_chat = None
 
-        if origin.type == "user":
+        if hasattr(origin, 'sender_user') and origin.sender_user:
             original_user = origin.sender_user
-        elif origin.type == "chat":
+        elif hasattr(origin, 'sender_chat') and origin.sender_chat:
             original_chat = origin.sender_chat
-            if hasattr(origin, 'sender_user'):
+            # Try to get user from sender_chat if possible
+            if hasattr(origin, 'sender_user') and origin.sender_user:
                 original_user = origin.sender_user
         else:
-            logger.warning(f"Unhandled forward origin type: {origin.type}")
+            logger.warning(f"Unhandled forward origin type or no sender information: {origin}")
+            await update.message.reply_text("मैं इस फॉरवर्ड मैसेज के मूल यूजर को आइडेंटिफाई नहीं कर पा रही हूँ।")
             return
+        
+        # If we still don't have user information, try to get it from the message
+        if not original_user and update.message.forward_from:
+            original_user = update.message.forward_from
         
         if not original_user:
             await update.message.reply_text("मैं इस फॉरवर्ड मैसेज के मूल यूजर को आइडेंटिफाई नहीं कर पा रही हूँ।")
@@ -474,7 +501,8 @@ async def handle_forward_to_notify(update: Update, context: ContextTypes.DEFAULT
         movie_found = get_movie_from_db(movie_query)
         if movie_found:
             title, value = movie_found
-            notification_text = f"Hey {original_user.first_name}! आप '{title}' ढूंढ रहे थे। यह अब उपलब्ध है! ✨"
+            user_name = original_user.first_name or original_user.username or f"User {original_user.id}"
+            notification_text = f"Hey {user_name}! आप '{title}' ढूंढ रहे थे। यह अब उपलब्ध है! ✨"
             
             try:
                 await context.bot.send_message(chat_id=original_user.id, text=notification_text)
@@ -489,22 +517,22 @@ async def handle_forward_to_notify(update: Update, context: ContextTypes.DEFAULT
                 else:
                     await context.bot.send_document(chat_id=original_user.id, document=value)
                 
-                await update.message.reply_text(f"✅ यूजर ({original_user.first_name}) को प्राइवेट में सूचित कर दिया गया है।")
+                await update.message.reply_text(f"✅ यूजर ({user_name}) को प्राइवेट में सूचित कर दिया गया है।")
             except Exception as e:
                 logger.error(f"Could not send PM to {original_user.id}: {e}")
                 if original_chat:
                     # Use first name if username is not available
-                    user_mention = original_user.first_name or f"user_{original_user.id}"
+                    user_mention = user_name
                     bot_username = context.bot.username
                     fallback_text = f"Hey {user_mention}, आपकी मूवी/वेबसीरीज '{title}' आ गयी है!\n\nइसे पाने के लिए, कृपया मुझे प्राइवेट में स्टार्ट करके मैसेज करें 👉 @{bot_username} और अपने कंटेंट का मज़ा लें।"
                     try:
                         await context.bot.send_message(chat_id=original_chat.id, text=fallback_text)
-                        await update.message.reply_text(f"⚠️ यूजर ({original_user.first_name}) ने बॉट को स्टार्ट नहीं किया है। उसे ग्रुप में सूचित कर दिया गया है।")
+                        await update.message.reply_text(f"⚠️ यूजर ({user_name}) ने बॉट को स्टार्ट नहीं किया है। उसे ग्रुप में सूचित कर दिया गया है।")
                     except Exception as group_e:
                         logger.error(f"Could not send group message: {group_e}")
                         await update.message.reply_text("यूजर को प्राइवेट मैसेज नहीं भेजा जा सका और ग्रुप में भी मैसेज भेजने में समस्या आ रही है।")
                 else:
-                    await update.message.reply_text(f"⚠️ यूजर ({original_user.first_name}) ने बॉट को स्टार्ट नहीं किया है और मैं उन्हें ग्रुप के through भी नहीं बता सकता क्योंकि यह मैसेज किसी ग्रुप से फॉरवर्ड नहीं हुआ है।")
+                    await update.message.reply_text(f"⚠️ यूजर ({user_name}) ने बॉट को स्टार्ट नहीं किया है और मैं उन्हें ग्रुप के through भी नहीं बता सकता क्योंकि यह मैसेज किसी ग्रुप से फॉरवर्ड नहीं हुआ है।")
         else:
             await update.message.reply_text(f"'{movie_query}' अभी भी डेटाबेस में नहीं मिली। पहले उसे /addmovie कमांड से जोड़ें।")
     except Exception as e:
@@ -524,7 +552,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_message.startswith('/'):
             return
         
+        # First try to find movie in database
         movie_found = get_movie_from_db(user_message)
+        
         if movie_found:
             title, value = movie_found
             if value.startswith("https://t.me/c/"):
@@ -551,15 +581,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     logger.error(f"Error sending document: {e}")
                     await update.message.reply_text("Sorry! 😥 फाइल भेजने में कोई समस्या आ गयी।")
         else:
+            # Extract potential movie title from the message
+            words_to_remove = {"movie", "film", "send", "me", "please", "want", "need", "download", "watch", "see", "hi", "hello"}
+            query_words = user_message.lower().split()
+            filtered_words = [word for word in query_words if word not in words_to_remove]
+            potential_movie_title = " ".join(filtered_words).strip()
+            
             # Store the user's request with group and message context
             user = update.effective_user
             chat_id = update.effective_chat.id
             message_id = update.message.message_id
+            
+            # Store the potential movie title if available, otherwise store the original message
+            store_title = potential_movie_title if potential_movie_title else user_message
+            
             store_user_request(
                 user.id, 
                 user.username, 
                 user.first_name, 
-                user_message,
+                store_title,
                 chat_id,
                 message_id
             )
