@@ -67,7 +67,7 @@ def setup_database():
         conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor()
         cur.execute('CREATE TABLE IF NOT EXISTS movies (id SERIAL PRIMARY KEY, title TEXT NOT NULL UNIQUE, url TEXT NOT NULL);')
-        # user_requests table बनाएँ
+        # user_requests table बनाएँ — अब message_id के साथ
         cur.execute('''
             CREATE TABLE IF NOT EXISTS user_requests (
                 id SERIAL PRIMARY KEY,
@@ -78,7 +78,7 @@ def setup_database():
                 requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 notified BOOLEAN DEFAULT FALSE,
                 group_id BIGINT,
-                message_id BIGINT
+                message_id BIGINT  -- यहाँ जोड़ा गया है
             )
         ''')
         # डुप्लीकेट एंट्री से बचने के लिए एक UNIQUE constraint जोड़ें
