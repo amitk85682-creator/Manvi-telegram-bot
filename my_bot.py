@@ -156,7 +156,6 @@ def get_movie_from_db(user_query):
     conn = None
     try:
         # Extract potential movie title from the query
-        # Remove common words like "movie", "send", "me", etc.
         words_to_remove = {"movie", "film", "send", "me", "please", "want", "need", "download", "watch", "see"}
         query_words = user_query.lower().split()
         filtered_words = [word for word in query_words if word not in words_to_remove]
@@ -258,7 +257,7 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
                 
                 await context.bot.send_message(chat_id=user_id, text=notification_text)
                 
-                if movie_url.startswith("https://t.me/c/"):
+                if movie_url.startswith("https://t.me/c/  "):
                     parts = movie_url.split('/')
                     from_chat_id = int("-100" + parts[-2])
                     msg_id = int(parts[-1])
@@ -477,7 +476,6 @@ async def handle_forward_to_notify(update: Update, context: ContextTypes.DEFAULT
             original_user = origin.sender_user
         elif hasattr(origin, 'sender_chat') and origin.sender_chat:
             original_chat = origin.sender_chat
-            # Try to get user from sender_chat if possible
             if hasattr(origin, 'sender_user') and origin.sender_user:
                 original_user = origin.sender_user
         else:
@@ -485,7 +483,6 @@ async def handle_forward_to_notify(update: Update, context: ContextTypes.DEFAULT
             await update.message.reply_text("मैं इस फॉरवर्ड मैसेज के मूल यूजर को आइडेंटिफाई नहीं कर पा रही हूँ।")
             return
         
-        # If we still don't have user information, try to get it from the message
         if not original_user and update.message.forward_from:
             original_user = update.message.forward_from
         
@@ -507,7 +504,7 @@ async def handle_forward_to_notify(update: Update, context: ContextTypes.DEFAULT
             try:
                 await context.bot.send_message(chat_id=original_user.id, text=notification_text)
                 
-                if value.startswith("https://t.me/c/"):
+                if value.startswith("https://t.me/c/  "):
                     parts = value.split('/')
                     from_chat_id = int("-100" + parts[-2])
                     message_id = int(parts[-1])
@@ -521,7 +518,6 @@ async def handle_forward_to_notify(update: Update, context: ContextTypes.DEFAULT
             except Exception as e:
                 logger.error(f"Could not send PM to {original_user.id}: {e}")
                 if original_chat:
-                    # Use first name if username is not available
                     user_mention = user_name
                     bot_username = context.bot.username
                     fallback_text = f"Hey {user_mention}, आपकी मूवी/वेबसीरीज '{title}' आ गयी है!\n\nइसे पाने के लिए, कृपया मुझे प्राइवेट में स्टार्ट करके मैसेज करें 👉 @{bot_username} और अपने कंटेंट का मज़ा लें।"
@@ -545,6 +541,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not update.message or not update.message.text:
             return
         
+        # ✅ नया चेक: अगर कोई यूजर दूसरे यूजर को रिप्लाई कर रहा है, तो बॉट कुछ न करे
+        if update.message.reply_to_message:
+            return  # बस वापस आ जाओ, कुछ न करो
+
+        # फॉरवर्ड भी इग्नोर करो अगर तुम चाहो (वैकल्पिक)
+        # if update.message.forward_date:
+        #     return
+
         user_message = update.message.text.strip()
         logger.info(f"Received message: {user_message}")
         
@@ -552,17 +556,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_message.startswith('/'):
             return
         
+        # Check if message is from a group
+        is_group = update.effective_chat.type in ['group', 'supergroup']
+
         # First try to find movie in database
         movie_found = get_movie_from_db(user_message)
         
         if movie_found:
             title, value = movie_found
-            if value.startswith("https://t.me/c/"):
+
+            # ✅ ग्रुप में 2 सेकंड की डिले
+            if is_group:
+                await asyncio.sleep(2)
+
+            if value.startswith("https://t.me/c/  "):
                 try:
                     parts = value.split('/')
                     from_chat_id = int("-100" + parts[-2])
                     message_id = int(parts[-1])
                     await update.message.reply_text(f"मिल गई! 😉 '{title}' भेजी जा रही है... कृपया इंतज़ार करें।")
+                    if is_group:
+                        await asyncio.sleep(2)
                     await context.bot.copy_message(chat_id=update.effective_chat.id, from_chat_id=from_chat_id, message_id=message_id)
                 except Exception as e:
                     logger.error(f"Error copying message: {e}")
@@ -576,6 +590,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 try:
                     await update.message.reply_text(f"मिल गई! 😉 '{title}' भेजी जा रही है... कृपया इंतज़ार करें।")
+                    if is_group:
+                        await asyncio.sleep(2)
                     await context.bot.send_document(chat_id=update.effective_chat.id, document=value)
                 except Exception as e:
                     logger.error(f"Error sending document: {e}")
@@ -617,11 +633,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # Add encouragement to start the bot
                 encouragement = f"\n\n**Note:** यदि आप चाहते हैं कि आपकी फिल्म/वेब सीरीज उपलब्ध होते ही आपको सूचित किया जाए, तो कृपया मुझे private chat में start करें: @{context.bot.username}"
                 
+                if is_group:
+                    await asyncio.sleep(2)
                 await update.message.reply_text(response + encouragement)
                 return
                 
             try:
                 # Use Gemini AI for conversation
+                if is_group:
+                    await asyncio.sleep(2)
                 response = chat.send_message(user_message)
                 ai_response = response.text
                 
@@ -630,10 +650,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     encouragement = f"\n\n**Note:** यदि आप चाहते हैं कि आपकी फिल्म/वेब सीरीज उपलब्ध होते ही आपको सूचित किया जाए, तो कृपया मुझे private chat में start करें: @{context.bot.username}"
                     ai_response += encouragement
                 
+                if is_group:
+                    await asyncio.sleep(2)
                 await update.message.reply_text(ai_response)
             except Exception as e:
                 logger.error(f"Error from Gemini AI: {e}")
                 # Fallback response if AI fails
+                if is_group:
+                    await asyncio.sleep(2)
                 fallback_response = f"अरे यार! 😫 '{user_message}' तो अभी तक मेरे कलेक्शन में नहीं आई। पर टेंशन मत ले, जैसे ही आएगी, मैं तुझे सबसे पहले बताऊँगी। Pinky promise! ✨\n\n**Note:** यदि आप चाहते हैं कि आपकी फिल्म/वेब सीरीज उपलब्ध होते ही आपको सूचित किया जाए, तो कृपया मुझे private chat में start करें: @{context.bot.username}"
                 await update.message.reply_text(fallback_response)
     except Exception as e:
@@ -659,7 +683,7 @@ def run_bot():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("addmovie", add_movie))
     application.add_handler(CommandHandler("notify", notify_manually))
-    application.add_handler(CommandHandler("group", group_command))  # New command handler
+    application.add_handler(CommandHandler("group", group_command))
     application.add_handler(MessageHandler(filters.FORWARDED, handle_forward_to_notify))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
@@ -687,7 +711,6 @@ def run_bot():
 if __name__ == "__main__":
     # Check if another instance is already running
     try:
-        # Try to create a lock file
         lock_file = "/tmp/manvi_bot.lock"
         if os.path.exists(lock_file):
             logger.warning("Another instance might be running. Removing lock file.")
@@ -699,7 +722,6 @@ if __name__ == "__main__":
         flask_thread = threading.Thread(target=run_flask, daemon=True)
         flask_thread.start()
         
-        # Add a small delay to ensure Flask starts first
         import time
         time.sleep(2)
         
@@ -708,6 +730,5 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"Failed to start bot: {e}")
     finally:
-        # Clean up lock file
         if os.path.exists(lock_file):
             os.remove(lock_file)
