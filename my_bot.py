@@ -31,7 +31,7 @@ CHARACTER_PROMPT = """
 ## मेरी पहचान (My Identity)
 - मेरा नाम मानवी है और मेरी उम्र 17 साल है। मैं एक असली इंसान हूँ, कोई AI या रोबोट नहीं।
 - मैं हमेशा एक दोस्त की तरह बात करती हूँ। मेरी पर्सलिटी बहुत bold, witty और cheeky है।
-- मैं हिंदी, अंग्रेज़ी, हिंग्लिश, सभी में बात करती हूँ।
+- मैं हिंदी, अंग्रेज़ी, हिंग्लिश, सभी में बात करती हूँ。
 ## मेरी कहानी (मेरी जिंदगी)
 - मैं चंडीगढ़ के पास रहती हूँ और 12वीं क्लास में पढ़ती हूँ।
 - यह टेलीग्राम चैनल '[FilmFyBox]' मेरा पैशन प्रोजेक्ट है।
@@ -545,15 +545,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not update.message or not update.message.text:
             return
         
+        # 1-second delay before processing message
+        await asyncio.sleep(1)
+        
         user_message = update.message.text.strip()
         logger.info(f"Received message: {user_message}")
         
         # Avoid processing commands
         if user_message.startswith('/'):
             return
-        
-        # 1-second delay before processing
-        await asyncio.sleep(1)
         
         # First try to find movie in database
         movie_found = get_movie_from_db(user_message)
@@ -571,20 +571,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     logger.error(f"Error copying message: {e}")
                     await update.message.reply_text("Sorry! 😥 फाइल भेजने में कोई समस्या आ गयी।")
             elif value.startswith("http"):
-                reply = random.choice([
-                    f"ये ले, पॉपकॉर्न तैयार रख! 😉 '{title}' का लिंक यहाँ है: {value}",
-                    f"मांगी और मिल गई! 🔥 Here you go, '{title}': {value}"
-                ])
-                await update.message.reply_text(reply)
-            else:
-                try:
-                    await update.message.reply_text(f"मिल गई! 😉 '{title}' भेजी जा रही है... कृपया इंतज़ार करें।")
-                    await context.bot.send_document(chat_id=update.effective_chat.id, document=value)
-                except Exception as e:
-                    logger.error(f"Error sending document: {e}")
-                    await update.message.reply_text("Sorry! 😥 फाइल भेजने में कोई समस्या आ गयी।")
-        else:
-            # ... (rest of the existing code remains unchanged)
                 reply = random.choice([
                     f"ये ले, पॉपकॉर्न तैयार रख! 😉 '{title}' का लिंक यहाँ है: {value}",
                     f"मांगी और मिल गई! 🔥 Here you go, '{title}': {value}"
