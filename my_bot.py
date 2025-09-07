@@ -552,6 +552,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_message.startswith('/'):
             return
         
+        # 1-second delay before processing
+        await asyncio.sleep(1)
+        
         # First try to find movie in database
         movie_found = get_movie_from_db(user_message)
         
@@ -568,6 +571,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     logger.error(f"Error copying message: {e}")
                     await update.message.reply_text("Sorry! 😥 फाइल भेजने में कोई समस्या आ गयी।")
             elif value.startswith("http"):
+                reply = random.choice([
+                    f"ये ले, पॉपकॉर्न तैयार रख! 😉 '{title}' का लिंक यहाँ है: {value}",
+                    f"मांगी और मिल गई! 🔥 Here you go, '{title}': {value}"
+                ])
+                await update.message.reply_text(reply)
+            else:
+                try:
+                    await update.message.reply_text(f"मिल गई! 😉 '{title}' भेजी जा रही है... कृपया इंतज़ार करें।")
+                    await context.bot.send_document(chat_id=update.effective_chat.id, document=value)
+                except Exception as e:
+                    logger.error(f"Error sending document: {e}")
+                    await update.message.reply_text("Sorry! 😥 फाइल भेजने में कोई समस्या आ गयी।")
+        else:
+            # ... (rest of the existing code remains unchanged)
                 reply = random.choice([
                     f"ये ले, पॉपकॉर्न तैयार रख! 😉 '{title}' का लिंक यहाँ है: {value}",
                     f"मांगी और मिल गई! 🔥 Here you go, '{title}': {value}"
