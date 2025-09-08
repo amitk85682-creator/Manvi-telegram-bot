@@ -1,4 +1,4 @@
-python-telegram-bot==20.7
+python-telegram-bot==20.6
 google-genai>=1.0.0  # New official SDK:cite[4]:cite[6]:cite[9]
 google-api-python-client>=2.108.0
 psycopg2-binary>=2.9.6
