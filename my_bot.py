@@ -3,7 +3,7 @@ import logging
 import psycopg2
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
-from fuzzywuzzy import process
+from thefuzz import process
 
 # Configure logging
 logging.basicConfig(
