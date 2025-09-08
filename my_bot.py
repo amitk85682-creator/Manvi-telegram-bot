@@ -571,28 +571,31 @@ def main():
     init_db()
     init_gemini()
     
-    # Create application
-    application = Application.builder().token(Config.TELEGRAM_TOKEN).build()
+    # Create application WITHOUT explicit Updater creation
+    application = (
+        Application.builder()
+        .token(Config.TELEGRAM_TOKEN)
+        .concurrent_updates(10)
+        .build()
+    )
     
     # Add handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("stats", admin_stats))
     application.add_handler(CommandHandler("sync", sync_command))
-    application.add_handler(CommandHandler("setupdb", setup_database_command))  # Temporary command
+    application.add_handler(CommandHandler("setupdb", setup_database_command))
     application.add_handler(CallbackQueryHandler(handle_movie_selection, pattern="^movie_"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     # Add error handler
     application.add_error_handler(error_handler)
     
-    # Start periodic tasks
-    application.job_queue.run_repeating(
-        periodic_sync, interval=timedelta(hours=6), first=10
-    )
-    
     # Start the bot
     logger.info("Bot is starting...")
-    application.run_polling()
+    application.run_polling(
+        drop_pending_updates=True,
+        allowed_updates=Update.ALL_TYPES
+    )
 
 if __name__ == "__main__":
     main()
