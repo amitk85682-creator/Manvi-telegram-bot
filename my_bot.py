@@ -12,20 +12,25 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 def main():
-    # Initialize database
-    init_db()
-    
-    # Create application
-    application = Application.builder().token(Config.TELEGRAM_BOT_TOKEN).build()
-    
-    # Add handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    application.add_handler(CallbackQueryHandler(handle_callback))
-    
-    # Start the bot
-    logger.info("Bot starting...")
-    application.run_polling()
+    try:
+        # Initialize database
+        init_db()
+        
+        # Create application
+        application = Application.builder().token(Config.TELEGRAM_BOT_TOKEN).build()
+        
+        # Add handlers
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        application.add_handler(CallbackQueryHandler(handle_callback))
+        
+        # Start the bot
+        logger.info("Bot starting with Python 3.11 compatibility...")
+        application.run_polling()
+        
+    except Exception as e:
+        logger.error(f"Failed to start bot: {e}")
+        raise
 
 if __name__ == "__main__":
     main()
