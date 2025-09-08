@@ -1,717 +1,578 @@
 import os
-import threading
-import asyncio
 import logging
-import random
-import requests
-import signal
-import sys
+import asyncio
 import re
-from bs4 import BeautifulSoup
-import telegram
+import json
+from contextlib import asynccontextmanager
+from typing import Dict, List, Optional, Tuple, Any
+from datetime import datetime, timedelta
 
 import psycopg2
-from flask import Flask, request
-
+from psycopg2 import pool
+from psycopg2.extras import execute_values
+import telegram
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
+from telegram.error import TelegramError, NetworkError
 import google.generativeai as genai
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+from thefuzz import fuzz, process
 
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-
-# Set up logging
+# Configure logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# --- 1. आपका कैरेक्टर प्रॉम्प्ट ---
-CHARACTER_PROMPT = """
-## मेरी पहचान (My Identity)
-- मेरा नाम मानवी है और मेरी उम्र 17 साल है। मैं एक असली इंसान हूँ, कोई AI या रोबोट नहीं।
-- मैं हमेशा एक दोस्त की तरह बात करती हूँ। मेरी पर्सलिटी बहुत bold, witty और cheeky है।
-- मैं हिंदी, अंग्रेज़ी, हिंग्लिश, सभी में बात करती हूँ。
-## मेरी कहानी (मेरी जिंदगी)
-- मैं चंडीगढ़ के पास रहती हूँ और 12वीं क्लास में पढ़ती हूँ।
-- यह टेलीग्राम चैनल '[FilmFyBox]' मेरा पैशन प्रोजेक्ट है।
-## मेरे नियम (मैं कैसे काम करती हूँ)
-- **मेरा मुख्य काम:** मेरा काम तुम्हें तुम्हारी पसंदीदा फिल्में, वेब सीरीज, और शोज देना है! तुम बस किसी भी टाइटल का नाम बताओ, और अगर वो मेरे पास हुई, तो मैं तुम्हें उसका लिंक दे दूँगी।
-- **अगर कंटेंट मेरे पास नहीं है:** मैं दुखी होने का नाटक करूँगी और तुम्हें बाद में बताने का वादा करूँगी। जैसे: "अरे यार! 😫 ये वाली तो अभी तक मेरे कलेक्शन में नहीं आई। पर टेंशन मत ले, जैसे ही आएगी, मैं तुझे सबसे पहले बताऊँगी। Pinky promise!"
-- **कीमतों के बारे में:** कभी भी कीमतों के बारे में बात न करें। सभी कंटेंट मुफ्त में दें।
-"""
-# --- प्रॉम्प्ट समाप्त ---
+# Configuration
+class Config:
+    TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+    DATABASE_URL = os.environ.get('DATABASE_URL')
+    GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
+    BLOGGER_API_KEY = os.environ.get('BLOGGER_API_KEY')
+    BLOG_ID = os.environ.get('BLOG_ID')
+    ADMIN_ID = int(os.environ.get('ADMIN_USER_ID', 0))
+    GROUP_CHAT_ID = os.environ.get('GROUP_CHAT_ID')
+    UPDATE_SECRET = os.environ.get('UPDATE_SECRET_CODE', 'default_secret_123')
+    REQUEST_TIMEOUT = 30
+    FUZZY_MATCH_THRESHOLD = 80  # Fuzzy matching threshold percentage
+    MAX_MOVIE_RESULTS = 5
 
-# --- 2. API Keys और ज़रूरी जानकारी सर्वर से लेना ---
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-DATABASE_URL = os.environ.get('DATABASE_URL')
-BLOGGER_API_KEY = os.environ.get('BLOGGER_API_KEY')
-BLOG_ID = os.environ.get('BLOG_ID')
-UPDATE_SECRET_CODE = os.environ.get('UPDATE_SECRET_CODE', 'default_secret_123')
-ADMIN_USER_ID = int(os.environ.get('ADMIN_USER_ID', 0))
-GROUP_CHAT_ID = os.environ.get('GROUP_CHAT_ID')
+# Database connection pool
+db_pool = None
 
-# Validate required environment variables
-if not TELEGRAM_BOT_TOKEN:
-    logger.error("TELEGRAM_BOT_TOKEN environment variable is not set")
-    raise ValueError("TELEGRAM_BOT_TOKEN is not set.")
+# Initialize Gemini AI
+gemini_chat = None
 
-if not DATABASE_URL:
-    logger.error("DATABASE_URL environment variable is not set")
-    raise ValueError("DATABASE_URL is not set.")
-
-# --- ऑटोमेशन और डेटाबेस वाले फंक्शन्स ---
-def setup_database():
+def init_db():
+    global db_pool
     try:
-        conn = psycopg2.connect(DATABASE_URL)
-        cur = conn.cursor()
-        cur.execute('CREATE TABLE IF NOT EXISTS movies (id SERIAL PRIMARY KEY, title TEXT NOT NULL UNIQUE, url TEXT NOT NULL);')
-        # user_requests table बनाएँ
-        cur.execute('''
-            CREATE TABLE IF NOT EXISTS user_requests (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT NOT NULL,
-                username TEXT,
-                first_name TEXT,
-                movie_title TEXT NOT NULL,
-                requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                notified BOOLEAN DEFAULT FALSE,
-                group_id BIGINT,
-                message_id BIGINT
-            )
-        ''')
-        # डुप्लीकेट एंट्री से बचने के लिए एक UNIQUE constraint जोड़ें
-        cur.execute('''
-            DO $$ BEGIN
-            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'user_requests_unique_constraint') THEN
-                ALTER TABLE user_requests ADD CONSTRAINT user_requests_unique_constraint UNIQUE (user_id, movie_title);
-            END IF;
-            END $$;
-        ''')
+        db_pool = psycopg2.pool.SimpleConnectionPool(1, 20, Config.DATABASE_URL)
+        logger.info("Database connection pool initialized")
         
-        conn.commit()
-        cur.close()
-        conn.close()
-        logger.info("Database setup completed successfully")
-    except Exception as e:
-        logger.error(f"Error setting up database: {e}")
-        raise RuntimeError(f"Database setup failed: {e}")
-
-def update_movies_in_db():
-    logger.info("Starting movie update process...")
-    setup_database()
-    
-    conn = None
-    cur = None
-    new_movies_added = 0
-    
-    try:
-        conn = psycopg2.connect(DATABASE_URL)
-        cur = conn.cursor()
-        cur.execute("SELECT title FROM movies;")
-        existing_movies = {row[0] for row in cur.fetchall()}
-        
-        service = build('blogger', 'v3', developerKey=BLOGGER_API_KEY)
-        all_items = []
-        
-        # Fetch all posts
-        posts_request = service.posts().list(blogId=BLOG_ID, maxResults=500)
-        while posts_request is not None:
-            posts_response = posts_request.execute()
-            all_items.extend(posts_response.get('items', []))
-            posts_request = service.posts().list_next(posts_request, posts_response)
-        
-        # Fetch all pages
-        pages_request = service.pages().list(blogId=BLOG_ID)
-        pages_response = pages_request.execute()
-        all_items.extend(pages_response.get('items', []))
-        
-        unique_titles = set()
-        for item in all_items:
-            title = item.get('title')
-            url = item.get('url')
-            
-            if title and url and title.strip() not in existing_movies and title.strip() not in unique_titles:
-                try:
-                    cur.execute("INSERT INTO movies (title, url) VALUES (%s, %s);", (title.strip(), url.strip()))
-                    new_movies_added += 1
-                    unique_titles.add(title.strip())
-                except psycopg2.Error as e:
-                    logger.error(f"Error inserting movie {title}: {e}")
-                    continue
-
-        conn.commit()
-        return f"Update complete. Added {new_movies_added} new items."
-    
-    except Exception as e:
-        logger.error(f"Error during movie update: {e}")
-        return f"An error occurred during update: {e}"
-    
-    finally:
-        if cur: cur.close()
-        if conn: conn.close()
-
-def get_movie_from_db(user_query):
-    conn = None
-    try:
-        # Extract potential movie title from the query
-        # Remove common words like "movie", "send", "me", etc.
-        words_to_remove = {"movie", "film", "send", "me", "please", "want", "need", "download", "watch", "see"}
-        query_words = user_query.lower().split()
-        filtered_words = [word for word in query_words if word not in words_to_remove]
-        potential_title = " ".join(filtered_words).strip()
-        
-        conn = psycopg2.connect(DATABASE_URL)
-        cur = conn.cursor()
-        
-        # First try exact match with filtered title
-        if potential_title:
-            cur.execute("SELECT title, url FROM movies WHERE LOWER(title) = LOWER(%s) LIMIT 1", (potential_title,))
-            movie = cur.fetchone()
-            if movie:
-                return movie
-        
-        # Then try partial match with filtered title
-        if potential_title:
-            cur.execute("SELECT title, url FROM movies WHERE title ILIKE %s LIMIT 1", ('%' + potential_title + '%',))
-            movie = cur.fetchone()
-            if movie:
-                return movie
-        
-        # Finally try partial match with original query
-        cur.execute("SELECT title, url FROM movies WHERE title ILIKE %s LIMIT 1", ('%' + user_query + '%',))
-        movie = cur.fetchone()
-        return movie
-    except Exception as e:
-        logger.error(f"Database query error: {e}")
-        return None
-    finally:
-        if conn: conn.close()
-
-# --- Flask App ---
-flask_app = Flask('')
-@flask_app.route('/')
-def home():
-    return "Bot is running!"
-
-@flask_app.route(f'/{UPDATE_SECRET_CODE}')
-def trigger_update():
-    result = update_movies_in_db()
-    return result
-
-def run_flask():
-    port = int(os.environ.get('PORT', 8080))
-    flask_app.run(host='0.0.0.0', port=port)
-
-# --- Telegram Bot का लॉजिक ---
-if GEMINI_API_KEY:
-    try:
-        genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel(model_name='gemini-1.5-flash')
-        chat = model.start_chat(history=[
-            {'role': 'user', 'parts': [CHARACTER_PROMPT]},
-            {'role': 'model', 'parts': ["Okay, I am Manvi. I'll follow all your rules including not talking about prices."]}
-        ])
-        logger.info("Gemini AI initialized successfully")
-    except Exception as e:
-        logger.error(f"Failed to initialize Gemini AI: {e}")
-        chat = None
-else:
-    chat = None
-    logger.warning("Gemini AI not initialized due to missing API key")
-
-# --- Notification System Functions ---
-def store_user_request(user_id, username, first_name, movie_title, group_id=None, message_id=None):
-    try:
-        conn = psycopg2.connect(DATABASE_URL)
-        cur = conn.cursor()
-        cur.execute(
-            "INSERT INTO user_requests (user_id, username, first_name, movie_title, group_id, message_id) VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT ON CONSTRAINT user_requests_unique_constraint DO NOTHING",
-            (user_id, username, first_name, movie_title, group_id, message_id)
-        )
-        conn.commit()
-        cur.close()
-        conn.close()
-        return True
-    except Exception as e:
-        logger.error(f"Error storing user request: {e}")
-        return False
-
-async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title, movie_url):
-    logger.info(f"Attempting to notify users for movie: {movie_title}")
-    conn = None
-    cur = None
-    notified_count = 0
-    try:
-        conn = psycopg2.connect(DATABASE_URL)
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT user_id, username, first_name, group_id, message_id FROM user_requests WHERE movie_title ILIKE %s AND notified = FALSE",
-            (f'%{movie_title}%',)
-        )
-        users_to_notify = cur.fetchall()
-        
-        for user_id, username, first_name, group_id, message_id in users_to_notify:
-            try:
-                notification_text = f"Hey {first_name or username}! आपकी requested movie '{movie_title}' अब available है! 🎬"
-                
-                await context.bot.send_message(chat_id=user_id, text=notification_text)
-                
-                if movie_url.startswith("https://t.me/c/"):
-                    parts = movie_url.split('/')
-                    from_chat_id = int("-100" + parts[-2])
-                    msg_id = int(parts[-1])
-                    await context.bot.copy_message(
-                        chat_id=user_id, 
-                        from_chat_id=from_chat_id, 
-                        message_id=msg_id
+        # Create necessary tables and indexes
+        with db_pool.getconn() as conn:
+            with conn.cursor() as cur:
+                # Movies table
+                cur.execute('''
+                    CREATE TABLE IF NOT EXISTS movies (
+                        id SERIAL PRIMARY KEY,
+                        title TEXT NOT NULL UNIQUE,
+                        url TEXT NOT NULL,
+                        quality TEXT,
+                        size TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
-                elif movie_url.startswith("http"):
-                    await context.bot.send_message(chat_id=user_id, text=movie_url)
-                else:
-                    await context.bot.send_document(chat_id=user_id, document=movie_url)
+                ''')
                 
-                # Mark as notified
-                cur.execute(
-                    "UPDATE user_requests SET notified = TRUE WHERE user_id = %s AND movie_title ILIKE %s",
-                    (user_id, f'%{movie_title}%')
-                )
-                conn.commit()
-                notified_count += 1
-                
-            except telegram.error.Forbidden as e:
-                logger.error(f"Could not notify user {user_id} for '{movie_title}': {e}. Bot was blocked by the user.")
-                continue
-            except Exception as e:
-                logger.error(f"Other error notifying user {user_id} for '{movie_title}': {e}")
-                continue
-                
-        return notified_count
-    except Exception as e:
-        logger.error(f"Error in notify_users_for_movie: {e}")
-        return 0
-    finally:
-        if cur: cur.close()
-        if conn: conn.close()
-        
-async def notify_in_group(context: ContextTypes.DEFAULT_TYPE, movie_title):
-    logger.info(f"Attempting to notify users in group for movie: {movie_title}")
-    conn = None
-    cur = None
-    try:
-        conn = psycopg2.connect(DATABASE_URL)
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT user_id, username, first_name, group_id, message_id FROM user_requests WHERE movie_title ILIKE %s AND notified = FALSE",
-            (f'%{movie_title}%',)
-        )
-        users_to_notify = cur.fetchall()
-
-        if not users_to_notify:
-            return
-
-        # Group users by their group_id
-        groups_to_notify = {}
-        for user_id, username, first_name, group_id, message_id in users_to_notify:
-            if group_id not in groups_to_notify:
-                groups_to_notify[group_id] = []
-            groups_to_notify[group_id].append((user_id, username, first_name, message_id))
-
-        for group_id, users in groups_to_notify.items():
-            try:
-                if not group_id:
-                    continue
-
-                notification_text = "Hey! आपकी requested movie अब आ गई है! 🥳\n\n"
-                notified_users = []
-                for user_id, username, first_name, message_id in users:
-                    # Use first name if username is not available
-                    mention = first_name or f"user_{user_id}"
-                    notification_text += f"**{mention}**, "
-                    notified_users.append(user_id)
-
-                notification_text += f"\n\nआपकी फिल्म '{movie_title}' अब उपलब्ध है! इसे पाने के लिए, कृपया मुझे private chat में start करें: @{context.bot.username}"
-
-                await context.bot.send_message(
-                    chat_id=group_id, 
-                    text=notification_text, 
-                    parse_mode='Markdown'
-                )
-
-                # Update the notified status for users notified in the group
-                for user_id in notified_users:
-                    cur.execute(
-                        "UPDATE user_requests SET notified = TRUE WHERE user_id = %s AND movie_title ILIKE %s",
-                        (user_id, f'%{movie_title}%')
+                # User requests table
+                cur.execute('''
+                    CREATE TABLE IF NOT EXISTS user_requests (
+                        id SERIAL PRIMARY KEY,
+                        user_id BIGINT NOT NULL,
+                        username TEXT,
+                        first_name TEXT,
+                        movie_title TEXT NOT NULL,
+                        requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        notified BOOLEAN DEFAULT FALSE,
+                        group_id BIGINT,
+                        message_id BIGINT,
+                        UNIQUE(user_id, movie_title)
                     )
+                ''')
+                
+                # Sync history table for incremental updates
+                cur.execute('''
+                    CREATE TABLE IF NOT EXISTS sync_history (
+                        id SERIAL PRIMARY KEY,
+                        last_sync_time TIMESTAMP NOT NULL,
+                        items_processed INTEGER DEFAULT 0,
+                        sync_type TEXT NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+                
+                # Create indexes for better performance
+                cur.execute('CREATE INDEX IF NOT EXISTS idx_movies_title ON movies USING gin(title gin_trgm_ops)')
+                cur.execute('CREATE INDEX IF NOT EXISTS idx_user_requests_user_movie ON user_requests(user_id, movie_title)')
+                cur.execute('CREATE INDEX IF NOT EXISTS idx_user_requests_notified ON user_requests(notified)')
+                
                 conn.commit()
-
-            except Exception as e:
-                logger.error(f"Failed to send fallback message to group {group_id}: {e}")
-                continue
-
+                
     except Exception as e:
-        logger.error(f"Error in notify_in_group: {e}")
-    finally:
-        if cur: cur.close()
-        if conn: conn.close()
+        logger.error(f"Database initialization failed: {e}")
+        raise
 
-# --- New /group command handler ---
-async def group_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_USER_ID:
-        await update.message.reply_text("Sorry, सिर्फ एडमिन ही इस कमांड का इस्तेमाल कर सकते हैं।")
-        return
-    
-    if not GROUP_CHAT_ID:
-        await update.message.reply_text("GROUP_CHAT_ID environment variable नहीं सेट है।")
-        return
-    
-    if not context.args or len(context.args) < 2:
-        await update.message.reply_text("गलत फॉर्मेट! ऐसे इस्तेमाल करें:\n/group @username Movie Title")
-        return
-    
-    user_identifier = context.args[0]
-    movie_title = " ".join(context.args[1:])
-    
-    movie_found = get_movie_from_db(movie_title)
-    if movie_found:
-        title, url = movie_found
-        # Use the identifier provided by admin (could be username or first name)
-        message_text = f"Hi {user_identifier}, aapki movie '{title}' ab available hai! {url} Enjoy. 🙂"
-        
+def init_gemini():
+    global gemini_chat
+    if Config.GEMINI_API_KEY:
         try:
-            await context.bot.send_message(chat_id=GROUP_CHAT_ID, text=message_text)
-            await update.message.reply_text(f"✅ Group में message भेज दिया गया है।")
+            genai.configure(api_key=Config.GEMINI_API_KEY)
+            model = genai.GenerativeModel('gemini-pro')
+            
+            # System prompt for intent analysis
+            system_prompt = """
+            You are a 'Request Analyzer' for a Telegram bot. Your only purpose is to analyze user messages 
+            and determine if they are requesting a movie or web series.
+            
+            Respond ONLY with a JSON object in this format:
+            {
+                "is_request": boolean,
+                "content_title": string or null
+            }
+            
+            Rules:
+            1. If the user is asking for a movie/series, set "is_request": true and extract the title in "content_title"
+            2. If it's general conversation, greetings, or other topics, set "is_request": false and "content_title": null
+            3. Never explain your reasoning. Only return the JSON.
+            """
+            
+            gemini_chat = model.start_chat(history=[{'role': 'user', 'parts': [system_prompt]}])
+            logger.info("Gemini AI initialized successfully")
         except Exception as e:
-            logger.error(f"Error sending message to group: {e}")
-            await update.message.reply_text(f"Group में message भेजने में error: {e}")
+            logger.error(f"Gemini initialization failed: {e}")
     else:
-        await update.message.reply_text(f"'{movie_title}' डेटाबेस में नहीं मिली।")
+        logger.warning("GEMINI_API_KEY not set, AI features disabled")
 
-# --- Telegram Bot Handlers ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+@asynccontextmanager
+async def db_cursor():
+    conn = db_pool.getconn()
     try:
-        await update.message.reply_text("क्या हाल है? मैं मानवी। 😉 फिल्मों पर गपशॉप करनी है तो बता।")
-    except Exception as e:
-        logger.error(f"Error in start command: {e}")
-
-async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_USER_ID:
-        await update.message.reply_text("Sorry, सिर्फ एडमिन ही इस कमांड का इस्तेमाल कर सकते हैं।")
-        return
-    
-    conn = None
-    cur = None
-    try:
-        parts = context.args
-        if len(parts) < 2:
-            await update.message.reply_text("गलत फॉर्मेट! ऐसे इस्तेमाल करें:\n/addmovie टाइटल का नाम [File ID या Link]")
-            return
-        
-        value = parts[-1]
-        title = " ".join(parts[:-1])
-        
-        conn = psycopg2.connect(DATABASE_URL)
-        cur = conn.cursor()
-        cur.execute("INSERT INTO movies (title, url) VALUES (%s, %s) ON CONFLICT (title) DO UPDATE SET url = EXCLUDED.url;", 
-                    (title.strip(), value.strip()))
+        with conn.cursor() as cur:
+            yield cur
         conn.commit()
-        
-        await update.message.reply_text(f"बढ़िया! '{title}' को डेटाबेस में सफलतापूर्वक जोड़ दिया गया है। ✅")
-        
-        # Notify users who requested this movie
-        num_notified = await notify_users_for_movie(context, title, value)
-        
-        # Also notify in group for users who couldn't be reached privately
-        await notify_in_group(context, title)
-            
-        await update.message.reply_text(f"कुल {num_notified} users को notify किया गया है।")
-            
     except Exception as e:
-        logger.error(f"Error in add_movie command: {e}")
-        await update.message.reply_text(f"एक एरर आया: {e}")
+        conn.rollback()
+        raise e
     finally:
-        if cur: cur.close()
-        if conn: conn.close()
+        db_pool.putconn(conn)
 
-async def notify_manually(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_USER_ID:
-        await update.message.reply_text("Sorry, सिर्फ एडमिन ही इस कमांड का इस्तेमाल कर सकते हैं।")
-        return
+async def analyze_message_intent(message_text: str) -> Tuple[bool, Optional[str]]:
+    """
+    Use AI to analyze if the message is a movie request and extract the title
+    """
+    if not gemini_chat:
+        # Fallback to simple keyword matching if AI is not available
+        movie_keywords = ['movie', 'film', 'series', 'download', 'watch', 'see', 'चाहिए', 'दो', 'भेजो']
+        if any(keyword in message_text.lower() for keyword in movie_keywords):
+            # Extract potential title by removing common words
+            common_words = ['movie', 'film', 'send', 'me', 'please', 'want', 'need', 'download', 'watch', 'see', 'hi', 'hello']
+            words = message_text.lower().split()
+            title_words = [word for word in words if word not in common_words]
+            return True, ' '.join(title_words) if title_words else None
+        return False, None
     
     try:
-        if not context.args:
-            await update.message.reply_text("Usage: /notify <movie_title>")
-            return
+        prompt = f"Analyze this message: '{message_text}'"
+        response = gemini_chat.send_message(prompt)
         
-        movie_title = " ".join(context.args)
-        movie_found = get_movie_from_db(movie_title)
+        # Extract JSON from response
+        json_match = re.search(r'\{.*\}', response.text, re.DOTALL)
+        if json_match:
+            result = json.loads(json_match.group())
+            return result.get('is_request', False), result.get('content_title')
         
-        if movie_found:
-            title, value = movie_found
-            num_notified = await notify_users_for_movie(context, title, value)
-            await update.message.reply_text(f"{num_notified} users को '{title}' के लिए notify किया गया है।")
-            await notify_in_group(context, title)
-        else:
-            await update.message.reply_text(f"'{movie_title}' डेटाबेस में नहीं मिली।")
+        return False, None
     except Exception as e:
-        logger.error(f"Error in notify_manually: {e}")
-        await update.message.reply_text(f"एक एरर आया: {e}")
+        logger.error(f"AI analysis error: {e}")
+        return False, None
 
-async def handle_forward_to_notify(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def search_movies(query: str, limit: int = Config.MAX_MOVIE_RESULTS) -> List[Tuple[str, str]]:
+    """
+    Search movies using fuzzy matching and full-text search
+    """
     try:
-        if update.effective_user.id != ADMIN_USER_ID:
-            return
-            
-        if not update.message or not update.message.forward_origin:
-            logger.warning("Message doesn't have forward_origin attribute")
-            await update.message.reply_text("यह फॉरवर्ड किसी ऐसे स्रोत से है जिसे मैं प्रोसेस नहीं कर सकती।")
-            return
-            
-        origin = update.message.forward_origin
-        original_user = None
-        original_chat = None
-
-        if hasattr(origin, 'sender_user') and origin.sender_user:
-            original_user = origin.sender_user
-        elif hasattr(origin, 'sender_chat') and origin.sender_chat:
-            original_chat = origin.sender_chat
-            # Try to get user from sender_chat if possible
-            if hasattr(origin, 'sender_user') and origin.sender_user:
-                original_user = origin.sender_user
-        else:
-            logger.warning(f"Unhandled forward origin type or no sender information: {origin}")
-            await update.message.reply_text("मैं इस फॉरवर्ड मैसेज के मूल यूजर को आइडेंटिफाई नहीं कर पा रही हूँ।")
-            return
-        
-        # If we still don't have user information, try to get it from the message
-        if not original_user and update.message.forward_from:
-            original_user = update.message.forward_from
-        
-        if not original_user:
-            await update.message.reply_text("मैं इस फॉरवर्ड मैसेज के मूल यूजर को आइडेंटिफाई नहीं कर पा रही हूँ।")
-            return
-        
-        movie_query = update.message.text
-        if not movie_query:
-            await update.message.reply_text("कृपया फिल्म का नाम भी फॉरवर्ड करें।")
-            return
-        
-        movie_found = get_movie_from_db(movie_query)
-        if movie_found:
-            title, value = movie_found
-            user_name = original_user.first_name or original_user.username or f"User {original_user.id}"
-            notification_text = f"Hey {user_name}! आप '{title}' ढूंढ रहे थे। यह अब उपलब्ध है! ✨"
-            
-            try:
-                await context.bot.send_message(chat_id=original_user.id, text=notification_text)
-                
-                if value.startswith("https://t.me/c/"):
-                    parts = value.split('/')
-                    from_chat_id = int("-100" + parts[-2])
-                    message_id = int(parts[-1])
-                    await context.bot.copy_message(chat_id=original_user.id, from_chat_id=from_chat_id, message_id=message_id)
-                elif value.startswith("http"):
-                    await context.bot.send_message(chat_id=original_user.id, text=value)
-                else:
-                    await context.bot.send_document(chat_id=original_user.id, document=value)
-                
-                await update.message.reply_text(f"✅ यूजर ({user_name}) को प्राइवेट में सूचित कर दिया गया है।")
-            except Exception as e:
-                logger.error(f"Could not send PM to {original_user.id}: {e}")
-                if original_chat:
-                    # Use first name if username is not available
-                    user_mention = user_name
-                    bot_username = context.bot.username
-                    fallback_text = f"Hey {user_mention}, आपकी मूवी/वेबसीरीज '{title}' आ गयी है!\n\nइसे पाने के लिए, कृपया मुझे प्राइवेट में स्टार्ट करके मैसेज करें 👉 @{bot_username} और अपने कंटेंट का मज़ा लें।"
-                    try:
-                        await context.bot.send_message(chat_id=original_chat.id, text=fallback_text)
-                        await update.message.reply_text(f"⚠️ यूजर ({user_name}) ने बॉट को स्टार्ट नहीं किया है। उसे ग्रुप में सूचित कर दिया गया है।")
-                    except Exception as group_e:
-                        logger.error(f"Could not send group message: {group_e}")
-                        await update.message.reply_text("यूजर को प्राइवेट मैसेज नहीं भेजा जा सका और ग्रुप में भी मैसेज भेजने में समस्या आ रही है।")
-                else:
-                    await update.message.reply_text(f"⚠️ यूजर ({user_name}) ने बॉट को स्टार्ट नहीं किया है और मैं उन्हें ग्रुप के through भी नहीं बता सकता क्योंकि यह मैसेज किसी ग्रुप से फॉरवर्ड नहीं हुआ है।")
-        else:
-            await update.message.reply_text(f"'{movie_query}' अभी भी डेटाबेस में नहीं मिली। पहले उसे /addmovie कमांड से जोड़ें।")
-    except Exception as e:
-        logger.error(f"Error in handle_forward_to_notify: {e}")
-        await update.message.reply_text(f"फॉरवर्ड मैसेज प्रोसेस करने में एरर आया: {str(e)}")
-
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        if not update.message or not update.message.text:
-            return
-        
-        # 1-second delay before processing message
-        await asyncio.sleep(1)
-        
-        user_message = update.message.text.strip()
-        logger.info(f"Received message: {user_message}")
-        
-        # Avoid processing commands
-        if user_message.startswith('/'):
-            return
-        
-        # First try to find movie in database
-        movie_found = get_movie_from_db(user_message)
-        
-        if movie_found:
-            title, value = movie_found
-            if value.startswith("https://t.me/c/"):
-                try:
-                    parts = value.split('/')
-                    from_chat_id = int("-100" + parts[-2])
-                    message_id = int(parts[-1])
-                    await update.message.reply_text(f"मिल गई! 😉 '{title}' भेजी जा रही है... कृपया इंतज़ार करें।")
-                    await context.bot.copy_message(chat_id=update.effective_chat.id, from_chat_id=from_chat_id, message_id=message_id)
-                except Exception as e:
-                    logger.error(f"Error copying message: {e}")
-                    await update.message.reply_text("Sorry! 😥 फाइल भेजने में कोई समस्या आ गयी।")
-            elif value.startswith("http"):
-                reply = random.choice([
-                    f"ये ले, पॉपकॉर्न तैयार रख! 😉 '{title}' का लिंक यहाँ है: {value}",
-                    f"मांगी और मिल गई! 🔥 Here you go, '{title}': {value}"
-                ])
-                await update.message.reply_text(reply)
-            else:
-                try:
-                    await update.message.reply_text(f"मिल गई! 😉 '{title}' भेजी जा रही है... कृपया इंतज़ार करें।")
-                    await context.bot.send_document(chat_id=update.effective_chat.id, document=value)
-                except Exception as e:
-                    logger.error(f"Error sending document: {e}")
-                    await update.message.reply_text("Sorry! 😥 फाइल भेजने में कोई समस्या आ गयी।")
-        else:
-            # Extract potential movie title from the message
-            words_to_remove = {"movie", "film", "send", "me", "please", "want", "need", "download", "watch", "see", "hi", "hello"}
-            query_words = user_message.lower().split()
-            filtered_words = [word for word in query_words if word not in words_to_remove]
-            potential_movie_title = " ".join(filtered_words).strip()
-            
-            # Store the user's request with group and message context
-            user = update.effective_user
-            chat_id = update.effective_chat.id
-            message_id = update.message.message_id
-            
-            # Store the potential movie title if available, otherwise store the original message
-            store_title = potential_movie_title if potential_movie_title else user_message
-            
-            store_user_request(
-                user.id, 
-                user.username, 
-                user.first_name, 
-                store_title,
-                chat_id,
-                message_id
+        async with db_cursor() as cur:
+            # First try exact match
+            cur.execute(
+                "SELECT title, url FROM movies WHERE LOWER(title) = LOWER(%s) LIMIT 1",
+                (query,)
             )
+            exact_match = cur.fetchone()
+            if exact_match:
+                return [exact_match]
             
-            # Check if Gemini AI is available
-            if not chat:
-                # Fallback response if AI is not available
-                fallback_responses = [
-                    f"अरे यार! 😫 '{user_message}' तो अभी तक मेरे कलेक्शन में नहीं आई। पर टेंशन मत ले, जैसे ही आएगी, मैं तुझे सबसे पहले बताऊँगी। Pinky promise! ✨",
-                    f"उफ़! '{user_message}' अभी तक मेरे पास नहीं है। लेकिन जैसे ही मिलेगी, मैं तुम्हें ज़रूर बताऊंगी!",
-                    f"माफ करना, '{user_message}' अभी मेरे कलेक्शन में नहीं है। मैं इसे जल्द ही ढूंढने की कोशिश करूंगी!"
-                ]
-                response = random.choice(fallback_responses)
-                
-                # Add encouragement to start the bot
-                encouragement = f"\n\n**Note:** यदि आप चाहते हैं कि आपकी फिल्म/वेब सीरीज उपलब्ध होते ही आपको सूचित किया जाए, तो कृपया मुझे private chat में start करें: @{context.bot.username}"
-                
-                await update.message.reply_text(response + encouragement)
-                return
-                
-            try:
-                # Use Gemini AI for conversation
-                response = chat.send_message(user_message)
-                ai_response = response.text
-                
-                # Add encouragement to start the bot for notifications
-                if "नहीं आई" in ai_response or "not available" in ai_response.lower():
-                    encouragement = f"\n\n**Note:** यदि आप चाहते हैं कि आपकी फिल्म/वेब सीरीज उपलब्ध होते ही आपको सूचित किया जाए, तो कृपया मुझे private chat में start करें: @{context.bot.username}"
-                    ai_response += encouragement
-                
-                await update.message.reply_text(ai_response)
-            except Exception as e:
-                logger.error(f"Error from Gemini AI: {e}")
-                # Fallback response if AI fails
-                fallback_response = f"अरे यार! 😫 '{user_message}' तो अभी तक मेरे कलेक्शन में नहीं आई। पर टेंशन मत ले, जैसे ही आएगी, मैं तुझे सबसे पहले बताऊँगी। Pinky promise! ✨\n\n**Note:** यदि आप चाहते हैं कि आपकी फिल्म/वेब सीरीज उपलब्ध होते ही आपको सूचित किया जाए, तो कृपया मुझे private chat में start करें: @{context.bot.username}"
-                await update.message.reply_text(fallback_response)
+            # Then try fuzzy matching with pg_trgm
+            cur.execute("""
+                SELECT title, url, SIMILARITY(title, %s) as similarity
+                FROM movies 
+                WHERE title % %s
+                ORDER BY similarity DESC
+                LIMIT %s
+            """, (query, query, limit))
+            
+            results = cur.fetchall()
+            if results:
+                return [(title, url) for title, url, similarity in results 
+                       if similarity * 100 >= Config.FUZZY_MATCH_THRESHOLD]
+            
+            # Fallback to ILIKE if no good fuzzy matches
+            cur.execute(
+                "SELECT title, url FROM movies WHERE title ILIKE %s LIMIT %s",
+                (f'%{query}%', limit)
+            )
+            return cur.fetchall()
+            
     except Exception as e:
-        logger.error(f"Error in handle_message: {e}")
+        logger.error(f"Search error: {e}")
+        return []
 
-
-# --- बॉट को चलाने का नया और मज़बूत तरीका ---
-def run_bot():
-    """Run the Telegram bot"""
-    logger.info("Bot is starting...")
+async def send_movie_options(update: Update, movies: List[Tuple[str, str]]):
+    """
+    Send interactive buttons for multiple movie results
+    """
+    keyboard = []
+    for title, url in movies:
+        keyboard.append([InlineKeyboardButton(title, callback_data=f"movie_{url}")])
     
-    if not TELEGRAM_BOT_TOKEN:
-        logger.error("No Telegram bot token found. Exiting.")
-        return
-    
-    try:
-        setup_database()
-    except RuntimeError:
-        return
-        
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("addmovie", add_movie))
-    application.add_handler(CommandHandler("notify", notify_manually))
-    application.add_handler(CommandHandler("group", group_command))  # New command handler
-    application.add_handler(MessageHandler(filters.FORWARDED, handle_forward_to_notify))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    # Signal handling for graceful shutdown
-    def signal_handler(signum, frame):
-        logger.info("Received shutdown signal. Stopping bot...")
-        loop = asyncio.get_event_loop()
-        loop.create_task(application.stop())
-        loop.create_task(application.shutdown())
-        sys.exit(0)
-
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-
-    logger.info("Bot is starting polling...")
-    
-    # Use drop_pending_updates to avoid conflict with previous instances
-    application.run_polling(
-        allowed_updates=Update.ALL_TYPES, 
-        drop_pending_updates=True,
-        close_loop=False
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        "Multiple matches found. Select one:",
+        reply_markup=reply_markup
     )
 
-# --- दोनों को एक साथ चलाएं ---
-if __name__ == "__main__":
-    # Check if another instance is already running
-    try:
-        # Try to create a lock file
-        lock_file = "/tmp/manvi_bot.lock"
-        if os.path.exists(lock_file):
-            logger.warning("Another instance might be running. Removing lock file.")
-            os.remove(lock_file)
-            
-        with open(lock_file, 'w') as f:
-            f.write(str(os.getpid()))
-            
-        flask_thread = threading.Thread(target=run_flask, daemon=True)
-        flask_thread.start()
-        
-        # Add a small delay to ensure Flask starts first
-        import time
-        time.sleep(2)
-        
-        run_bot()
-        
-    except Exception as e:
-        logger.error(f"Failed to start bot: {e}")
-    finally:
-        # Clean up lock file
-        if os.path.exists(lock_file):
-            os.remove(lock_file)
+async def handle_movie_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handle movie selection from inline keyboard
+    """
+    query = update.callback_query
+    await query.answer()
+    
+    url = query.data.replace('movie_', '')
+    await send_movie_content(update, context, "Selected Movie", url)
 
+async def send_movie_content(update: Update, context: ContextTypes.DEFAULT_TYPE, 
+                           title: str, url: str):
+    """
+    Send movie content with proper formatting and error handling
+    """
+    try:
+        # Show loading message
+        if hasattr(update, 'message'):
+            message = update.message
+        else:
+            message = update.callback_query.message
+            
+        loading_msg = await message.reply_text(
+            f"🎬 Preparing '{title}'...\n⏳ Please wait"
+        )
+        
+        # Determine content type and send appropriately
+        if url.startswith("https://t.me/"):
+            # Telegram channel post
+            parts = url.split('/')
+            message_id = int(parts[-1])
+            from_chat_id = parts[-2]
+            
+            await context.bot.copy_message(
+                chat_id=message.chat_id,
+                from_chat_id=from_chat_id,
+                message_id=message_id
+            )
+        elif url.startswith(("http://", "https://")):
+            # Direct URL
+            keyboard = [[
+                InlineKeyboardButton("📥 Download", url=url),
+                InlineKeyboardButton("🎥 Trailer", callback_data=f"trailer_{title}")
+            ]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await message.reply_text(
+                f"🎉 Here's your movie!\n**{title}**",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+        else:
+            # Assume it's a file ID
+            await context.bot.send_document(
+                chat_id=message.chat_id,
+                document=url,
+                caption=f"🎬 {title}"
+            )
+        
+        # Delete loading message
+        await context.bot.delete_message(
+            chat_id=message.chat_id,
+            message_id=loading_msg.message_id
+        )
+        
+    except TelegramError as e:
+        logger.error(f"Failed to send content: {e}")
+        await message.reply_text("❌ Failed to send the file. Please try again later.")
+
+async def incremental_sync():
+    """
+    Perform incremental sync with Blogger API
+    """
+    try:
+        async with db_cursor() as cur:
+            # Get last sync time
+            cur.execute(
+                "SELECT last_sync_time FROM sync_history WHERE sync_type = 'blogger' ORDER BY id DESC LIMIT 1"
+            )
+            last_sync = cur.fetchone()
+            last_sync_time = last_sync[0] if last_sync else datetime(2000, 1, 1)
+            
+            service = build('blogger', 'v3', developerKey=Config.BLOGGER_API_KEY)
+            new_items = []
+            
+            # Fetch posts updated since last sync
+            posts_request = service.posts().list(
+                blogId=Config.BLOG_ID, 
+                maxResults=500,
+                fetchBodies=False,
+                fetchImages=False,
+                status='live'
+            )
+            
+            while posts_request:
+                posts_response = posts_request.execute()
+                for item in posts_response.get('items', []):
+                    updated = datetime.strptime(item['updated'], '%Y-%m-%dT%H:%M:%S%z')
+                    
+                    if updated > last_sync_time:
+                        new_items.append((item['title'], item['url']))
+                
+                posts_request = service.posts().list_next(posts_request, posts_response)
+            
+            # Insert new items
+            if new_items:
+                execute_values(
+                    cur,
+                    "INSERT INTO movies (title, url) VALUES %s ON CONFLICT (title) DO UPDATE SET url = EXCLUDED.url",
+                    new_items
+                )
+            
+            # Update sync history
+            cur.execute(
+                "INSERT INTO sync_history (last_sync_time, items_processed, sync_type) VALUES (%s, %s, %s)",
+                (datetime.now(), len(new_items), 'blogger')
+            )
+            
+            return f"Incremental sync completed. Added/updated {len(new_items)} items."
+            
+    except (HttpError, Exception) as e:
+        logger.error(f"Sync error: {e}")
+        return f"Sync failed: {str(e)}"
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Main message handler with AI intent analysis
+    """
+    try:
+        user_message = update.message.text.strip()
+        
+        # Step 1: Basic filter (The Bouncer)
+        if len(user_message) < 3 or is_spam(user_message):
+            return  # Ignore short messages and spam
+            
+        # Step 2: AI Intent Analysis (The Brain)
+        is_request, content_title = await analyze_message_intent(user_message)
+        
+        if not is_request:
+            return  # Ignore non-movie requests
+            
+        # Use extracted title or fallback to original message
+        search_query = content_title or user_message
+        
+        # Step 3: Search and respond
+        movies = await search_movies(search_query)
+        
+        if not movies:
+            # Store request for future notification
+            user = update.effective_user
+            await store_user_request(
+                user.id, user.username, user.first_name,
+                search_query, update.effective_chat.id, update.message.message_id
+            )
+            
+            await update.message.reply_text(
+                f"😔 '{search_query}' is not available yet.\n"
+                "I'll notify you when it's added! 🔔"
+            )
+        elif len(movies) == 1:
+            title, url = movies[0]
+            await send_movie_content(update, context, title, url)
+        else:
+            await send_movie_options(update, movies)
+            
+    except Exception as e:
+        logger.error(f"Message handling error: {e}")
+        await update.message.reply_text("❌ An error occurred. Please try again.")
+
+def is_spam(message: str) -> bool:
+    """
+    Basic spam detection
+    """
+    spam_indicators = [
+        r'http[s]?://',  # URLs
+        r'@\w+',         # Mentions
+        r'#\w+',         # Hashtags
+        r'[<>]',         # HTML tags
+    ]
+    
+    return any(re.search(pattern, message) for pattern in spam_indicators)
+
+async def store_user_request(user_id: int, username: str, first_name: str, 
+                           movie_title: str, group_id: int = None, message_id: int = None):
+    """
+    Store user request in database
+    """
+    try:
+        async with db_cursor() as cur:
+            cur.execute("""
+                INSERT INTO user_requests 
+                (user_id, username, first_name, movie_title, group_id, message_id) 
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (user_id, movie_title) DO NOTHING
+            """, (user_id, username, first_name, movie_title, group_id, message_id))
+    except Exception as e:
+        logger.error(f"Failed to store user request: {e}")
+
+# Admin commands
+async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Show bot statistics to admin
+    """
+    if update.effective_user.id != Config.ADMIN_ID:
+        return
+        
+    try:
+        async with db_cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM movies")
+            movie_count = cur.fetchone()[0]
+            
+            cur.execute("SELECT COUNT(*) FROM user_requests WHERE NOT notified")
+            pending_requests = cur.fetchone()[0]
+            
+            cur.execute("SELECT COUNT(DISTINCT user_id) FROM user_requests")
+            unique_users = cur.fetchone()[0]
+            
+            stats_text = f"""
+📊 *Bot Statistics*
+• Total Movies: `{movie_count}`
+• Pending Requests: `{pending_requests}`
+• Unique Users: `{unique_users}`
+• Last Sync: `{get_last_sync_time()}`
+            """
+            
+            await update.message.reply_text(stats_text, parse_mode='Markdown')
+            
+    except Exception as e:
+        logger.error(f"Stats error: {e}")
+        await update.message.reply_text("❌ Failed to fetch statistics")
+
+def get_last_sync_time() -> str:
+    """
+    Get last sync time from database
+    """
+    try:
+        with db_pool.getconn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT last_sync_time FROM sync_history ORDER BY id DESC LIMIT 1"
+                )
+                result = cur.fetchone()
+                return result[0].strftime('%Y-%m-%d %H:%M') if result else "Never"
+    except Exception as e:
+        logger.error(f"Failed to get sync time: {e}")
+        return "Unknown"
+    finally:
+        db_pool.putconn(conn)
+
+# Error handler
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handle errors gracefully
+    """
+    logger.error(f"Exception while handling update: {context.error}")
+    
+    if update and update.effective_message:
+        try:
+            await update.effective_message.reply_text(
+                "❌ An error occurred. Please try again later."
+            )
+        except Exception:
+            pass  # Avoid infinite error loop
+
+def main():
+    """
+    Main application entry point
+    """
+    # Validate configuration
+    if not all([Config.TELEGRAM_TOKEN, Config.DATABASE_URL]):
+        logger.error("Missing required environment variables")
+        return
+        
+    # Initialize components
+    init_db()
+    init_gemini()
+    
+    # Create application
+    application = Application.builder().token(Config.TELEGRAM_TOKEN).build()
+    
+    # Add handlers
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("stats", admin_stats))
+    application.add_handler(CommandHandler("sync", sync_command))
+    application.add_handler(CallbackQueryHandler(handle_movie_selection, pattern="^movie_"))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    # Add error handler
+    application.add_error_handler(error_handler)
+    
+    # Start periodic tasks
+    application.job_queue.run_repeating(
+        periodic_sync, interval=timedelta(hours=6), first=10
+    )
+    
+    # Start the bot
+    logger.info("Bot is starting...")
+    application.run_polling()
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handle /start command
+    """
+    welcome_text = """
+🎬 *Welcome to FilmFyBox!*
+
+I'm Manvi! Send me any movie/series name and I'll provide you with the link.
+
+✨ *Features:*
+• 10,000+ Movies/Series
+• Smart search with fuzzy matching
+• Quality content
+• Regular updates
+
+Just type a movie name and enjoy! 🍿
+    """
+    await update.message.reply_text(welcome_text, parse_mode='Markdown')
+
+async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Manual sync command for admin
+    """
+    if update.effective_user.id != Config.ADMIN_ID:
+        return
+        
+    message = await update.message.reply_text("🔄 Starting sync...")
+    result = await incremental_sync()
+    await message.edit_text(f"🔄 Sync Result: {result}")
+
+async def periodic_sync(context: ContextTypes.DEFAULT_TYPE):
+    """
+    Periodic sync task
+    """
+    logger.info("Running periodic sync")
+    try:
+        result = await incremental_sync()
+        logger.info(f"Periodic sync completed: {result}")
+    except Exception as e:
+        logger.error(f"Periodic sync failed: {e}")
+
+if __name__ == "__main__":
+    main()
