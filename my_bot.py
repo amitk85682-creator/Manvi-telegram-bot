@@ -52,10 +52,10 @@ def init_db():
         db_pool = psycopg2.pool.SimpleConnectionPool(1, 20, Config.DATABASE_URL)
         logger.info("Database connection pool initialized")
         
-        # Create necessary tables and indexes
+        # Create tables but skip the index if extension is not available
         with db_pool.getconn() as conn:
             with conn.cursor() as cur:
-                # Movies table
+                # Create tables without the problematic index first
                 cur.execute('''
                     CREATE TABLE IF NOT EXISTS movies (
                         id SERIAL PRIMARY KEY,
@@ -68,43 +68,21 @@ def init_db():
                     )
                 ''')
                 
-                # User requests table
-                cur.execute('''
-                    CREATE TABLE IF NOT EXISTS user_requests (
-                        id SERIAL PRIMARY KEY,
-                        user_id BIGINT NOT NULL,
-                        username TEXT,
-                        first_name TEXT,
-                        movie_title TEXT NOT NULL,
-                        requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        notified BOOLEAN DEFAULT FALSE,
-                        group_id BIGINT,
-                        message_id BIGINT,
-                        UNIQUE(user_id, movie_title)
-                    )
-                ''')
+                # ... (other table creation code)
                 
-                # Sync history table for incremental updates
-                cur.execute('''
-                    CREATE TABLE IF NOT EXISTS sync_history (
-                        id SERIAL PRIMARY KEY,
-                        last_sync_time TIMESTAMP NOT NULL,
-                        items_processed INTEGER DEFAULT 0,
-                        sync_type TEXT NOT NULL,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                ''')
-                
-                # Create indexes for better performance
-                cur.execute('CREATE INDEX IF NOT EXISTS idx_movies_title ON movies USING gin(title gin_trgm_ops)')
-                cur.execute('CREATE INDEX IF NOT EXISTS idx_user_requests_user_movie ON user_requests(user_id, movie_title)')
-                cur.execute('CREATE INDEX IF NOT EXISTS idx_user_requests_notified ON user_requests(notified)')
+                # Try to create the index, but don't fail if extension is missing
+                try:
+                    cur.execute('CREATE INDEX IF NOT EXISTS idx_movies_title ON movies USING gin(title gin_trgm_ops)')
+                    logger.info("Fuzzy search index created successfully")
+                except psycopg2.errors.UndefinedObject:
+                    logger.warning("pg_trgm extension not available. Fuzzy search will be limited.")
                 
                 conn.commit()
                 
     except Exception as e:
         logger.error(f"Database initialization failed: {e}")
-        raise
+        # Don't raise the error, just log it
+        # The bot can still work without the advanced search features
 
 def init_gemini():
     global gemini_chat
@@ -195,21 +173,26 @@ async def search_movies(query: str, limit: int = Config.MAX_MOVIE_RESULTS) -> Li
             if exact_match:
                 return [exact_match]
             
-            # Then try fuzzy matching with pg_trgm
-            cur.execute("""
-                SELECT title, url, SIMILARITY(title, %s) as similarity
-                FROM movies 
-                WHERE title % %s
-                ORDER BY similarity DESC
-                LIMIT %s
-            """, (query, query, limit))
+            # Try fuzzy matching if extension is available
+            try:
+                cur.execute("""
+                    SELECT title, url, SIMILARITY(title, %s) as similarity
+                    FROM movies 
+                    WHERE title % %s
+                    ORDER BY similarity DESC
+                    LIMIT %s
+                """, (query, query, limit))
+                
+                results = cur.fetchall()
+                if results:
+                    return [(title, url) for title, url, similarity in results 
+                           if similarity * 100 >= Config.FUZZY_MATCH_THRESHOLD]
+            except psycopg2.errors.UndefinedObject:
+                # Fallback to ILIKE if extension is not available
+                logger.warning("Fuzzy search not available, using ILIKE fallback")
+                pass
             
-            results = cur.fetchall()
-            if results:
-                return [(title, url) for title, url, similarity in results 
-                       if similarity * 100 >= Config.FUZZY_MATCH_THRESHOLD]
-            
-            # Fallback to ILIKE if no good fuzzy matches
+            # Fallback to ILIKE
             cur.execute(
                 "SELECT title, url FROM movies WHERE title ILIKE %s LIMIT %s",
                 (f'%{query}%', limit)
@@ -483,6 +466,25 @@ def get_last_sync_time() -> str:
     finally:
         db_pool.putconn(conn)
 
+# TEMPORARY COMMAND TO SETUP THE DATABASE
+async def setup_database_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    A temporary command for the admin to enable the pg_trgm extension.
+    """
+    if update.effective_user.id != Config.ADMIN_ID:
+        await update.message.reply_text("Sorry, this is an admin-only command.")
+        return
+
+    message = await update.message.reply_text("⚙️ Attempting to enable the 'pg_trgm' extension...")
+    try:
+        # Use the existing db_cursor to run the command
+        async with db_cursor() as cur:
+            cur.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm;")
+        await message.edit_text("✅ Success! The 'pg_trgm' extension is now enabled on your database. You can now remove this command from the code.")
+    except Exception as e:
+        logger.error(f"Failed to enable pg_trgm: {e}")
+        await message.edit_text(f"❌ Error: Could not enable the extension. It might already be enabled. Reason: {e}")
+        
 # Error handler
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -515,6 +517,7 @@ def main():
     application = Application.builder().token(Config.TELEGRAM_TOKEN).build()
     
     # Add handlers
+    application.add_handler(CommandHandler("setupdb", setup_database_command))
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("stats", admin_stats))
     application.add_handler(CommandHandler("sync", sync_command))
