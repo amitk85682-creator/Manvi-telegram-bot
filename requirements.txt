@@ -3,10 +3,9 @@ psycopg2-binary==2.9.10
 google-generativeai==0.3.2
 google-api-python-client==2.108.0
 python-dotenv==1.0.1
-thefuzz>=0.22.1  # Version को strict न रखें
-python-Levenshtein>=0.21.0  # Version को strict न रखें
+thefuzz[speedup]==0.22.1
 Flask==2.3.3
 requests==2.31.0
 beautifulsoup4==4.12.2
-aiohttp>=3.9.0  # नया version use करें
+aiohttp==3.9.0
 async-timeout==4.0.3
