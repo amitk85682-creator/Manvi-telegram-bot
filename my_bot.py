@@ -14,7 +14,7 @@ import telegram
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from telegram.error import TelegramError, NetworkError
-import google.generativeai as genai
+from google import genai
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from thefuzz import fuzz, process
