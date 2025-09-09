@@ -1,6 +1,6 @@
 import os, logging, threading
 from flask import Flask
-from telegram import ReplyKeyboardMarkup
+from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, ConversationHandler, MessageHandler,
     filters, ContextTypes, CommandHandler
