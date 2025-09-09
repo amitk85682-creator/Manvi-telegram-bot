@@ -16,6 +16,44 @@ logger = logging.getLogger(__name__)
 def get_db_connection():
     return psycopg2.connect(os.environ.get('DATABASE_URL'))
 
+# Admin user ID - अपना Telegram User ID यहाँ डालें
+ADMIN_USER_ID = 123456789  # यहाँ अपना User ID replace करें
+
+# Add movie command
+async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Check if user is admin
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("❌ Only admin can add movies!")
+        return
+    
+    # Check if correct format is used
+    if len(context.args) < 2:
+        await update.message.reply_text("❌ Format: /addmovie Movie_Name URL")
+        return
+    
+    # Extract movie name and URL
+    movie_name = ' '.join(context.args[:-1])
+    movie_url = context.args[-1]
+    
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Insert into database
+        cur.execute(
+            "INSERT INTO movies (title, url) VALUES (%s, %s) ON CONFLICT (title) DO UPDATE SET url = EXCLUDED.url",
+            (movie_name, movie_url)
+        )
+        conn.commit()
+        
+        await update.message.reply_text(f"✅ Added '{movie_name}' successfully!")
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+    finally:
+        cur.close()
+        conn.close()
+
 # Check if message is a movie request
 def is_movie_request(message):
     message_lower = message.lower().strip()
@@ -107,6 +145,7 @@ def main():
         
         # Add handlers
         application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("addmovie", add_movie))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         
         # Start the bot
