@@ -3,6 +3,7 @@ import threading
 import asyncio
 import logging
 import random
+import json
 import requests
 import signal
 import sys
@@ -62,7 +63,7 @@ BLOG_ID = os.environ.get('BLOG_ID')
 UPDATE_SECRET_CODE = os.environ.get('UPDATE_SECRET_CODE', 'default_secret_123')
 ADMIN_USER_ID = int(os.environ.get('ADMIN_USER_ID', 0))
 GROUP_CHAT_ID = os.environ.get('GROUP_CHAT_ID')
-ADMIN_CHANNEL_ID = os.environ.get('ADMIN_CHANNEL_ID')  # New environment variable for admin channel
+ADMIN_CHANNEL_ID = os.environ.get('ADMIN_CHANNEL_ID')
 
 # Validate required environment variables
 if not TELEGRAM_BOT_TOKEN:
@@ -157,9 +158,12 @@ def update_movies_in_db():
             
             # Skip if this item was published before our last sync
             if last_sync_time and 'published' in item:
-                published_time = datetime.strptime(item['published'], '%Y-%m-%dT%H:%M:%S.%fZ')
-                if published_time < last_sync_time:
-                    continue
+                try:
+                    published_time = datetime.strptime(item['published'], '%Y-%m-%dT%H:%M:%S.%fZ')
+                    if published_time < last_sync_time:
+                        continue
+                except:
+                    pass
             
             if title and url and title.strip() not in existing_movies and title.strip() not in unique_titles:
                 try:
@@ -306,4 +310,481 @@ def get_main_keyboard():
     """Get the main menu keyboard"""
     keyboard = [
         ['🔍 Search Movies', '🙋 Request Movie'],
-        ['📊 My Stats', '
+        ['📊 My Stats', '❓ Help']
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
+
+def get_movie_options_keyboard(movie_title, url):
+    """Get inline keyboard for movie options"""
+    keyboard = [
+        [InlineKeyboardButton("🎬 Watch Now", url=url)],
+        [InlineKeyboardButton("📥 Download", callback_data=f"download_{movie_title}")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+# --- Store User Request Function ---
+def store_user_request(user_id, username, first_name, movie_title, group_id=None, message_id=None):
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO user_requests (user_id, username, first_name, movie_title, group_id, message_id) VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT ON CONSTRAINT user_requests_unique_constraint DO NOTHING",
+            (user_id, username, first_name, movie_title, group_id, message_id)
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Error storing user request: {e}")
+        return False
+
+# --- Notification Functions ---
+async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title, movie_url):
+    """Notify users who requested a movie when it becomes available"""
+    logger.info(f"Attempting to notify users for movie: {movie_title}")
+    conn = None
+    cur = None
+    notified_count = 0
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT user_id, username, first_name, group_id, message_id FROM user_requests WHERE movie_title ILIKE %s AND notified = FALSE",
+            (f'%{movie_title}%',)
+        )
+        users_to_notify = cur.fetchall()
+        
+        for user_id, username, first_name, group_id, message_id in users_to_notify:
+            try:
+                notification_text = f"Hey {first_name or username}! आपकी requested movie '{movie_title}' अब available है! 🎬"
+                
+                await context.bot.send_message(chat_id=user_id, text=notification_text)
+                
+                if movie_url.startswith("https://t.me/c/"):
+                    parts = movie_url.split('/')
+                    from_chat_id = int("-100" + parts[-2])
+                    msg_id = int(parts[-1])
+                    await context.bot.copy_message(
+                        chat_id=user_id, 
+                        from_chat_id=from_chat_id, 
+                        message_id=msg_id
+                    )
+                elif movie_url.startswith("http"):
+                    await context.bot.send_message(chat_id=user_id, text=movie_url)
+                else:
+                    await context.bot.send_document(chat_id=user_id, document=movie_url)
+                
+                # Mark as notified
+                cur.execute(
+                    "UPDATE user_requests SET notified = TRUE WHERE user_id = %s AND movie_title ILIKE %s",
+                    (user_id, f'%{movie_title}%')
+                )
+                conn.commit()
+                notified_count += 1
+                
+            except telegram.error.Forbidden as e:
+                logger.error(f"Could not notify user {user_id} for '{movie_title}': {e}. Bot was blocked by the user.")
+                continue
+            except Exception as e:
+                logger.error(f"Other error notifying user {user_id} for '{movie_title}': {e}")
+                continue
+                
+        return notified_count
+    except Exception as e:
+        logger.error(f"Error in notify_users_for_movie: {e}")
+        return 0
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
+async def notify_in_group(context: ContextTypes.DEFAULT_TYPE, movie_title):
+    """Notify users in group when a requested movie becomes available"""
+    logger.info(f"Attempting to notify users in group for movie: {movie_title}")
+    conn = None
+    cur = None
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT user_id, username, first_name, group_id, message_id FROM user_requests WHERE movie_title ILIKE %s AND notified = FALSE",
+            (f'%{movie_title}%',)
+        )
+        users_to_notify = cur.fetchall()
+
+        if not users_to_notify:
+            return
+
+        # Group users by their group_id
+        groups_to_notify = {}
+        for user_id, username, first_name, group_id, message_id in users_to_notify:
+            if group_id not in groups_to_notify:
+                groups_to_notify[group_id] = []
+            groups_to_notify[group_id].append((user_id, username, first_name, message_id))
+
+        for group_id, users in groups_to_notify.items():
+            try:
+                if not group_id:
+                    continue
+
+                notification_text = "Hey! आपकी requested movie अब आ गई है! 🥳\n\n"
+                notified_users = []
+                for user_id, username, first_name, message_id in users:
+                    # Use first name if username is not available
+                    mention = first_name or f"user_{user_id}"
+                    notification_text += f"**{mention}**, "
+                    notified_users.append(user_id)
+
+                notification_text += f"\n\nआपकी फिल्म '{movie_title}' अब उपलब्ध है! इसे पाने के लिए, कृपया मुझे private chat में start करें: @{context.bot.username}"
+
+                await context.bot.send_message(
+                    chat_id=group_id, 
+                    text=notification_text, 
+                    parse_mode='Markdown'
+                )
+
+                # Update the notified status for users notified in the group
+                for user_id in notified_users:
+                    cur.execute(
+                        "UPDATE user_requests SET notified = TRUE WHERE user_id = %s AND movie_title ILIKE %s",
+                        (user_id, f'%{movie_title}%')
+                    )
+                conn.commit()
+
+            except Exception as e:
+                logger.error(f"Failed to send fallback message to group {group_id}: {e}")
+                continue
+
+    except Exception as e:
+        logger.error(f"Error in notify_in_group: {e}")
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
+# --- Telegram Bot Handlers ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        welcome_text = """
+        क्या हाल है? मैं मानवी। 😉 
+        फिल्मों पर गपशॉप करनी है तो बता।
+
+        Use the buttons below to get started!
+        """
+        await update.message.reply_text(welcome_text, reply_markup=get_main_keyboard())
+        return MAIN_MENU
+    except Exception as e:
+        logger.error(f"Error in start command: {e}")
+
+async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle main menu options"""
+    query = update.message.text
+    
+    if query == '🔍 Search Movies':
+        await update.message.reply_text("Great! Tell me the name of the movie you want to search for.")
+        return SEARCHING
+        
+    elif query == '🙋 Request Movie':
+        await update.message.reply_text("Okay, you've chosen to request a new movie. Please tell me the name of the movie you want me to add.")
+        return REQUESTING
+        
+    elif query == '📊 My Stats':
+        # Implement stats functionality
+        user_id = update.effective_user.id
+        try:
+            conn = psycopg2.connect(DATABASE_URL)
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM user_requests WHERE user_id = %s", (user_id,))
+            request_count = cur.fetchone()[0]
+            
+            cur.execute("SELECT COUNT(*) FROM user_requests WHERE user_id = %s AND notified = TRUE", (user_id,))
+            fulfilled_count = cur.fetchone()[0]
+            
+            stats_text = f"""
+            📊 Your Stats:
+            - Total Requests: {request_count}
+            - Fulfilled Requests: {fulfilled_count}
+            """
+            await update.message.reply_text(stats_text)
+        except Exception as e:
+            logger.error(f"Error getting stats: {e}")
+            await update.message.reply_text("Sorry, couldn't retrieve your stats at the moment.")
+        finally:
+            if conn: conn.close()
+        
+        return MAIN_MENU
+        
+    elif query == '❓ Help':
+        help_text = """
+        🤖 How to use Manvi Bot:
+        
+        🔍 Search Movies: Find movies in our collection
+        🙋 Request Movie: Request a new movie to be added
+        📊 My Stats: View your request statistics
+        
+        Just use the buttons below to navigate!
+        """
+        await update.message.reply_text(help_text)
+        return MAIN_MENU
+
+async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle movie search"""
+    user_message = update.message.text.strip()
+    
+    # First analyze intent
+    intent = await analyze_intent(user_message)
+    
+    if not intent["is_request"]:
+        await update.message.reply_text("That doesn't seem to be a movie title. Please provide a valid movie name to search for.")
+        return SEARCHING
+    
+    movie_title = intent["content_title"]
+    movie_found = get_movie_from_db(movie_title)
+    
+    if movie_found:
+        title, url = movie_found
+        response = f"🎉 Found it! '{title}' is available!\n\nClick below to watch or download:"
+        await update.message.reply_text(
+            response, 
+            reply_markup=get_movie_options_keyboard(title, url)
+        )
+    else:
+        response = f"😔 Sorry, '{movie_title}' is not in my collection right now. Would you like to request it?"
+        keyboard = [[InlineKeyboardButton("✅ Yes, Request It", callback_data=f"request_{movie_title}")]]
+        await update.message.reply_text(
+            response, 
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    
+    await update.message.reply_text("What would you like to do next?", reply_markup=get_main_keyboard())
+    return MAIN_MENU
+
+async def request_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle movie requests"""
+    user_message = update.message.text.strip()
+    user = update.effective_user
+    
+    # First analyze intent
+    intent = await analyze_intent(user_message)
+    
+    if not intent["is_request"]:
+        await update.message.reply_text("That doesn't seem to be a movie title. Please provide a valid movie name to request.")
+        return REQUESTING
+    
+    movie_title = intent["content_title"]
+    
+    # Store the request
+    store_user_request(
+        user.id, 
+        user.username, 
+        user.first_name, 
+        movie_title,
+        update.effective_chat.id if update.effective_chat.type != "private" else None,
+        update.message.message_id
+    )
+    
+    # Send admin notification
+    group_info = f"{update.effective_chat.title} (ID: {update.effective_chat.id})" if update.effective_chat.type != "private" else None
+    await send_admin_notification(context, user, movie_title, group_info)
+    
+    response = f"✅ Got it! Your request for '{movie_title}' has been sent to the admin. Thanks for helping improve our collection!"
+    await update.message.reply_text(response)
+    
+    await update.message.reply_text("What would you like to do next?", reply_markup=get_main_keyboard())
+    return MAIN_MENU
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle inline button callbacks"""
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data.startswith("request_"):
+        movie_title = query.data.replace("request_", "")
+        user = update.effective_user
+        
+        # Store the request
+        store_user_request(
+            user.id, 
+            user.username, 
+            user.first_name, 
+            movie_title,
+            update.effective_chat.id if update.effective_chat.type != "private" else None,
+            update.callback_query.message.message_id
+        )
+        
+        # Send admin notification
+        await send_admin_notification(context, user, movie_title)
+        
+        response = f"✅ Got it! Your request for '{movie_title}' has been sent to the admin. Thanks for helping improve our collection!"
+        await query.edit_message_text(response)
+    
+    elif query.data.startswith("download_"):
+        movie_title = query.data.replace("download_", "")
+        movie_found = get_movie_from_db(movie_title)
+        
+        if movie_found:
+            title, url = movie_found
+            # Implement download logic here
+            await query.message.reply_text(f"Download options for '{title}':\n{url}")
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancel the current operation"""
+    await update.message.reply_text("Operation cancelled.", reply_markup=get_main_keyboard())
+    return MAIN_MENU
+
+# --- Admin Commands ---
+async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin command to add a movie manually"""
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("Sorry, सिर्फ एडमिन ही इस कमांड का इस्तेमाल कर सकते हैं।")
+        return
+    
+    conn = None
+    cur = None
+    try:
+        parts = context.args
+        if len(parts) < 2:
+            await update.message.reply_text("गलत फॉर्मेट! ऐसे इस्तेमाल करें:\n/addmovie टाइटल का नाम [File ID या Link]")
+            return
+        
+        value = parts[-1]
+        title = " ".join(parts[:-1])
+        
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
+        cur.execute("INSERT INTO movies (title, url) VALUES (%s, %s) ON CONFLICT (title) DO UPDATE SET url = EXCLUDED.url;", 
+                    (title.strip(), value.strip()))
+        conn.commit()
+        
+        await update.message.reply_text(f"बढ़िया! '{title}' को डेटाबेस में सफलतापूर्वक जोड़ दिया गया है। ✅")
+        
+        # Notify users who requested this movie
+        num_notified = await notify_users_for_movie(context, title, value)
+        await notify_in_group(context, title)
+        
+        await update.message.reply_text(f"कुल {num_notified} users को notify किया गया है।")
+            
+    except Exception as e:
+        logger.error(f"Error in add_movie command: {e}")
+        await update.message.reply_text(f"एक एरर आया: {e}")
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
+async def notify_manually(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manually notify users about a movie"""
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("Sorry, सिर्फ एडमिन ही इस कमांड का इस्तेमाल कर सकते हैं।")
+        return
+    
+    try:
+        if not context.args:
+            await update.message.reply_text("Usage: /notify <movie_title>")
+            return
+        
+        movie_title = " ".join(context.args)
+        movie_found = get_movie_from_db(movie_title)
+        
+        if movie_found:
+            title, value = movie_found
+            num_notified = await notify_users_for_movie(context, title, value)
+            await update.message.reply_text(f"{num_notified} users को '{title}' के लिए notify किया गया है।")
+            await notify_in_group(context, title)
+        else:
+            await update.message.reply_text(f"'{movie_title}' डेटाबेस में नहीं मिली।")
+    except Exception as e:
+        logger.error(f"Error in notify_manually: {e}")
+        await update.message.reply_text(f"एक एरर आया: {e}")
+
+# --- Error Handler ---
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Log errors and handle them gracefully"""
+    logger.error(f"Exception while handling an update: {context.error}")
+    
+    if update and update.effective_message:
+        try:
+            await update.effective_message.reply_text(
+                "Sorry, something went wrong. Please try again later.",
+                reply_markup=get_main_keyboard()
+            )
+        except Exception:
+            pass  # Avoid infinite loop if error occurs while sending error message
+
+# --- Main Bot Function ---
+def run_bot():
+    """Run the Telegram bot"""
+    logger.info("Bot is starting...")
+    
+    if not TELEGRAM_BOT_TOKEN:
+        logger.error("No Telegram bot token found. Exiting.")
+        return
+    
+    try:
+        setup_database()
+    except RuntimeError:
+        return
+        
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+
+    # Add conversation handler with the states
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler('start', start)],
+        states={
+            MAIN_MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, main_menu)],
+            SEARCHING: [MessageHandler(filters.TEXT & ~filters.COMMAND, search_movies)],
+            REQUESTING: [MessageHandler(filters.TEXT & ~filters.COMMAND, request_movie)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)],
+    )
+
+    application.add_handler(conv_handler)
+    application.add_handler(CallbackQueryHandler(button_callback))
+    application.add_handler(CommandHandler("addmovie", add_movie))
+    application.add_handler(CommandHandler("notify", notify_manually))
+    application.add_error_handler(error_handler)
+
+    # Signal handling for graceful shutdown
+    def signal_handler(signum, frame):
+        logger.info("Received shutdown signal. Stopping bot...")
+        loop = asyncio.get_event_loop()
+        loop.create_task(application.stop())
+        loop.create_task(application.shutdown())
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    logger.info("Bot is starting polling...")
+    
+    application.run_polling(
+        allowed_updates=Update.ALL_TYPES, 
+        drop_pending_updates=True,
+        close_loop=False
+    )
+
+# --- Run Both Flask and Bot ---
+if __name__ == "__main__":
+    # Check if another instance is already running
+    try:
+        lock_file = "/tmp/manvi_bot.lock"
+        if os.path.exists(lock_file):
+            logger.warning("Another instance might be running. Removing lock file.")
+            os.remove(lock_file)
+            
+        with open(lock_file, 'w') as f:
+            f.write(str(os.getpid()))
+            
+        flask_thread = threading.Thread(target=run_flask, daemon=True)
+        flask_thread.start()
+        
+        # Add a small delay to ensure Flask starts first
+        import time
+        time.sleep(2)
+        
+        run_bot()
+        
+    except Exception as e:
+        logger.error(f"Failed to start bot: {e}")
+    finally:
+        # Clean up lock file
+        if os.path.exists(lock_file):
+            os.remove(lock_file)
