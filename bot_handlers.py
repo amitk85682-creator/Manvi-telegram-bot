@@ -1,58 +1,32 @@
-from telegram import Update
+# File: bot_handlers.py
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from ai_utils import analyze_intent
-from fuzzy_search import search_movies
-from keyboards import create_movie_keyboard, create_movie_options
-from database import get_cursor
+from database import search_movies, store_user_request
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🎬 Welcome to FilmFyBot!\n\n"
-        "Send me any movie name and I'll find it for you!"
-    )
+    await update.message.reply_text("🎬 Welcome to FilmFyBot! Send me a movie name.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text.strip()
+    analysis = await analyze_intent(user_message)
     
-    # Analyze intent
-    analysis = analyze_intent(user_message)
-    
-    if not analysis["is_request"]:
-        return  # Ignore non-movie requests
-    
-    # Search for movies
-    search_query = analysis["content_title"] or user_message
-    movies = search_movies(search_query)
+    if not analysis.get("is_request") or not analysis.get("content_title"):
+        return # अगर यह मूवी रिक्वेस्ट नहीं है तो अनदेखा करें
+
+    search_query = analysis["content_title"]
+    movies = await search_movies(search_query)
     
     if not movies:
-        # Store request
-        user = update.effective_user
-        with get_cursor() as cur:
-            cur.execute(
-                "INSERT INTO user_requests (user_id, username, first_name, movie_title) VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING",
-                (user.id, user.username, user.first_name, search_query)
-            )
-        
-        await update.message.reply_text(
-            f"😔 '{search_query}' is not available yet.\n"
-            "I'll notify you when it's added! 🔔"
-        )
+        await store_user_request(update.effective_user.id, search_query)
+        await update.message.reply_text(f"😔 '{search_query}' not available. I'll notify you if it's added!")
     elif len(movies) == 1:
         title, url = movies[0]
-        await update.message.reply_text(
-            f"🎉 Found '{title}'!",
-            reply_markup=create_movie_keyboard(title, url)
-        )
+        keyboard = [[InlineKeyboardButton("📥 Download", url=url)]]
+        await update.message.reply_text(f"🎉 Found '{title}'!", reply_markup=InlineKeyboardMarkup(keyboard))
     else:
-        await update.message.reply_text(
-            "Multiple matches found. Select one:",
-            reply_markup=create_movie_options(movies)
-        )
+        keyboard = [[InlineKeyboardButton(title, url=url)] for title, url in movies]
+        await update.message.reply_text("🎬 Similar movies found:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    if query.data.startswith("movie_"):
-        url = query.data.replace("movie_", "")
-        await query.message.reply_text(f"🎬 Here's your movie: {url}")
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    print(f"Update {update} caused error {context.error}")
