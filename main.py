@@ -735,17 +735,31 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor()
         
-        # Check if we're adding a file_id (starts with "BQAC")
-        if value.startswith("BQAC") or value.startswith("BAAC") or value.startswith("CAAC"):
-            cur.execute("INSERT INTO movies (title, url, file_id) VALUES (%s, %s, %s) ON CONFLICT (title) DO UPDATE SET url = EXCLUDED.url, file_id = EXCLUDED.file_id;", 
-                        (title.strip(), "", value.strip()))
+        # Check if it's a Telegram file ID (starts with specific patterns)
+        if value.startswith(("BQAC", "BAAC", "CAAC", "AQAC")):
+            cur.execute(
+                "INSERT INTO movies (title, url, file_id) VALUES (%s, %s, %s) ON CONFLICT (title) DO UPDATE SET url = EXCLUDED.url, file_id = EXCLUDED.file_id",
+                (title.strip(), "", value.strip())
+            )
+            await update.message.reply_text(f"✅ '{title}' को file ID के साथ सफलतापूर्वक जोड़ दिया गया है।")
+        
+        # Check if it's a Telegram channel link
+        elif value.startswith("https://t.me/c/"):
+            cur.execute(
+                "INSERT INTO movies (title, url) VALUES (%s, %s) ON CONFLICT (title) DO UPDATE SET url = EXCLUDED.url",
+                (title.strip(), value.strip())
+            )
+            await update.message.reply_text(f"✅ '{title}' को Telegram link के साथ सफलतापूर्वक जोड़ दिया गया है।")
+        
+        # Handle other types of links (Blogspot, etc.)
         else:
-            cur.execute("INSERT INTO movies (title, url) VALUES (%s, %s) ON CONFLICT (title) DO UPDATE SET url = EXCLUDED.url;", 
-                        (title.strip(), value.strip()))
+            cur.execute(
+                "INSERT INTO movies (title, url) VALUES (%s, %s) ON CONFLICT (title) DO UPDATE SET url = EXCLUDED.url",
+                (title.strip(), value.strip())
+            )
+            await update.message.reply_text(f"✅ '{title}' को URL के साथ सफलतापूर्वक जोड़ दिया गया है।")
         
         conn.commit()
-        
-        await update.message.reply_text(f"बढ़िया! '{title}' को डेटाबेस में सफलतापूर्वक जोड़ दिया गया है। ✅")
         
         # Notify users who requested this movie
         num_notified = await notify_users_for_movie(context, title, value)
