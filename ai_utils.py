@@ -1,48 +1,46 @@
+# File: ai_utils.py
 import google.generativeai as genai
 import json
 import re
+import asyncio
 from config import Config
 
-if Config.GEMINI_API_KEY:
-    genai.configure(api_key=Config.GEMINI_API_KEY)
-    model = genai.GenerativeModel('gemini-pro')
-else:
-    model = None
+model = None
 
-def analyze_intent(message_text):
+def init_gemini():
+    """Gemini AI मॉडल को शुरू करता है।"""
+    global model
+    if Config.GEMINI_API_KEY:
+        try:
+            genai.configure(api_key=Config.GEMINI_API_KEY)
+            # इस काम के लिए Flash मॉडल तेज़ और सस्ता है
+            model = genai.GenerativeModel('gemini-1.5-flash')
+            print("Gemini AI model initialized.")
+        except Exception as e:
+            print(f"Gemini initialization failed: {e}")
+
+async def analyze_intent(message_text: str):
+    """AI का उपयोग करके यूज़र के इरादे का विश्लेषण करता है।"""
     if not model:
-        return fallback_analysis(message_text)
-    
+        return {"is_request": True, "content_title": message_text} # AI न होने पर फॉलबैक
+
     prompt = f"""
-    You are a 'Request Analyzer' for a Telegram bot. Your only purpose is to analyze user messages 
-    and determine if they are requesting a movie or web series.
-    
-    Respond ONLY with a JSON object in this format:
-    {{
-        "is_request": boolean,
-        "content_title": string or null
-    }}
-    
-    Rules:
-    1. If the user is asking for a movie/series, set "is_request": true and extract the title in "content_title"
-    2. If it's general conversation, greetings, or other topics, set "is_request": false and "content_title": null
-    3. Never explain your reasoning. Only return the JSON.
-    
-    User's Message: "{message_text}"
+    You are a 'Request Analyzer' for a movie bot. Your goal is to determine if a user is asking for a movie/series.
+    - If it's a clear request (e.g., "Kalki movie," "download Sholay"), respond with: {{"is_request": true, "content_title": "Name of Movie"}}
+    - If it's a greeting ("hi", "hello manvi"), general chat ("how are you"), or spam, respond with: {{"is_request": false, "content_title": null}}
+    - If the user says something complex like "शाहरुख खान की नई वाली पिक्चर चाहिए", extract the likely movie title.
+    Respond ONLY with the JSON.
+    User Message: "{message_text}"
     """
-    
     try:
-        response = model.generate_content(prompt)
-        json_match = re.search(r'\{.*\}', response.text, re.DOTALL)
+        # API कॉल को अलग थ्रेड में चलाकर बॉट को फ्रीज होने से बचाएं
+        response = await asyncio.to_thread(model.generate_content, prompt)
+        clean_text = response.text.strip().replace("```json", "").replace("```", "")
+        json_match = re.search(r'\{.*\}', clean_text, re.DOTALL)
         if json_match:
             return json.loads(json_match.group())
     except Exception as e:
         print(f"AI analysis error: {e}")
     
-    return fallback_analysis(message_text)
-
-def fallback_analysis(message_text):
-    movie_keywords = ['movie', 'film', 'series', 'download', 'watch', 'see']
-    if any(keyword in message_text.lower() for keyword in movie_keywords):
-        return {"is_request": True, "content_title": message_text}
-    return {"is_request": False, "content_title": None}
+    # AI फेल होने पर फॉलबैक
+    return {"is_request": True, "content_title": message_text}
