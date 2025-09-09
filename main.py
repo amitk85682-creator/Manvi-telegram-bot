@@ -1,9 +1,9 @@
 import os, logging, threading
 from flask import Flask
-from telegram import Update, ReplyKeyboardMarkup
+from telegram import ReplyKeyboardMarkup
 from telegram.ext import (
     Application, ConversationHandler, MessageHandler,
-    filters, ContextTypes, CallbackQueryHandler
+    filters, ContextTypes, CommandHandler
 )
 
 logging.basicConfig(level=logging.INFO)
