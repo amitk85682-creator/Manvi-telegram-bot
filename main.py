@@ -1,15 +1,16 @@
-import os, logging, threading, psycopg2, asyncio
+import os, logging, threading
 from flask import Flask
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from thefuzz import process
+from telegram import Update, ReplyKeyboardMarkup
+from telegram.ext import (
+    Application, ConversationHandler, MessageHandler,
+    filters, ContextTypes, CallbackQueryHandler
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ---------- Flask health stub (keeps Render happy) ----------
+# ---------- Flask health stub ----------
 app = Flask(__name__)
-
 @app.route("/")
 def health():
     return "Bot alive", 200
@@ -18,73 +19,79 @@ def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port, debug=False)
 
-# ---------- DB ----------
-def get_conn():
-    return psycopg2.connect(os.environ["DATABASE_URL"], sslmode="require")
+# ---------- States ----------
+MAIN_MENU, SEARCHING, REQUESTING = range(3)
 
-# ---------- Persistent keyboard ----------
-def PERSISTENT_KB():
-    return ReplyKeyboardMarkup([["🔍 Search Movies", "🙋 Request Movie"]],
-                               resize_keyboard=True, persistent=True)
+# ---------- Persistent buttons ----------
+def main_menu_kb():
+    return ReplyKeyboardMarkup(
+        [["🔍 Search Movies", "🙋 Request Movie"]],
+        resize_keyboard=True,
+        persistent=True,
+        one_time_keyboard=False
+    )
 
 # ---------- Handlers ----------
 async def start(update: Update, _: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🎬 Use the buttons below:", reply_markup=PERSISTENT_KB())
+    await update.message.reply_text(
+        "🎬 Use the buttons below to interact:",
+        reply_markup=main_menu_kb()
+    )
+    return MAIN_MENU
 
-async def search(update: Update, _: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    if len(text) < 2:
-        return
+# 🔍 Search button pressed
+async def search_pressed(update: Update, _: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Great! Send me the movie name to search:")
+    return SEARCHING
 
-    conn = get_conn()
-    with conn.cursor() as cur:
-        # 1. exact
-        cur.execute("SELECT title, url FROM movies WHERE lower(title)=lower(%s)", (text,))
-        row = cur.fetchone()
-        if row:
-            title, url = row
-            await update.message.reply_text(
-                f"🎉 Found *{title}*",
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📥 Download", url=url)]])
-            )
-            return
+# 🙋 Request button pressed
+async def request_pressed(update: Update, _: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Okay! Send me the movie name to request:")
+    return REQUESTING
 
-        # 2. fuzzy
-        cur.execute("SELECT title, url FROM movies")
-        all_movies = cur.fetchall()
-        titles = [t for t, _ in all_movies]
-        match, score = process.extractOne(text, titles) or ("", 0)
-        if score >= 75:
-            url = dict(all_movies)[match]
-            await update.message.reply_text(
-                f"Did you mean *{match}*?",
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📥 Download", url=url)]])
-            )
-            return
+# Actual search logic
+async def handle_search(update: Update, _: ContextTypes.DEFAULT_TYPE):
+    movie = update.message.text.strip()
+    # dummy reply – plug your DB here
+    await update.message.reply_text(f"🔍 Searching for: {movie}")
+    return MAIN_MENU
 
-        # 3. partial
-        cur.execute("SELECT title, url FROM movies WHERE title ILIKE %s LIMIT 5", (f"%{text}%",))
-        rows = cur.fetchall()
-        if rows:
-            kb = [[InlineKeyboardButton(t, url=u)] for t, u in rows]
-            await update.message.reply_text("🔍 Select:", reply_markup=InlineKeyboardMarkup(kb))
-            return
+# Actual request logic
+async def handle_request(update: Update, _: ContextTypes.DEFAULT_TYPE):
+    movie = update.message.text.strip()
+    # dummy reply – plug your DB + admin notify here
+    await update.message.reply_text(f"✅ Request sent for: {movie}")
+    return MAIN_MENU
 
-        await update.message.reply_text(
-            "😔 Not found. Request it via *Request Movie* button.",
-            parse_mode="Markdown"
-        )
-    conn.close()
+# ❌ Ignore any text message that did NOT come from button press
+async def silent_fallback(update: Update, _: ContextTypes.DEFAULT_TYPE):
+    # completely silent – no reply at all
+    return MAIN_MENU
 
 # ---------- Main ----------
 def main():
-    threading.Thread(target=run_flask, daemon=True).start()   # keep Render happy
+    threading.Thread(target=run_flask, daemon=True).start()
+
     application = Application.builder().token(os.environ["TELEGRAM_BOT_TOKEN"]).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search))
-    logger.info("Bot polling...")
+
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("start", start)],
+        states={
+            MAIN_MENU: [
+                MessageHandler(filters.Regex("^🔍 Search Movies$"), search_pressed),
+                MessageHandler(filters.Regex("^🙋 Request Movie$"), request_pressed),
+            ],
+            SEARCHING: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_search)],
+            REQUESTING: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_request)],
+        },
+        fallbacks=[MessageHandler(filters.ALL, silent_fallback)],
+        allow_reentry=True,
+        per_user=True,
+        per_chat=True,
+    )
+
+    application.add_handler(conv_handler)
+    logger.info("Bot polling (silent unless button pressed)...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
