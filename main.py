@@ -9,7 +9,11 @@ logger = logging.getLogger(__name__)
 
 # ---------- Flask health stub (keeps Render happy) ----------
 app = Flask(__name__)
-@app.route("/")          def health(): return "Bot alive", 200
+
+@app.route("/")
+def health():
+    return "Bot alive", 200
+
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port, debug=False)
@@ -29,7 +33,8 @@ async def start(update: Update, _: ContextTypes.DEFAULT_TYPE):
 
 async def search(update: Update, _: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
-    if len(text) < 2: return
+    if len(text) < 2:
+        return
 
     conn = get_conn()
     with conn.cursor() as cur:
@@ -38,10 +43,11 @@ async def search(update: Update, _: ContextTypes.DEFAULT_TYPE):
         row = cur.fetchone()
         if row:
             title, url = row
-            await update.message.reply_text(f"🎉 Found *{title}*",
-                                            parse_mode="Markdown",
-                                            reply_markup=InlineKeyboardMarkup(
-                                                [[InlineKeyboardButton("📥 Download", url=url)]]))
+            await update.message.reply_text(
+                f"🎉 Found *{title}*",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📥 Download", url=url)]])
+            )
             return
 
         # 2. fuzzy
@@ -51,10 +57,11 @@ async def search(update: Update, _: ContextTypes.DEFAULT_TYPE):
         match, score = process.extractOne(text, titles) or ("", 0)
         if score >= 75:
             url = dict(all_movies)[match]
-            await update.message.reply_text(f"Did you mean *{match}*?",
-                                            parse_mode="Markdown",
-                                            reply_markup=InlineKeyboardMarkup(
-                                                [[InlineKeyboardButton("📥 Download", url=url)]]))
+            await update.message.reply_text(
+                f"Did you mean *{match}*?",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📥 Download", url=url)]])
+            )
             return
 
         # 3. partial
@@ -65,18 +72,20 @@ async def search(update: Update, _: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("🔍 Select:", reply_markup=InlineKeyboardMarkup(kb))
             return
 
-        await update.message.reply_text("😔 Not found. Request it via *Request Movie* button.",
-                                        parse_mode="Markdown")
+        await update.message.reply_text(
+            "😔 Not found. Request it via *Request Movie* button.",
+            parse_mode="Markdown"
+        )
     conn.close()
 
 # ---------- Main ----------
 def main():
     threading.Thread(target=run_flask, daemon=True).start()   # keep Render happy
-    app = Application.builder().token(os.environ["TELEGRAM_BOT_TOKEN"]).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search))
+    application = Application.builder().token(os.environ["TELEGRAM_BOT_TOKEN"]).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search))
     logger.info("Bot polling...")
-    app.run_polling(drop_pending_updates=True)
+    application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
