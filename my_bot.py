@@ -17,7 +17,7 @@ def get_db_connection():
     return psycopg2.connect(os.environ.get('DATABASE_URL'))
 
 # Admin user ID - अपना Telegram User ID यहाँ डालें
-ADMIN_USER_ID = 123456789  # यहाँ अपना User ID replace करें
+ADMIN_USER_ID = 6946322342  # यहाँ अपना User ID replace करें
 
 # Add movie command
 async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
