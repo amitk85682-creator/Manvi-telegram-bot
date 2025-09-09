@@ -139,7 +139,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error handling message: {e}")
         await update.message.reply_text("❌ Sorry, something went wrong. Please try again later.")
 
-async def main():
+def main():
     try:
         # Create application
         application = Application.builder().token(os.environ.get('TELEGRAM_BOT_TOKEN')).build()
@@ -149,15 +149,12 @@ async def main():
         application.add_handler(CommandHandler("addmovie", add_movie))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         
-        # Clear any existing webhooks
-        await application.bot.delete_webhook()
-        
         # Start the bot with drop_pending_updates
         logger.info("Bot starting...")
-        await application.run_polling(drop_pending_updates=True)
+        application.run_polling(drop_pending_updates=True)
         
     except Exception as e:
         logger.error(f"Failed to start bot: {e}")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
