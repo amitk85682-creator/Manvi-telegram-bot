@@ -1,41 +1,33 @@
-import os
-import logging
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters
+# File: main.py
+from telegram.ext import Application, CommandHandler, MessageHandler, filters
 from config import Config
-from database import init_db
-from bot_handlers import start, handle_message, handle_callback
-from fuzzy_search import search_movies
-
-# Set up logging
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+import database
+import ai_utils
+import bot_handlers
 
 def main():
-    # Initialize database
-    init_db()
-    
-    # Create application
+    # जाँच करें कि ज़रूरी वेरिएबल्स मौजूद हैं
+    if not Config.TELEGRAM_BOT_TOKEN or not Config.DATABASE_URL or not Config.ADMIN_ID:
+        print("FATAL: Missing essential environment variables.")
+        return
+
+    # कंपोनेंट्स को शुरू करें
+    database.init_db()
+    ai_utils.init_gemini()
+
+    # एप्लीकेशन बनाएँ
     application = Application.builder().token(Config.TELEGRAM_BOT_TOKEN).build()
 
-    # Add handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    application.add_handler(CallbackQueryHandler(handle_callback))
+    # हैंडलर्स जोड़ें
+    application.add_handler(CommandHandler("start", bot_handlers.start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot_handlers.handle_message))
+    
+    # एरर हैंडलर जोड़ें
+    application.add_error_handler(bot_handlers.error_handler)
 
-    # Start the bot
-    if os.environ.get('DYNO'):  # Heroku deployment
-        port = int(os.environ.get('PORT', 8443))
-        application.run_webhook(
-            listen="0.0.0.0",
-            port=port,
-            url_path=Config.TELEGRAM_BOT_TOKEN,
-            webhook_url=f"https://your-app-name.herokuapp.com/{Config.TELEGRAM_BOT_TOKEN}"
-        )
-    else:  # Local development
-        application.run_polling()
+    # बॉट शुरू करें
+    print("Bot is starting...")
+    application.run_polling()
 
 if __name__ == "__main__":
     main()
