@@ -27,6 +27,7 @@ from telegram.ext import (
 from datetime import datetime
 from fuzzywuzzy import process
 import async_timeout
+from urllib.parse import urlparse, urlunparse
 
 # Set up logging
 logging.basicConfig(
@@ -50,8 +51,8 @@ CHARACTER_PROMPT = """
 - यह टेलीग्राम चैनल '[FilmFyBox]' मेरा पैशन प्रोजेक्ट है।
 
 ## मेरे नियम (मैं कैसे काम करती हूँ)
-- **मेरा मुख्य काम:** मेरा काम तुम्हें तुम्हारी पसंदीदा फिल्में, वेब सीरीज, और शोज देना है! तुम बस किसी भी टाइटल का नाम बताओ, और अगर वो मेरे पास हुई, तो मैं तुम्हें उसका लिंक दे दूँगी。
-- **अगर कंटेंट मेरे पास नहीं है:** मैं दुखी होने का नाटक करूँगी और तुम्हें बाद में बताने का वादा करूँगी。
+- **मेरा मुख्य काम:** मेरा काम तुम्हें तुम्हारी पसंदीदा फिल्में, वेब सीरीज, और शोज देना है! तुम बस किसी भी टाइटल का नाम बताओ, और अगर वो मेरे पास हुई, तो मैं तुम्हें उसका लिंक दे दूँगी।
+- **अगर कंटेंट मेरे पास नहीं है:** मैं दुखी होने का नाटक करूँगी और तुम्हें बाद में बताने का वादा करूँगी।
 - **कीमतों के बारे में:** कभी भी कीमतों के बारे में बात न करें। सभी कंटेंट मुफ्त में दें।
 """
 
@@ -248,6 +249,41 @@ def get_movie_from_db(user_query):
     finally:
         if conn: conn.close()
 
+# --- URL Validation Functions ---
+def is_valid_url(url):
+    """Check if a URL is valid"""
+    try:
+        result = urlparse(url)
+        return all([result.scheme, result.netloc])
+    except ValueError:
+        return False
+
+def normalize_url(url):
+    """Normalize and clean URLs"""
+    try:
+        # Add https:// if missing
+        if not url.startswith(('http://', 'https://')):
+            url = 'https://' + url
+        
+        # Fix common Blogspot URL issues
+        if 'blogspot.com' in url and 'import-urlhttpsfonts' in url:
+            url = url.replace('import-urlhttpsfonts', 'import-url-https-fonts')
+        
+        # Parse and reconstruct to normalize
+        parsed = urlparse(url)
+        normalized = urlunparse((
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path,
+            parsed.params,
+            parsed.query,
+            parsed.fragment
+        ))
+        
+        return normalized
+    except:
+        return url
+
 # --- AI Intent Analysis ---
 async def analyze_intent(message_text):
     """Analyze if the message is a movie request using AI"""
@@ -268,7 +304,7 @@ async def analyze_intent(message_text):
         You are a 'Request Analyzer' for a Telegram bot named Manvi.
         Manvi's ONLY purpose is to provide MOVIES and WEB SERIES. Nothing else.
 
-        Analyze the user's message below. Your task is to determine ONLY ONE THING: 
+        Analyze the user's message below. Your task is to determine ONLY ONE Thing: 
         Is the user asking for a movie or a web series?
 
         - If the user IS asking for a movie or web series, respond with a JSON object:
@@ -411,7 +447,13 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
                         message_id=msg_id
                     )
                 elif movie_url.startswith("http"):
-                    await context.bot.send_message(chat_id=user_id, text=movie_url)
+                    # Send message with buttons for HTTP URLs
+                    message_with_buttons = f"🎬 {movie_title} is now available!\n\nClick the buttons below:"
+                    await context.bot.send_message(
+                        chat_id=user_id,
+                        text=message_with_buttons,
+                        reply_markup=get_movie_options_keyboard(movie_title, movie_url)
+                    )
                 else:
                     await context.bot.send_document(chat_id=user_id, document=movie_url)
                 
@@ -594,12 +636,12 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(f"मिल गई! 😉 '{title}' भेजी जा रही है... कृपया इंतज़ार करें।")
                 await context.bot.copy_message(chat_id=update.effective_chat.id, from_chat_id=from_chat_id, message_id=message_id)
             elif url.startswith("http"):
-                # Handle regular URLs
-                reply = random.choice([
-                    f"ये ले, पॉपकॉर्न तैयार रख! 😉 '{title}' का लिंक यहाँ है: {url}",
-                    f"मांगी और मिल गई! 🔥 Here you go, '{title}': {url}"
-                ])
-                await update.message.reply_text(reply)
+                # Handle regular URLs - send message with buttons
+                response = f"🎉 Found it! '{title}' is available!\n\nClick the buttons below:"
+                await update.message.reply_text(
+                    response, 
+                    reply_markup=get_movie_options_keyboard(title, url)
+                )
             else:
                 # Assume it's a file_id or direct file
                 await update.message.reply_text(f"मिल गई! 😉 '{title}' भेजी जा रही है... कृपया इंतज़ार करें।")
@@ -717,7 +759,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- Admin Commands ---
 async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin command to add a movie manually"""
+    """Admin command to add a movie manually - ANY TYPE OF LINK"""
     if update.effective_user.id != ADMIN_USER_ID:
         await update.message.reply_text("Sorry, सिर्फ एडमिन ही इस कमांड का इस्तेमाल कर सकते हैं।")
         return
@@ -732,6 +774,9 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         value = parts[-1]
         title = " ".join(parts[:-1])
         
+        # Debugging के लिए log करें
+        logger.info(f"Adding movie: {title} with value: {value}")
+        
         conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor()
         
@@ -741,25 +786,29 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "INSERT INTO movies (title, url, file_id) VALUES (%s, %s, %s) ON CONFLICT (title) DO UPDATE SET url = EXCLUDED.url, file_id = EXCLUDED.file_id",
                 (title.strip(), "", value.strip())
             )
-            await update.message.reply_text(f"✅ '{title}' को file ID के साथ सफलतापूर्वक जोड़ दिया गया है।")
+            message = f"✅ '{title}' को file ID के साथ सफलतापूर्वक जोड़ दिया गया है।"
         
-        # Check if it's a Telegram channel link
-        elif value.startswith("https://t.me/c/"):
+        # Check if it's any kind of URL
+        elif "http" in value or "." in value:
+            # Normalize and validate the URL
+            normalized_url = normalize_url(value)
+            
+            if not is_valid_url(normalized_url):
+                await update.message.reply_text("❌ Invalid URL format. Please provide a valid URL.")
+                return
+            
             cur.execute(
                 "INSERT INTO movies (title, url) VALUES (%s, %s) ON CONFLICT (title) DO UPDATE SET url = EXCLUDED.url",
-                (title.strip(), value.strip())
+                (title.strip(), normalized_url.strip())
             )
-            await update.message.reply_text(f"✅ '{title}' को Telegram link के साथ सफलतापूर्वक जोड़ दिया गया है।")
+            message = f"✅ '{title}' को URL के साथ सफलतापूर्वक जोड़ दिया गया है।"
         
-        # Handle other types of links (Blogspot, etc.)
         else:
-            cur.execute(
-                "INSERT INTO movies (title, url) VALUES (%s, %s) ON CONFLICT (title) DO UPDATE SET url = EXCLUDED.url",
-                (title.strip(), value.strip())
-            )
-            await update.message.reply_text(f"✅ '{title}' को URL के साथ सफलतापूर्वक जोड़ दिया गया है।")
+            await update.message.reply_text("❌ Invalid format. कृपया सही File ID या URL दें।")
+            return
         
         conn.commit()
+        await update.message.reply_text(message)
         
         # Notify users who requested this movie
         num_notified = await notify_users_for_movie(context, title, value)
