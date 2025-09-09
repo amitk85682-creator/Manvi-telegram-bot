@@ -1,13 +1,19 @@
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
 
-def create_movie_keyboard(title, url):
+def get_main_menu_keyboard():
+    keyboard = [
+        ["🔍 Search Movies"],
+        ["🙋 Request Movie"]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
+
+def get_movie_keyboard(title, url):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎬 Watch Now", url=url)],
-        [InlineKeyboardButton("⭐ Rate This Movie", callback_data=f"rate_{title}")]
+        [InlineKeyboardButton("📥 Download", url=url)]
     ])
 
-def create_movie_options(movies):
+def get_movie_options(movies):
     keyboard = []
     for title, url in movies:
-        keyboard.append([InlineKeyboardButton(title, callback_data=f"movie_{url}")])
+        keyboard.append([InlineKeyboardButton(title, url=url)])
     return InlineKeyboardMarkup(keyboard)
