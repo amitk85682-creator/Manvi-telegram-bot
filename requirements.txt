@@ -1,7 +1,7 @@
-python-telegram-bot==20.7
-psycopg2-binary==2.9.10
-Flask==2.3.3
-thefuzz[speedup]==0.22.1   # drops Levenshtein
-google-generativeai==0.3.2
-requests==2.31.0
-beautifulsoup4==4.12.2
+python-telegram-bot
+google-generativeai
+Flask
+psycopg2-binary
+google-api-python-client
+requests
+beautifulsoup4
