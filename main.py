@@ -26,6 +26,7 @@ from telegram.ext import (
 )
 from datetime import datetime
 from fuzzywuzzy import process
+import async_timeout
 
 # Set up logging
 logging.basicConfig(
@@ -79,7 +80,7 @@ def setup_database():
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor()
-        cur.execute('CREATE TABLE IF NOT EXISTS movies (id SERIAL PRIMARY KEY, title TEXT NOT NULL UNIQUE, url TEXT NOT NULL);')
+        cur.execute('CREATE TABLE IF NOT EXISTS movies (id SERIAL PRIMARY KEY, title TEXT NOT NULL UNIQUE, url TEXT NOT NULL, file_id TEXT);')
         
         # Add last_sync timestamp for incremental updates
         cur.execute('CREATE TABLE IF NOT EXISTS sync_info (id SERIAL PRIMARY KEY, last_sync TIMESTAMP DEFAULT CURRENT_TIMESTAMP);')
@@ -107,6 +108,11 @@ def setup_database():
             END IF;
             END $$;
         ''')
+        
+        # Add indexes for better performance
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_movies_title ON movies (title);')
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_user_requests_movie_title ON user_requests (movie_title);')
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_user_requests_user_id ON user_requests (user_id);')
         
         conn.commit()
         cur.close()
@@ -196,13 +202,13 @@ def get_movie_from_db(user_query):
         cur = conn.cursor()
         
         # First try exact match
-        cur.execute("SELECT title, url FROM movies WHERE LOWER(title) = LOWER(%s) LIMIT 1", (user_query,))
+        cur.execute("SELECT title, url, file_id FROM movies WHERE LOWER(title) = LOWER(%s) LIMIT 1", (user_query,))
         movie = cur.fetchone()
         if movie:
             return movie
         
         # Then try partial match with word boundaries
-        cur.execute("SELECT title, url FROM movies WHERE title ILIKE %s LIMIT 5", ('%' + user_query + '%',))
+        cur.execute("SELECT title, url, file_id FROM movies WHERE title ILIKE %s LIMIT 5", ('%' + user_query + '%',))
         movies = cur.fetchall()
         
         if movies:
@@ -229,6 +235,11 @@ async def analyze_intent(message_text):
         return {"is_request": False, "content_title": None}
     
     try:
+        # Simple keyword check before using AI to save time
+        movie_keywords = ["movie", "film", "series", "watch", "download", "see", "चलचित्र", "फिल्म", "सीरीज"]
+        if not any(keyword in message_text.lower() for keyword in movie_keywords):
+            return {"is_request": False, "content_title": None}
+        
         # Configure the AI with a strict prompt for intent analysis
         genai.configure(api_key=GEMINI_API_KEY)
         model = genai.GenerativeModel(model_name='gemini-1.5-flash')
@@ -296,6 +307,10 @@ flask_app = Flask('')
 def home():
     return "Bot is running!"
 
+@flask_app.route('/health')
+def health():
+    return "OK", 200
+
 @flask_app.route(f'/{UPDATE_SECRET_CODE}')
 def trigger_update():
     result = update_movies_in_db()
@@ -361,7 +376,12 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
                 
                 await context.bot.send_message(chat_id=user_id, text=notification_text)
                 
-                if movie_url.startswith("https://t.me/c/"):
+                # Check if we have a file_id in the database
+                movie_data = get_movie_from_db(movie_title)
+                if movie_data and len(movie_data) > 2 and movie_data[2]:  # file_id exists
+                    file_id = movie_data[2]
+                    await context.bot.send_document(chat_id=user_id, document=file_id)
+                elif movie_url.startswith("https://t.me/c/"):
                     parts = movie_url.split('/')
                     from_chat_id = int("-100" + parts[-2])
                     msg_id = int(parts[-1])
@@ -477,154 +497,209 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle main menu options"""
-    query = update.message.text
-    
-    if query == '🔍 Search Movies':
-        await update.message.reply_text("Great! Tell me the name of the movie you want to search for.")
-        return SEARCHING
-        
-    elif query == '🙋 Request Movie':
-        await update.message.reply_text("Okay, you've chosen to request a new movie. Please tell me the name of the movie you want me to add.")
-        return REQUESTING
-        
-    elif query == '📊 My Stats':
-        # Implement stats functionality
-        user_id = update.effective_user.id
-        try:
-            conn = psycopg2.connect(DATABASE_URL)
-            cur = conn.cursor()
-            cur.execute("SELECT COUNT(*) FROM user_requests WHERE user_id = %s", (user_id,))
-            request_count = cur.fetchone()[0]
+    try:
+        async with async_timeout.timeout(10):
+            query = update.message.text
             
-            cur.execute("SELECT COUNT(*) FROM user_requests WHERE user_id = %s AND notified = TRUE", (user_id,))
-            fulfilled_count = cur.fetchone()[0]
-            
-            stats_text = f"""
-            📊 Your Stats:
-            - Total Requests: {request_count}
-            - Fulfilled Requests: {fulfilled_count}
-            """
-            await update.message.reply_text(stats_text)
-        except Exception as e:
-            logger.error(f"Error getting stats: {e}")
-            await update.message.reply_text("Sorry, couldn't retrieve your stats at the moment.")
-        finally:
-            if conn: conn.close()
-        
-        return MAIN_MENU
-        
-    elif query == '❓ Help':
-        help_text = """
-        🤖 How to use Manvi Bot:
-        
-        🔍 Search Movies: Find movies in our collection
-        🙋 Request Movie: Request a new movie to be added
-        📊 My Stats: View your request statistics
-        
-        Just use the buttons below to navigate!
-        """
-        await update.message.reply_text(help_text)
+            if query == '🔍 Search Movies':
+                await update.message.reply_text("Great! Tell me the name of the movie you want to search for.")
+                return SEARCHING
+                
+            elif query == '🙋 Request Movie':
+                await update.message.reply_text("Okay, you've chosen to request a new movie. Please tell me the name of the movie you want me to add.")
+                return REQUESTING
+                
+            elif query == '📊 My Stats':
+                # Implement stats functionality
+                user_id = update.effective_user.id
+                try:
+                    conn = psycopg2.connect(DATABASE_URL)
+                    cur = conn.cursor()
+                    cur.execute("SELECT COUNT(*) FROM user_requests WHERE user_id = %s", (user_id,))
+                    request_count = cur.fetchone()[0]
+                    
+                    cur.execute("SELECT COUNT(*) FROM user_requests WHERE user_id = %s AND notified = TRUE", (user_id,))
+                    fulfilled_count = cur.fetchone()[0]
+                    
+                    stats_text = f"""
+                    📊 Your Stats:
+                    - Total Requests: {request_count}
+                    - Fulfilled Requests: {fulfilled_count}
+                    """
+                    await update.message.reply_text(stats_text)
+                except Exception as e:
+                    logger.error(f"Error getting stats: {e}")
+                    await update.message.reply_text("Sorry, couldn't retrieve your stats at the moment.")
+                finally:
+                    if conn: conn.close()
+                
+                return MAIN_MENU
+                
+            elif query == '❓ Help':
+                help_text = """
+                🤖 How to use Manvi Bot:
+                
+                🔍 Search Movies: Find movies in our collection
+                🙋 Request Movie: Request a new movie to be added
+                📊 My Stats: View your request statistics
+                
+                Just use the buttons below to navigate!
+                """
+                await update.message.reply_text(help_text)
+                return MAIN_MENU
+    except asyncio.TimeoutError:
+        logger.error("Main menu processing timed out")
+        await update.message.reply_text("Sorry, this is taking too long. Please try again.")
         return MAIN_MENU
 
 async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle movie search"""
-    user_message = update.message.text.strip()
-    
-    # First analyze intent
-    intent = await analyze_intent(user_message)
-    
-    if not intent["is_request"]:
-        await update.message.reply_text("That doesn't seem to be a movie title. Please provide a valid movie name to search for.")
-        return SEARCHING
-    
-    movie_title = intent["content_title"]
-    movie_found = get_movie_from_db(movie_title)
-    
-    if movie_found:
-        title, url = movie_found
-        response = f"🎉 Found it! '{title}' is available!\n\nClick below to watch or download:"
-        await update.message.reply_text(
-            response, 
-            reply_markup=get_movie_options_keyboard(title, url)
-        )
-    else:
-        response = f"😔 Sorry, '{movie_title}' is not in my collection right now. Would you like to request it?"
-        keyboard = [[InlineKeyboardButton("✅ Yes, Request It", callback_data=f"request_{movie_title}")]]
-        await update.message.reply_text(
-            response, 
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-    
-    await update.message.reply_text("What would you like to do next?", reply_markup=get_main_keyboard())
-    return MAIN_MENU
+    try:
+        async with async_timeout.timeout(15):
+            user_message = update.message.text.strip()
+            
+            # First analyze intent
+            intent = await analyze_intent(user_message)
+            
+            if not intent["is_request"]:
+                await update.message.reply_text("That doesn't seem to be a movie title. Please provide a valid movie name to search for.")
+                return SEARCHING
+            
+            movie_title = intent["content_title"]
+            movie_found = get_movie_from_db(movie_title)
+            
+            if movie_found:
+                title, url, file_id = movie_found
+                
+                # If we have a file_id, send the file directly
+                if file_id:
+                    await update.message.reply_text(f"मिल गई! 😉 '{title}' भेजी जा रही है... कृपया इंतज़ार करें।")
+                    await context.bot.send_document(chat_id=update.effective_chat.id, document=file_id)
+                elif url.startswith("https://t.me/c/"):
+                    # Handle telegram channel links
+                    parts = url.split('/')
+                    from_chat_id = int("-100" + parts[-2])
+                    message_id = int(parts[-1])
+                    await update.message.reply_text(f"मिल गई! 😉 '{title}' भेजी जा रही है... कृपया इंतज़ार करें।")
+                    await context.bot.copy_message(chat_id=update.effective_chat.id, from_chat_id=from_chat_id, message_id=message_id)
+                elif url.startswith("http"):
+                    # Handle regular URLs
+                    reply = random.choice([
+                        f"ये ले, पॉपकॉर्न तैयार रख! 😉 '{title}' का लिंक यहाँ है: {url}",
+                        f"मांगी और मिल गई! 🔥 Here you go, '{title}': {url}"
+                    ])
+                    await update.message.reply_text(reply)
+                else:
+                    # Assume it's a file_id or direct file
+                    await update.message.reply_text(f"मिल गई! 😉 '{title}' भेजी जा रही है... कृपया इंतज़ार करें।")
+                    await context.bot.send_document(chat_id=update.effective_chat.id, document=url)
+            else:
+                # Store the user's request
+                user = update.effective_user
+                store_user_request(
+                    user.id, 
+                    user.username, 
+                    user.first_name, 
+                    movie_title,
+                    update.effective_chat.id if update.effective_chat.type != "private" else None,
+                    update.message.message_id
+                )
+                
+                response = f"😔 Sorry, '{movie_title}' is not in my collection right now. Would you like to request it?"
+                keyboard = [[InlineKeyboardButton("✅ Yes, Request It", callback_data=f"request_{movie_title}")]]
+                await update.message.reply_text(
+                    response, 
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+            
+            await update.message.reply_text("What would you like to do next?", reply_markup=get_main_keyboard())
+            return MAIN_MENU
+    except asyncio.TimeoutError:
+        logger.error("Search movies processing timed out")
+        await update.message.reply_text("Sorry, the search is taking too long. Please try again.")
+        return MAIN_MENU
 
 async def request_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle movie requests"""
-    user_message = update.message.text.strip()
-    user = update.effective_user
-    
-    # First analyze intent
-    intent = await analyze_intent(user_message)
-    
-    if not intent["is_request"]:
-        await update.message.reply_text("That doesn't seem to be a movie title. Please provide a valid movie name to request.")
-        return REQUESTING
-    
-    movie_title = intent["content_title"]
-    
-    # Store the request
-    store_user_request(
-        user.id, 
-        user.username, 
-        user.first_name, 
-        movie_title,
-        update.effective_chat.id if update.effective_chat.type != "private" else None,
-        update.message.message_id
-    )
-    
-    # Send admin notification
-    group_info = f"{update.effective_chat.title} (ID: {update.effective_chat.id})" if update.effective_chat.type != "private" else None
-    await send_admin_notification(context, user, movie_title, group_info)
-    
-    response = f"✅ Got it! Your request for '{movie_title}' has been sent to the admin. Thanks for helping improve our collection!"
-    await update.message.reply_text(response)
-    
-    await update.message.reply_text("What would you like to do next?", reply_markup=get_main_keyboard())
-    return MAIN_MENU
+    try:
+        async with async_timeout.timeout(10):
+            user_message = update.message.text.strip()
+            user = update.effective_user
+            
+            # First analyze intent
+            intent = await analyze_intent(user_message)
+            
+            if not intent["is_request"]:
+                await update.message.reply_text("That doesn't seem to be a movie title. Please provide a valid movie name to request.")
+                return REQUESTING
+            
+            movie_title = intent["content_title"]
+            
+            # Store the request
+            store_user_request(
+                user.id, 
+                user.username, 
+                user.first_name, 
+                movie_title,
+                update.effective_chat.id if update.effective_chat.type != "private" else None,
+                update.message.message_id
+            )
+            
+            # Send admin notification
+            group_info = f"{update.effective_chat.title} (ID: {update.effective_chat.id})" if update.effective_chat.type != "private" else None
+            await send_admin_notification(context, user, movie_title, group_info)
+            
+            response = f"✅ Got it! Your request for '{movie_title}' has been sent to the admin. Thanks for helping improve our collection!"
+            await update.message.reply_text(response)
+            
+            await update.message.reply_text("What would you like to do next?", reply_markup=get_main_keyboard())
+            return MAIN_MENU
+    except asyncio.TimeoutError:
+        logger.error("Request movie processing timed out")
+        await update.message.reply_text("Sorry, this is taking too long. Please try again.")
+        return MAIN_MENU
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle inline button callbacks"""
-    query = update.callback_query
-    await query.answer()
-    
-    if query.data.startswith("request_"):
-        movie_title = query.data.replace("request_", "")
-        user = update.effective_user
-        
-        # Store the request
-        store_user_request(
-            user.id, 
-            user.username, 
-            user.first_name, 
-            movie_title,
-            update.effective_chat.id if update.effective_chat.type != "private" else None,
-            update.callback_query.message.message_id
-        )
-        
-        # Send admin notification
-        await send_admin_notification(context, user, movie_title)
-        
-        response = f"✅ Got it! Your request for '{movie_title}' has been sent to the admin. Thanks for helping improve our collection!"
-        await query.edit_message_text(response)
-    
-    elif query.data.startswith("download_"):
-        movie_title = query.data.replace("download_", "")
-        movie_found = get_movie_from_db(movie_title)
-        
-        if movie_found:
-            title, url = movie_found
-            # Implement download logic here
-            await query.message.reply_text(f"Download options for '{title}':\n{url}")
+    try:
+        async with async_timeout.timeout(10):
+            query = update.callback_query
+            await query.answer()
+            
+            if query.data.startswith("request_"):
+                movie_title = query.data.replace("request_", "")
+                user = update.effective_user
+                
+                # Store the request
+                store_user_request(
+                    user.id, 
+                    user.username, 
+                    user.first_name, 
+                    movie_title,
+                    update.effective_chat.id if update.effective_chat.type != "private" else None,
+                    update.callback_query.message.message_id
+                )
+                
+                # Send admin notification
+                await send_admin_notification(context, user, movie_title)
+                
+                response = f"✅ Got it! Your request for '{movie_title}' has been sent to the admin. Thanks for helping improve our collection!"
+                await query.edit_message_text(response)
+            
+            elif query.data.startswith("download_"):
+                movie_title = query.data.replace("download_", "")
+                movie_found = get_movie_from_db(movie_title)
+                
+                if movie_found:
+                    title, url, file_id = movie_found
+                    if file_id:
+                        await query.message.reply_document(document=file_id)
+                    elif url.startswith("http"):
+                        await query.message.reply_text(f"Download options for '{title}':\n{url}")
+                    else:
+                        await query.message.reply_document(document=url)
+    except asyncio.TimeoutError:
+        logger.error("Button callback processing timed out")
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Cancel the current operation"""
@@ -638,62 +713,72 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Sorry, सिर्फ एडमिन ही इस कमांड का इस्तेमाल कर सकते हैं।")
         return
     
-    conn = None
-    cur = None
     try:
-        parts = context.args
-        if len(parts) < 2:
-            await update.message.reply_text("गलत फॉर्मेट! ऐसे इस्तेमाल करें:\n/addmovie टाइटल का नाम [File ID या Link]")
-            return
-        
-        value = parts[-1]
-        title = " ".join(parts[:-1])
-        
-        conn = psycopg2.connect(DATABASE_URL)
-        cur = conn.cursor()
-        cur.execute("INSERT INTO movies (title, url) VALUES (%s, %s) ON CONFLICT (title) DO UPDATE SET url = EXCLUDED.url;", 
-                    (title.strip(), value.strip()))
-        conn.commit()
-        
-        await update.message.reply_text(f"बढ़िया! '{title}' को डेटाबेस में सफलतापूर्वक जोड़ दिया गया है। ✅")
-        
-        # Notify users who requested this movie
-        num_notified = await notify_users_for_movie(context, title, value)
-        await notify_in_group(context, title)
-        
-        await update.message.reply_text(f"कुल {num_notified} users को notify किया गया है।")
+        async with async_timeout.timeout(15):
+            parts = context.args
+            if len(parts) < 2:
+                await update.message.reply_text("गलत फॉर्मेट! ऐसे इस्तेमाल करें:\n/addmovie टाइटल का नाम [File ID या Link]")
+                return
             
+            value = parts[-1]
+            title = " ".join(parts[:-1])
+            
+            conn = psycopg2.connect(DATABASE_URL)
+            cur = conn.cursor()
+            
+            # Check if we're adding a file_id (starts with "BQAC")
+            if value.startswith("BQAC") or value.startswith("BAAC") or value.startswith("CAAC"):
+                cur.execute("INSERT INTO movies (title, url, file_id) VALUES (%s, %s, %s) ON CONFLICT (title) DO UPDATE SET url = EXCLUDED.url, file_id = EXCLUDED.file_id;", 
+                            (title.strip(), "", value.strip()))
+            else:
+                cur.execute("INSERT INTO movies (title, url) VALUES (%s, %s) ON CONFLICT (title) DO UPDATE SET url = EXCLUDED.url;", 
+                            (title.strip(), value.strip()))
+            
+            conn.commit()
+            
+            await update.message.reply_text(f"बढ़िया! '{title}' को डेटाबेस में सफलतापूर्वक जोड़ दिया गया है। ✅")
+            
+            # Notify users who requested this movie
+            num_notified = await notify_users_for_movie(context, title, value)
+            await notify_in_group(context, title)
+            
+            await update.message.reply_text(f"कुल {num_notified} users को notify किया गया है。")
+                
     except Exception as e:
         logger.error(f"Error in add_movie command: {e}")
         await update.message.reply_text(f"एक एरर आया: {e}")
+    except asyncio.TimeoutError:
+        logger.error("Add movie processing timed out")
+        await update.message.reply_text("Sorry, adding the movie took too long. Please try again.")
     finally:
-        if cur: cur.close()
-        if conn: conn.close()
+        if 'conn' in locals():
+            conn.close()
 
 async def notify_manually(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Manually notify users about a movie"""
     if update.effective_user.id != ADMIN_USER_ID:
-        await update.message.reply_text("Sorry, सिर्फ एडमिन ही इस कमांड का इस्तेमाल कर सकते हैं।")
+        await update.message.reply_text("Sorry, सिर्फ एडमिन ही इस कमांड का इस्तेमाल कर सकते हैं。")
         return
     
     try:
-        if not context.args:
-            await update.message.reply_text("Usage: /notify <movie_title>")
-            return
-        
-        movie_title = " ".join(context.args)
-        movie_found = get_movie_from_db(movie_title)
-        
-        if movie_found:
-            title, value = movie_found
-            num_notified = await notify_users_for_movie(context, title, value)
-            await update.message.reply_text(f"{num_notified} users को '{title}' के लिए notify किया गया है।")
-            await notify_in_group(context, title)
-        else:
-            await update.message.reply_text(f"'{movie_title}' डेटाबेस में नहीं मिली।")
-    except Exception as e:
-        logger.error(f"Error in notify_manually: {e}")
-        await update.message.reply_text(f"एक एरर आया: {e}")
+        async with async_timeout.timeout(15):
+            if not context.args:
+                await update.message.reply_text("Usage: /notify <movie_title>")
+                return
+            
+            movie_title = " ".join(context.args)
+            movie_found = get_movie_from_db(movie_title)
+            
+            if movie_found:
+                title, value, file_id = movie_found
+                num_notified = await notify_users_for_movie(context, title, value)
+                await update.message.reply_text(f"{num_notified} users को '{title}' के लिए notify किया गया है。")
+                await notify_in_group(context, title)
+            else:
+                await update.message.reply_text(f"'{movie_title}' डेटाबेस में नहीं मिली。")
+    except asyncio.TimeoutError:
+        logger.error("Notify manually processing timed out")
+        await update.message.reply_text("Sorry, the notification process took too long. Please try again.")
 
 # --- Error Handler ---
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -723,7 +808,7 @@ def run_bot():
     except RuntimeError:
         return
         
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).read_timeout(30).write_timeout(30).build()
 
     # Add conversation handler with the states
     conv_handler = ConversationHandler(
