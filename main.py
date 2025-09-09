@@ -26,6 +26,7 @@ from telegram.ext import (
 )
 from datetime import datetime
 from fuzzywuzzy import process
+import async_timeout
 
 # Set up logging
 logging.basicConfig(
@@ -49,8 +50,8 @@ CHARACTER_PROMPT = """
 - यह टेलीग्राम चैनल '[FilmFyBox]' मेरा पैशन प्रोजेक्ट है।
 
 ## मेरे नियम (मैं कैसे काम करती हूँ)
-- **मेरा मुख्य काम:** मेरा काम तुम्हें तुम्हारी पसंदीदा फिल्में, वेब सीरीज, और शोज देना है! तुम बस किसी भी टाइटल का नाम बताओ, और अगर वो मेरे पास हुई, तो मैं तुम्हें उसका लिंक दे दूँगी।
-- **अगर कंटेंट मेरे पास नहीं है:** मैं दुखी होने का नाटक करूँगी और तुम्हें बाद में बताने का वादा करूँगी।
+- **मेरा मुख्य काम:** मेरा काम तुम्हें तुम्हारी पसंदीदा फिल्में, वेब सीरीज, और शोज देना है! तुम बस किसी भी टाइटल का नाम बताओ, और अगर वो मेरे पास हुई, तो मैं तुम्हें उसका लिंक दे दूँगी。
+- **अगर कंटेंट मेरे पास नहीं है:** मैं दुखी होने का नाटक करूँगी और तुम्हें बाद में बताने का वादा करूँगी。
 - **कीमतों के बारे में:** कभी भी कीमतों के बारे में बात न करें। सभी कंटेंट मुफ्त में दें।
 """
 
@@ -251,7 +252,7 @@ def get_movie_from_db(user_query):
 async def analyze_intent(message_text):
     """Analyze if the message is a movie request using AI"""
     if not GEMINI_API_KEY:
-        return {"is_request": False, "content_title": None}
+        return {"is_request": True, "content_title": message_text}
     
     try:
         # Simple keyword check before using AI to save time
@@ -291,7 +292,7 @@ async def analyze_intent(message_text):
             
     except Exception as e:
         logger.error(f"Error in AI intent analysis: {e}")
-        return {"is_request": False, "content_title": None}
+        return {"is_request": True, "content_title": message_text}
 
 # --- Admin Notification Function ---
 async def send_admin_notification(context, user, movie_title, group_info=None):
@@ -575,15 +576,8 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user_message = update.message.text.strip()
         
-        # First analyze intent
-        intent = await analyze_intent(user_message)
-        
-        if not intent["is_request"]:
-            await update.message.reply_text("That doesn't seem to be a movie title. Please provide a valid movie name to search for.")
-            return SEARCHING
-        
-        movie_title = intent["content_title"]
-        movie_found = get_movie_from_db(movie_title)
+        # First try to find movie in database
+        movie_found = get_movie_from_db(user_message)
         
         if movie_found:
             title, url, file_id = movie_found
@@ -617,13 +611,13 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 user.id, 
                 user.username, 
                 user.first_name, 
-                movie_title,
+                user_message,
                 update.effective_chat.id if update.effective_chat.type != "private" else None,
                 update.message.message_id
             )
             
-            response = f"😔 Sorry, '{movie_title}' is not in my collection right now. Would you like to request it?"
-            keyboard = [[InlineKeyboardButton("✅ Yes, Request It", callback_data=f"request_{movie_title}")]]
+            response = f"😔 Sorry, '{user_message}' is not in my collection right now. Would you like to request it?"
+            keyboard = [[InlineKeyboardButton("✅ Yes, Request It", callback_data=f"request_{user_message}")]]
             await update.message.reply_text(
                 response, 
                 reply_markup=InlineKeyboardMarkup(keyboard)
