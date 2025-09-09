@@ -1,7 +1,8 @@
+# File: config.py
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv() # .env फ़ाइल से वेरिएबल्स लोड करने के लिए
 
 class Config:
     TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
