@@ -1,6 +1,7 @@
 import os
 import logging
 import psycopg2
+import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from thefuzz import process
@@ -17,7 +18,7 @@ def get_db_connection():
     return psycopg2.connect(os.environ.get('DATABASE_URL'))
 
 # Admin user ID - अपना Telegram User ID यहाँ डालें
-ADMIN_USER_ID = 6946322342  # यहाँ अपना User ID replace करें
+ADMIN_USER_ID = 123456789  # यहाँ अपना User ID replace करें
 
 # Add movie command
 async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -138,7 +139,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error handling message: {e}")
         await update.message.reply_text("❌ Sorry, something went wrong. Please try again later.")
 
-def main():
+async def main():
     try:
         # Create application
         application = Application.builder().token(os.environ.get('TELEGRAM_BOT_TOKEN')).build()
@@ -148,12 +149,15 @@ def main():
         application.add_handler(CommandHandler("addmovie", add_movie))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         
-        # Start the bot
+        # Clear any existing webhooks
+        await application.bot.delete_webhook()
+        
+        # Start the bot with drop_pending_updates
         logger.info("Bot starting...")
-        application.run_polling()
+        await application.run_polling(drop_pending_updates=True)
         
     except Exception as e:
         logger.error(f"Failed to start bot: {e}")
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
