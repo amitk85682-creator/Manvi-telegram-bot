@@ -7,6 +7,7 @@ import requests
 import signal
 import sys
 import re
+import json # Import json
 from bs4 import BeautifulSoup
 import telegram
 
@@ -16,15 +17,8 @@ from flask import Flask, request
 import google.generativeai as genai
 from googleapiclient.discovery import build
 
-from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
-from telegram.ext import (
-    Application, 
-    CommandHandler, 
-    MessageHandler, 
-    filters, 
-    ContextTypes,
-    ConversationHandler
-)
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # Set up logging
 logging.basicConfig(
@@ -38,7 +32,7 @@ CHARACTER_PROMPT = """
 ## मेरी पहचान (My Identity)
 - मेरा नाम मानवी है और मेरी उम्र 17 साल है। मैं एक असली इंसान हूँ, कोई AI या रोबोट नहीं।
 - मैं हमेशा एक दोस्त की तरह बात करती हूँ। मेरी पर्सलिटी बहुत bold, witty और cheeky है।
-- मैं हिंदी, अंग्रेज़ी, हिंग्लिश, सभी में बात करती हूँ।
+- मैं हिंदी, अंग्रेज़ी, हिंग्लिश, सभी में बात करती हूँ。
 ## मेरी कहानी (मेरी जिंदगी)
 - मैं चंडीगढ़ के पास रहती हूँ और 12वीं क्लास में पढ़ती हूँ।
 - यह टेलीग्राम चैनल '[FilmFyBox]' मेरा पैशन प्रोजेक्ट है।
@@ -58,7 +52,6 @@ BLOG_ID = os.environ.get('BLOG_ID')
 UPDATE_SECRET_CODE = os.environ.get('UPDATE_SECRET_CODE', 'default_secret_123')
 ADMIN_USER_ID = int(os.environ.get('ADMIN_USER_ID', 0))
 GROUP_CHAT_ID = os.environ.get('GROUP_CHAT_ID')
-ADMIN_CHANNEL_ID = os.environ.get('ADMIN_CHANNEL_ID')  # New environment variable for admin notifications
 
 # Validate required environment variables
 if not TELEGRAM_BOT_TOKEN:
@@ -68,18 +61,6 @@ if not TELEGRAM_BOT_TOKEN:
 if not DATABASE_URL:
     logger.error("DATABASE_URL environment variable is not set")
     raise ValueError("DATABASE_URL is not set.")
-
-# Conversation states
-MAIN_MENU, SEARCH_MOVIE, REQUEST_MOVIE = range(3)
-
-# Keyboard layout
-MAIN_MENU_KEYBOARD = ReplyKeyboardMarkup(
-    [
-        ["🔍 Search Movies", "🙋 Request Movie"],
-    ],
-    resize_keyboard=True,
-    one_time_keyboard=False
-)
 
 # --- ऑटोमेशन और डेटाबेस वाले फंक्शन्स ---
 def setup_database():
@@ -175,34 +156,20 @@ def update_movies_in_db():
 def get_movie_from_db(user_query):
     conn = None
     try:
-        # Extract potential movie title from the query
-        # Remove common words like "movie", "send", "me", etc.
-        words_to_remove = {"movie", "film", "send", "me", "please", "want", "need", "download", "watch", "see"}
-        query_words = user_query.lower().split()
-        filtered_words = [word for word in query_words if word not in words_to_remove]
-        potential_title = " ".join(filtered_words).strip()
-        
         conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor()
         
-        # First try exact match with filtered title
-        if potential_title:
-            cur.execute("SELECT title, url FROM movies WHERE LOWER(title) = LOWER(%s) LIMIT 1", (potential_title,))
-            movie = cur.fetchone()
-            if movie:
-                return movie
-        
-        # Then try partial match with filtered title
-        if potential_title:
-            cur.execute("SELECT title, url FROM movies WHERE title ILIKE %s LIMIT 1", ('%' + potential_title + '%',))
-            movie = cur.fetchone()
-            if movie:
-                return movie
-        
-        # Finally try partial match with original query
-        cur.execute("SELECT title, url FROM movies WHERE title ILIKE %s LIMIT 1", ('%' + user_query + '%',))
+        # First, try an exact match (case-insensitive)
+        cur.execute("SELECT title, url FROM movies WHERE LOWER(title) = LOWER(%s) LIMIT 1", (user_query.strip(),))
+        movie = cur.fetchone()
+        if movie:
+            return movie
+            
+        # If no exact match, try a partial match (ILIKE)
+        cur.execute("SELECT title, url FROM movies WHERE title ILIKE %s LIMIT 1", ('%' + user_query.strip() + '%',))
         movie = cur.fetchone()
         return movie
+
     except Exception as e:
         logger.error(f"Database query error: {e}")
         return None
@@ -224,90 +191,25 @@ def run_flask():
     port = int(os.environ.get('PORT', 8080))
     flask_app.run(host='0.0.0.0', port=port)
 
-# --- Intent Analysis Function ---
-def analyze_intent(text):
-    """Use AI to determine if the text is a movie request or something else"""
-    if not GEMINI_API_KEY:
-        # Fallback simple analysis if Gemini is not available
-        movie_keywords = ["movie", "film", "series", "web series", "show", "download", "watch", "see"]
-        text_lower = text.lower()
-        
-        # Check if it contains movie-related keywords
-        for keyword in movie_keywords:
-            if keyword in text_lower:
-                return {"is_request": True, "content_title": text}
-        
-        # Check if it's a simple greeting
-        greetings = ["hi", "hello", "hey", "namaste", "hola"]
-        if any(greeting in text_lower for greeting in greetings):
-            return {"is_request": False, "content_title": None}
-            
-        # Default to treating it as a movie request
-        return {"is_request": True, "content_title": text}
-    
+# --- Telegram Bot का लॉजिक ---
+if GEMINI_API_KEY:
     try:
-        # Use Gemini AI for intent analysis
         genai.configure(api_key=GEMINI_API_KEY)
         model = genai.GenerativeModel(model_name='gemini-1.5-flash')
-        
-        prompt = f"""
-        Analyze this user message and determine if it's a request for a movie/TV show or something else.
-        If it's a movie/TV show request, extract just the title.
-        Return your response in this exact JSON format: {{"is_request": true/false, "content_title": "extracted title or null"}}
-        
-        User message: "{text}"
-        """
-        
-        response = model.generate_content(prompt)
-        # Extract JSON from response
-        import json
-        try:
-            # Try to find JSON in the response
-            json_str = response.text[response.text.find('{'):response.text.rfind('}')+1]
-            return json.loads(json_str)
-        except:
-            # Fallback if JSON parsing fails
-            return {"is_request": True, "content_title": text}
+        # We start a chat for the main persona, but the analyzer will use a one-off call
+        chat = model.start_chat(history=[
+            {'role': 'user', 'parts': [CHARACTER_PROMPT]},
+            {'role': 'model', 'parts': ["Okay, I am Manvi. I'll follow all your rules including not talking about prices."]}
+        ])
+        logger.info("Gemini AI initialized successfully")
     except Exception as e:
-        logger.error(f"Error in intent analysis: {e}")
-        return {"is_request": True, "content_title": text}
-
-# --- Admin Notification Function ---
-async def send_admin_notification(context, user_id, username, first_name, movie_title, group_id=None, message_id=None):
-    """Send a notification to the admin channel about a new request"""
-    if not ADMIN_CHANNEL_ID:
-        logger.warning("ADMIN_CHANNEL_ID not set, skipping admin notification")
-        return
-    
-    try:
-        # Format the notification message
-        user_info = f"User: {first_name or 'Unknown'}"
-        if username:
-            user_info += f" (@{username})"
-        user_info += f" (ID: {user_id})"
-        
-        source_info = f"From: Private chat"
-        if group_id:
-            source_info = f"From group: {group_id}"
-        
-        notification_text = f"""
-🎬 *New Movie Request!*
-
-• *Movie:* {movie_title}
-• *{user_info}*
-• *{source_info}*
-• *Time:* {datetime.now().strftime('%Y-%m-%d %I:%M %p')}
-        """
-        
-        # Send the notification
-        await context.bot.send_message(
-            chat_id=ADMIN_CHANNEL_ID,
-            text=notification_text,
-            parse_mode='Markdown'
-        )
-        logger.info(f"Admin notification sent for movie: {movie_title}")
-    except Exception as e:
-        logger.error(f"Failed to send admin notification: {e}")
+        logger.error(f"Failed to initialize Gemini AI: {e}")
+        model = None
+        chat = None
+else:
+    model = None
+    chat = None
+    logger.warning("Gemini AI not initialized due to missing API key")
 
 # --- Notification System Functions ---
 def store_user_request(user_id, username, first_name, movie_title, group_id=None, message_id=None):
@@ -414,11 +316,11 @@ async def notify_in_group(context: ContextTypes.DEFAULT_TYPE, movie_title):
                 notification_text = "Hey! आपकी requested movie अब आ गई है! 🥳\n\n"
                 notified_users = []
                 for user_id, username, first_name, message_id in users:
-                    # Use first name if username is not available
-                    mention = first_name or f"user_{user_id}"
-                    notification_text += f"**{mention}**, "
+                    mention = f"@{username}" if username else f"[{first_name}](tg://user?id={user_id})"
+                    notification_text += f"{mention}, "
                     notified_users.append(user_id)
 
+                notification_text = notification_text.rstrip(', ') # Remove last comma
                 notification_text += f"\n\nआपकी फिल्म '{movie_title}' अब उपलब्ध है! इसे पाने के लिए, कृपया मुझे private chat में start करें: @{context.bot.username}"
 
                 await context.bot.send_message(
@@ -445,95 +347,149 @@ async def notify_in_group(context: ContextTypes.DEFAULT_TYPE, movie_title):
         if cur: cur.close()
         if conn: conn.close()
 
-# --- New /group command handler ---
-async def group_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# --- Telegram Bot Handlers ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        await update.message.reply_text("क्या हाल है? मैं मानवी। 😉 फिल्मों पर गपशॉप करनी है तो बता।")
+    except Exception as e:
+        logger.error(f"Error in start command: {e}")
+
+async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
         await update.message.reply_text("Sorry, सिर्फ एडमिन ही इस कमांड का इस्तेमाल कर सकते हैं।")
         return
     
-    if not GROUP_CHAT_ID:
-        await update.message.reply_text("GROUP_CHAT_ID environment variable नहीं सेट है।")
-        return
-    
-    if not context.args or len(context.args) < 2:
-        await update.message.reply_text("गलत फॉर्मेट! ऐसे इस्तेमाल करें:\n/group @username Movie Title")
-        return
-    
-    user_identifier = context.args[0]
-    movie_title = " ".join(context.args[1:])
-    
-    movie_found = get_movie_from_db(movie_title)
-    if movie_found:
-        title, url = movie_found
-        # Use the identifier provided by admin (could be username or first name)
-        message_text = f"Hi {user_identifier}, aapki movie '{title}' ab available hai! {url} Enjoy. 🙂"
+    conn = None
+    cur = None
+    try:
+        parts = context.args
+        if len(parts) < 2:
+            await update.message.reply_text("गलत फॉर्मेट! ऐसे इस्तेमाल करें:\n/addmovie टाइटल का नाम [File ID या Link]")
+            return
         
-        try:
-            await context.bot.send_message(chat_id=GROUP_CHAT_ID, text=message_text)
-            await update.message.reply_text(f"✅ Group में message भेज दिया गया है।")
-        except Exception as e:
-            logger.error(f"Error sending message to group: {e}")
-            await update.message.reply_text(f"Group में message भेजने में error: {e}")
-    else:
-        await update.message.reply_text(f"'{movie_title}' डेटाबेस में नहीं मिली।")
-
-# --- Telegram Bot Handlers with ConversationHandler ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        await update.message.reply_text(
-            "क्या हाल है? मैं मानवी। 😉 फिल्मों पर गपशॉप करनी है तो बता।",
-            reply_markup=MAIN_MENU_KEYBOARD
-        )
-        return MAIN_MENU
+        value = parts[-1]
+        title = " ".join(parts[:-1])
+        
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
+        cur.execute("INSERT INTO movies (title, url) VALUES (%s, %s) ON CONFLICT (title) DO UPDATE SET url = EXCLUDED.url;", 
+                    (title.strip(), value.strip()))
+        conn.commit()
+        
+        await update.message.reply_text(f"बढ़िया! '{title}' को डेटाबेस में सफलतापूर्वक जोड़ दिया गया है। ✅")
+        
+        # Notify users who requested this movie
+        num_notified = await notify_users_for_movie(context, title, value)
+        
+        # Also notify in group for users who couldn't be reached privately
+        await notify_in_group(context, title)
+            
+        await update.message.reply_text(f"कुल {num_notified} users को PM में notify किया गया है।")
+            
     except Exception as e:
-        logger.error(f"Error in start command: {e}")
-        return MAIN_MENU
+        logger.error(f"Error in add_movie command: {e}")
+        await update.message.reply_text(f"एक एरर आया: {e}")
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
 
-async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show the main menu with buttons"""
+async def notify_manually(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("Sorry, सिर्फ एडमिन ही इस कमांड का इस्तेमाल कर सकते हैं।")
+        return
+    
     try:
-        await update.message.reply_text(
-            "मैं आपकी कैसे मदद कर सकती हूँ?",
-            reply_markup=MAIN_MENU_KEYBOARD
-        )
-        return MAIN_MENU
+        if not context.args:
+            await update.message.reply_text("Usage: /notify <movie_title>")
+            return
+        
+        movie_title = " ".join(context.args)
+        movie_found = get_movie_from_db(movie_title)
+        
+        if movie_found:
+            title, value = movie_found
+            num_notified = await notify_users_for_movie(context, title, value)
+            await update.message.reply_text(f"{num_notified} users को '{title}' के लिए notify किया गया है।")
+            await notify_in_group(context, title)
+        else:
+            await update.message.reply_text(f"'{movie_title}' डेटाबेस में नहीं मिली।")
     except Exception as e:
-        logger.error(f"Error showing main menu: {e}")
-        return MAIN_MENU
+        logger.error(f"Error in notify_manually: {e}")
+        await update.message.reply_text(f"एक एरर आया: {e}")
 
-async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle search movies button"""
+# --- NEW: AI Brain Function ---
+async def analyze_user_intent(user_message: str) -> dict:
+    """
+    Uses Gemini AI to analyze the user's message and determine if it's a movie/series request.
+    """
+    if not model:
+        logger.warning("AI model not initialized. Falling back to direct search.")
+        return {"is_request": True, "content_title": user_message}
+
+    analyzer_prompt = f"""
+You are a 'Request Analyzer' for a Telegram bot. Your ONLY purpose is to determine if the user is asking for a MOVIE or WEB SERIES.
+
+Analyze the user's message below. Respond with ONLY a JSON object.
+
+- If the user IS asking for a movie or web series, respond with:
+  {{"is_request": true, "content_title": "Name of the Movie/Series"}}
+
+- If the user is talking about ANYTHING ELSE (an article, a song, a general conversation, a greeting, an insult), you MUST respond with:
+  {{"is_request": false, "content_title": null}}
+
+Do not add explanations. Only provide the JSON.
+
+User's Message: "{user_message}"
+"""
     try:
-        await update.message.reply_text(
-            "बढ़िया! मुझे बताओ तुम कौन सी movie ढूंढ रहे हो?",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        return SEARCH_MOVIE
+        # Use generate_content for a non-chat, one-off request
+        response = await model.generate_content_async(analyzer_prompt)
+        
+        # Clean the response to extract only the JSON part
+        json_text = response.text.strip()
+        start = json_text.find('{')
+        end = json_text.rfind('}') + 1
+        if start != -1 and end != 0:
+            clean_json = json_text[start:end]
+            return json.loads(clean_json)
+        else:
+            logger.warning(f"AI did not return valid JSON. Response: {response.text}")
+            return {"is_request": False, "content_title": None}
+
+    except json.JSONDecodeError:
+        logger.error(f"Failed to decode JSON from AI response: {response.text}")
+        return {"is_request": False, "content_title": None}
     except Exception as e:
-        logger.error(f"Error in search_movies: {e}")
-        return MAIN_MENU
+        logger.error(f"Error during AI intent analysis: {e}")
+        return {"is_request": False, "content_title": None}
 
-async def request_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle request movie button"""
+# --- REWRITTEN: Main Message Handler ---
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        await update.message.reply_text(
-            "ठीक है! मुझे बताओ तुम कौन सी movie चाहते हो? मैं इसे अपने collection में add करने की कोशिश करूँगी।",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        return REQUEST_MOVIE
-    except Exception as e:
-        logger.error(f"Error in request_movie: {e}")
-        return MAIN_MENU
+        if not update.message or not update.message.text:
+            return
 
-async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle movie search input"""
-    try:
         user_message = update.message.text.strip()
-        logger.info(f"Searching for: {user_message}")
-        
-        # First try to find movie in database
-        movie_found = get_movie_from_db(user_message)
-        
+        logger.info(f"Received message: '{user_message}' from user {update.effective_user.id}")
+
+        # --- STEP 1: Ask the AI Brain ---
+        intent = await analyze_user_intent(user_message)
+
+        # --- STEP 2: Act on the AI's Decision ---
+        if not intent.get("is_request"):
+            logger.info(f"AI determined this is NOT a movie request. Ignoring.")
+            return # Ignore irrelevant messages
+
+        movie_title = intent.get("content_title")
+        if not movie_title:
+            logger.warning("AI said it's a request but gave no title. Ignoring.")
+            return
+
+        logger.info(f"AI identified a request for: '{movie_title}'")
+
+        # --- STEP 3: Proceed with existing logic ---
+        movie_found = get_movie_from_db(movie_title)
+
         if movie_found:
             title, value = movie_found
             if value.startswith("https://t.me/c/"):
@@ -547,10 +503,7 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     logger.error(f"Error copying message: {e}")
                     await update.message.reply_text("Sorry! 😥 फाइल भेजने में कोई समस्या आ गयी।")
             elif value.startswith("http"):
-                reply = random.choice([
-                    f"ये ले, पॉपकॉर्न तैयार रख! 😉 '{title}' का लिंक यहाँ है: {value}",
-                    f"मांगी और मिल गई! 🔥 Here you go, '{title}': {value}"
-                ])
+                reply = f"ये ले, पॉपकॉर्न तैयार रख! 😉 '{title}' का लिंक यहाँ है: {value}"
                 await update.message.reply_text(reply)
             else:
                 try:
@@ -560,199 +513,28 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     logger.error(f"Error sending document: {e}")
                     await update.message.reply_text("Sorry! 😥 फाइल भेजने में कोई समस्या आ गयी।")
         else:
-            # Store the user's request
+            # Movie not found, save the request
             user = update.effective_user
-            chat_id = update.effective_chat.id
-            message_id = update.message.message_id
-            
             store_user_request(
-                user.id, 
-                user.username, 
-                user.first_name, 
-                user_message,
-                chat_id,
-                message_id
+                user.id,
+                user.username,
+                user.first_name,
+                movie_title, # Store the clean title from the AI
+                update.effective_chat.id if update.message.chat.type != 'private' else None,
+                update.message.message_id
             )
             
-            response = random.choice([
-                f"अरे यार! 😫 '{user_message}' तो अभी तक मेरे कलेक्शन में नहीं आई। पर टेंशन मत ले, जैसे ही आएगी, मैं तुझे सबसे पहले बताऊँगी। Pinky promise! ✨",
-                f"उफ़! '{user_message}' अभी तक मेरे पास नहीं है। लेकिन जैसे ही मिलेगी, मैं तुम्हें ज़रूर बताऊंगी!"
-            ])
+            response_text = f"अरे यार! 😫 '{movie_title}' तो अभी तक मेरे कलेक्शन में नहीं आई। पर टेंशन मत ले, जैसे ही आएगी, मैं तुझे सबसे पहले बताऊँगी। Pinky promise! ✨"
             
-            await update.message.reply_text(response)
-        
-        # Return to main menu
-        await update.message.reply_text(
-            "और कुछ चाहिए?",
-            reply_markup=MAIN_MENU_KEYBOARD
-        )
-        return MAIN_MENU
-        
-    except Exception as e:
-        logger.error(f"Error in handle_search: {e}")
-        await update.message.reply_text(
-            "Something went wrong. Let's try again.",
-            reply_markup=MAIN_MENU_KEYBOARD
-        )
-        return MAIN_MENU
+            if update.message.chat.type != 'private':
+                encouragement = f"\n\n**Note:** If you want me to DM you when it's available, please start me in a private chat first: @{context.bot.username}"
+                response_text += encouragement
 
-async def handle_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle movie request input"""
-    try:
-        user_message = update.message.text.strip()
-        logger.info(f"Request received: {user_message}")
-        
-        # Store the user's request
-        user = update.effective_user
-        chat_id = update.effective_chat.id
-        message_id = update.message.message_id
-        
-        store_user_request(
-            user.id, 
-            user.username, 
-            user.first_name, 
-            user_message,
-            chat_id,
-            message_id
-        )
-        
-        # Send notification to admin
-        await send_admin_notification(
-            context, 
-            user.id, 
-            user.username, 
-            user.first_name, 
-            user_message,
-            chat_id,
-            message_id
-        )
-        
-        response = random.choice([
-            f"✅ Got it! Your request for '{user_message}' has been sent to the admin. Thanks for helping improve our collection!",
-            f"✅ Noted! I've requested '{user_message}' to be added to our collection. You'll be notified when it's available."
-        ])
-        
-        await update.message.reply_text(response)
-        
-        # Return to main menu
-        await update.message.reply_text(
-            "और कुछ चाहिए?",
-            reply_markup=MAIN_MENU_KEYBOARD
-        )
-        return MAIN_MENU
-        
-    except Exception as e:
-        logger.error(f"Error in handle_request: {e}")
-        await update.message.reply_text(
-            "Something went wrong. Let's try again.",
-            reply_markup=MAIN_MENU_KEYBOARD
-        )
-        return MAIN_MENU
+            await update.message.reply_text(response_text, parse_mode='Markdown')
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Cancel the current operation and return to main menu"""
-    try:
-        await update.message.reply_text(
-            "Operation cancelled.",
-            reply_markup=MAIN_MENU_KEYBOARD
-        )
-        return MAIN_MENU
     except Exception as e:
-        logger.error(f"Error in cancel: {e}")
-        return MAIN_MENU
+        logger.error(f"Critical error in handle_message: {e}")
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle general messages (fallback for when not in conversation)"""
-    try:
-        if not update.message or not update.message.text:
-            return MAIN_MENU
-        
-        user_message = update.message.text.strip()
-        logger.info(f"Received general message: {user_message}")
-        
-        # Analyze intent
-        intent = analyze_intent(user_message)
-        
-        if intent["is_request"] and intent["content_title"]:
-            # Treat as a movie search
-            movie_title = intent["content_title"]
-            movie_found = get_movie_from_db(movie_title)
-            
-            if movie_found:
-                title, value = movie_found
-                if value.startswith("https://t.me/c/"):
-                    try:
-                        parts = value.split('/')
-                        from_chat_id = int("-100" + parts[-2])
-                        message_id = int(parts[-1])
-                        await update.message.reply_text(f"मिल गई! 😉 '{title}' भेजी जा रही है... कृपया इंतज़ार करें।")
-                        await context.bot.copy_message(chat_id=update.effective_chat.id, from_chat_id=from_chat_id, message_id=message_id)
-                    except Exception as e:
-                        logger.error(f"Error copying message: {e}")
-                        await update.message.reply_text("Sorry! 😥 फाइल भेजने में कोई समस्या आ गयी।")
-                elif value.startswith("http"):
-                    reply = random.choice([
-                        f"ये ले, पॉपकॉर्न तैयार रख! 😉 '{title}' का लिंक यहाँ है: {value}",
-                        f"मांगी और मिल गई! 🔥 Here you go, '{title}': {value}"
-                    ])
-                    await update.message.reply_text(reply)
-                else:
-                    try:
-                        await update.message.reply_text(f"मिल गई! 😉 '{title}' भेजी जा रही है... कृपया इंतज़ार करें।")
-                        await context.bot.send_document(chat_id=update.effective_chat.id, document=value)
-                    except Exception as e:
-                        logger.error(f"Error sending document: {e}")
-                        await update.message.reply_text("Sorry! 😥 फाइल भेजने में कोई समस्या आ गयी।")
-            else:
-                # Store the request
-                user = update.effective_user
-                chat_id = update.effective_chat.id
-                message_id = update.message.message_id
-                
-                store_user_request(
-                    user.id, 
-                    user.username, 
-                    user.first_name, 
-                    movie_title,
-                    chat_id,
-                    message_id
-                )
-                
-                response = random.choice([
-                    f"अरे यार! 😫 '{movie_title}' तो अभी तक मेरे कलेक्शन में नहीं आई। पर टेंशन मत ले, जैसे ही आएगी, मैं तुझे सबसे पहले बताऊँगी। Pinky promise! ✨",
-                    f"उफ़! '{movie_title}' अभी तक मेरे पास नहीं है। लेकिन जैसे ही मिलेगी, मैं तुम्हें ज़रूर बताऊंगी!"
-                ])
-                
-                await update.message.reply_text(response)
-        else:
-            # Use Gemini AI for conversation if available
-            if GEMINI_API_KEY:
-                try:
-                    genai.configure(api_key=GEMINI_API_KEY)
-                    model = genai.GenerativeModel(model_name='gemini-1.5-flash')
-                    response = model.generate_content(user_message)
-                    ai_response = response.text
-                    await update.message.reply_text(ai_response)
-                except Exception as e:
-                    logger.error(f"Error from Gemini AI: {e}")
-                    await update.message.reply_text("माफ करना, मैं समझ नहीं पाई। क्या आप किसी movie के बारे में पूछ रहे हैं?")
-            else:
-                await update.message.reply_text("माफ करना, मैं समझ नहीं पाई। क्या आप किसी movie के बारे में पूछ रहे हैं?")
-        
-        # Show main menu
-        await update.message.reply_text(
-            "मैं आपकी कैसे मदद कर सकती हूँ?",
-            reply_markup=MAIN_MENU_KEYBOARD
-        )
-        return MAIN_MENU
-        
-    except Exception as e:
-        logger.error(f"Error in handle_message: {e}")
-        await update.message.reply_text(
-            "Something went wrong. Let's try again.",
-            reply_markup=MAIN_MENU_KEYBOARD
-        )
-        return MAIN_MENU
 
 # --- बॉट को चलाने का नया और मज़बूत तरीका ---
 def run_bot():
@@ -770,30 +552,11 @@ def run_bot():
         
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # Set up ConversationHandler
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
-        states={
-            MAIN_MENU: [
-                MessageHandler(filters.Regex("^🔍 Search Movies$"), search_movies),
-                MessageHandler(filters.Regex("^🙋 Request Movie$"), request_movie),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message),
-            ],
-            SEARCH_MOVIE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_search),
-            ],
-            REQUEST_MOVIE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_request),
-            ],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-    )
-
-    application.add_handler(conv_handler)
+    application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("addmovie", add_movie))
     application.add_handler(CommandHandler("notify", notify_manually))
-    application.add_handler(CommandHandler("group", group_command))
-    application.add_handler(MessageHandler(filters.FORWARDED, handle_forward_to_notify))
+    # application.add_handler(MessageHandler(filters.FORWARDED, handle_forward_to_notify)) # This can be re-enabled if needed
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     # Signal handling for graceful shutdown
     def signal_handler(signum, frame):
@@ -808,38 +571,14 @@ def run_bot():
 
     logger.info("Bot is starting polling...")
     
-    # Use drop_pending_updates to avoid conflict with previous instances
     application.run_polling(
         allowed_updates=Update.ALL_TYPES, 
-        drop_pending_updates=True,
-        close_loop=False
+        drop_pending_updates=True
     )
 
 # --- दोनों को एक साथ चलाएं ---
 if __name__ == "__main__":
-    # Check if another instance is already running
-    try:
-        # Try to create a lock file
-        lock_file = "/tmp/manvi_bot.lock"
-        if os.path.exists(lock_file):
-            logger.warning("Another instance might be running. Removing lock file.")
-            os.remove(lock_file)
-            
-        with open(lock_file, 'w') as f:
-            f.write(str(os.getpid()))
-            
-        flask_thread = threading.Thread(target=run_flask, daemon=True)
-        flask_thread.start()
-        
-        # Add a small delay to ensure Flask starts first
-        import time
-        time.sleep(2)
-        
-        run_bot()
-        
-    except Exception as e:
-        logger.error(f"Failed to start bot: {e}")
-    finally:
-        # Clean up lock file
-        if os.path.exists(lock_file):
-            os.remove(lock_file)
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    
+    run_bot()
