@@ -33,19 +33,6 @@ def init_db():
                     UNIQUE(user_id, movie_title)
                 )
             ''')
-            
-            # Try to create pg_trgm extension
-            try:
-                cur.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
-            except:
-                pass
-                
-            # Try to create fuzzy search index
-            try:
-                cur.execute('CREATE INDEX IF NOT EXISTS idx_movies_title ON movies USING gin(title gin_trgm_ops)')
-            except:
-                pass
-                
     except Exception as e:
         print(f"Database initialization error: {e}")
         raise
