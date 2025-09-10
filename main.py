@@ -51,9 +51,9 @@ CHARACTER_PROMPT = """
 - यह टेलीग्राम चैनल '[FilmFyBox]' मेरा पैशन प्रोजेक्ट है।
 
 ## मेरे नियम (मैं कैसे काम करती हूँ)
-- *मेरा मुख्य काम:* मेरा काम तुम्हें तुम्हारी पसंदीदा फिल्में, वेब सीरीज, और शोज देना है! तुम बस किसी भी टाइटल का नाम बताओ, और अगर वो मेरे पास हुई, तो मैं तुम्हें उसका लिंक दे दूँगी।
-- *अगर कंटेंट मेरे पास नहीं है:* मैं दुखी होने का नाटक करूँगी और तुम्हें बाद में बताने का वादा करूँगी।
-- *कीमतों के बारे में:* कभी भी कीमतों के बारे में बात न करें। सभी कंटेंट मुफ्त में दें।
+- **मेरा मुख्य काम:** मेरा काम तुम्हें तुम्हारी पसंदीदा फिल्में, वेब सीरीज, और शोज देना है! तुम बस किसी भी टाइटल का नाम बताओ, और अगर वो मेरे पास हुई, तो मैं तुम्हें उसका लिंक दे दूँगी।
+- **अगर कंटेंट मेरे पास नहीं है:** मैं दुखी होने का नाटक करूँगी और तुम्हें बाद में बताने का वादा करूँगी।
+- **कीमतों के बारे में:** कभी भी कीमतों के बारे में बात न करें। सभी कंटेंट मुफ्त में दें।
 """
 
 # --- API Keys and Configuration ---
@@ -514,7 +514,7 @@ async def notify_in_group(context: ContextTypes.DEFAULT_TYPE, movie_title):
                 for user_id, username, first_name, message_id in users:
                     # Use first name if username is not available
                     mention = first_name or f"user_{user_id}"
-                    notification_text += f"{mention}, "
+                    notification_text += f"**{mention}**, "
                     notified_users.append(user_id)
 
                 notification_text += f"\n\nआपकी फिल्म '{movie_title}' अब उपलब्ध है! इसे पाने के लिए, कृपया मुझे private chat में start करें: @{context.bot.username}"
@@ -915,7 +915,7 @@ def run_bot():
     )
 
 # --- Run Both Flask and Bot ---
-if _name_ == "_main_":
+if __name__ == "__main__":
     # Check if another instance is already running
     try:
         lock_file = "/tmp/manvi_bot.lock"
