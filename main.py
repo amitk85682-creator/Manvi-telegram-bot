@@ -1008,7 +1008,7 @@ async def list_aliases(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def bulk_add_aliases(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Add multiple aliases at once"""
     if update.effective_user.id != ADMIN_USER_ID:
-        await update.message.reply_text("Sorry, सिर्फ एडमिन ही इस कमांड का इस्तेमाल कर सकते हैं।")
+        await update.message.reply_text("Sorry, सिर्फ एडमین ही इस कमांड का इस्तेमाल कर सकते हैं।")
         return
     
     conn = None
@@ -1136,7 +1136,7 @@ def run_bot():
     except RuntimeError:
         return
         
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).read_timeout(30).write_timeout(30).build()
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     # Add conversation handler with the states
     conv_handler = ConversationHandler(
@@ -1159,51 +1159,25 @@ def run_bot():
     application.add_handler(CommandHandler("notify", notify_manually))
     application.add_error_handler(error_handler)
 
-    # Signal handling for graceful shutdown
-    def signal_handler(signum, frame):
-        logger.info("Received shutdown signal. Stopping bot...")
-        loop = asyncio.get_event_loop()
-        loop.create_task(application.stop())
-        loop.create_task(application.shutdown())
-        sys.exit(0)
-
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-
+    # Start the bot
     logger.info("Bot is starting polling...")
-    
     application.run_polling(
-    timeout=1000,
-    pool_timeout=1000,
-    read_timeout=1000,
-    write_timeout=1000,
-    connect_timeout=1000
-)
+        timeout=1000,
+        pool_timeout=1000,
+        read_timeout=1000,
+        write_timeout=1000,
+        connect_timeout=1000
+    )
 
 # --- Run Both Flask and Bot ---
 if __name__ == "__main__":
-    # Check if another instance is already running
-    try:
-        lock_file = "/tmp/manvi_bot.lock"
-        if os.path.exists(lock_file):
-            logger.warning("Another instance might be running. Removing lock file.")
-            os.remove(lock_file)
-            
-        with open(lock_file, 'w') as f:
-            f.write(str(os.getpid()))
-            
-        flask_thread = threading.Thread(target=run_flask, daemon=True)
-        flask_thread.start()
-        
-        # Add a small delay to ensure Flask starts first
-        import time
-        time.sleep(2)
-        
-        run_bot()
-        
-    except Exception as e:
-        logger.error(f"Failed to start bot: {e}")
-    finally:
-        # Clean up lock file
-        if os.path.exists(lock_file):
-            os.remove(lock_file)
+    # Start Flask in a separate thread
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    
+    # Add a small delay to ensure Flask starts first
+    import time
+    time.sleep(2)
+    
+    # Start the bot
+    run_bot()
