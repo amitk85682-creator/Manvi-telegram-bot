@@ -1173,10 +1173,12 @@ def run_bot():
     logger.info("Bot is starting polling...")
     
     application.run_polling(
-        allowed_updates=Update.ALL_TYPES, 
-        drop_pending_updates=True,
-        close_loop=False
-    )
+    timeout=1000,
+    pool_timeout=1000,
+    read_timeout=1000,
+    write_timeout=1000,
+    connect_timeout=1000
+)
 
 # --- Run Both Flask and Bot ---
 if __name__ == "__main__":
