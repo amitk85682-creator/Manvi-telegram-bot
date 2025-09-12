@@ -271,35 +271,16 @@ def normalize_url(url):
         if not url.startswith(('http://', 'https://')):
             url = 'https://' + url
         
-        # Fix common Blogspot URL issues
-        if 'blogspot.com' in url and 'import-urlhttpsfonts' in url:
-            url = url.replace('import-urlhttpsfonts', 'import-url-https-fonts')
-        
-        # Handle anchor tags properly
-        if '#' in url:
-            base, anchor = url.split('#', 1)
-            # Ensure the base URL is properly formatted
-            parsed = urlparse(base)
-            normalized_base = urlunparse((
-                parsed.scheme,
-                parsed.netloc,
-                parsed.path,
-                parsed.params,
-                parsed.query,
-                ''
-            ))
-            url = f"{normalized_base}#{anchor}"
-        else:
-            # Parse and reconstruct to normalize
-            parsed = urlparse(url)
-            url = urlunparse((
-                parsed.scheme,
-                parsed.netloc,
-                parsed.path,
-                parsed.params,
-                parsed.query,
-                parsed.fragment
-            ))
+        # Parse and reconstruct to normalize
+        parsed = urlparse(url)
+        url = urlunparse((
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path,
+            parsed.params,
+            parsed.query,
+            parsed.fragment
+        ))
         
         return url
     except:
