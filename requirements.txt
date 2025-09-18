@@ -9,3 +9,4 @@ requests>=2.28
 beautifulsoup4>=4.11
 async-timeout>=4.0
 aiohttp
+redis
