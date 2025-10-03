@@ -891,27 +891,34 @@ def main():
     application.add_handler(CommandHandler("feedback", feedback))
     application.add_handler(CommandHandler("help", help_command))
     
-    # Start the bot in background
-    def run_bot():
-        try:
-            logger.info("Starting bot...")
-            application.run_polling(
-                timeout=1000,
-                pool_timeout=1000,
-                read_timeout=1000,
-                write_timeout=1000,
-                connect_timeout=1000,
-                drop_pending_updates=True
-            )
-        except Exception as e:
-            logger.error(f"Bot failed to start: {e}")
+    # Corrected run_bot function
+def run_bot():
+    """Run the Telegram bot in the background thread with its own event loop."""
+    try:
+        # Create a new event loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        logger.info("Starting bot...")
+        # If using python-telegram-bot v21.x with asyncio
+        application.run_polling(
+            drop_pending_updates=True
+        )
+        # Alternatively, for v20.x, you might need:
+        # loop.run_until_complete(application.run_polling(drop_pending_updates=True))
+        
+    except Exception as e:
+        logger.error(f"Bot failed to start: {e}")
+
+# In your main() function, replace the current bot thread startup with:
+def main():
+    # ... (your existing setup code: database, application, handlers)
     
     # Start bot in a separate thread
-    import threading
     bot_thread = threading.Thread(target=run_bot, daemon=True)
     bot_thread.start()
     
-    # Start Flask app
+    # Start Flask app in the main thread
     logger.info(f"Starting web server on port {Config.PORT}")
     app.run(host='0.0.0.0', port=Config.PORT, debug=False, use_reloader=False)
 
