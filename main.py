@@ -837,29 +837,14 @@ def admin_update():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# Main application setup - SIMPLIFIED VERSION
+# For Background Worker, use this in main():
 def main():
-    # Initialize database
     if not setup_database():
         logger.error("Failed to initialize database. Exiting.")
         return
     
-    # Start bot in main thread and Flask in a simple way
-    logger.info("Starting services...")
-    
-    # For Render, we need to choose one approach:
-    # Option 1: Run Flask only (if bot has issues)
-    # Option 2: Run bot only (if web interface is not critical)
-    # Option 3: Use a different approach
-    
-    # Let's try running Flask with Waitress and skip the bot for now to test
-    from waitress import serve
-    
-    logger.info(f"Starting Flask server on port {Config.PORT}")
-    serve(app, host='0.0.0.0', port=Config.PORT)
-    
-    # Note: We're not starting the bot in this version to avoid threading issues
-    # You can enable the bot later once Flask is working
+    # Run only the bot - no Flask
+    run_bot()
 
 if __name__ == "__main__":
     main()
