@@ -5,6 +5,7 @@ import json
 import re
 import aiohttp
 import psycopg2
+from psycopg2 import pool  # Explicit import for connection pool
 import telegram
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -66,52 +67,60 @@ if Config.REDIS_URL:
         logger.warning("Redis connection failed, proceeding without cache")
         redis_conn = None
 
-# Corrected import for the connection pool
-from psycopg2 import pool
-
-# Database connection pool
+# Database connection pool - FIXED VERSION
 class Database:
     _connection_pool = None
     
     @classmethod
+    def initialize_pool(cls):
+        """Initialize the connection pool"""
+        try:
+            if cls._connection_pool is None:
+                # Use SimpleConnectionPool from psycopg2.pool
+                cls._connection_pool = psycopg2.pool.SimpleConnectionPool(
+                    1, 10, Config.DATABASE_URL
+                )
+                logger.info("Database connection pool initialized successfully")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to initialize connection pool: {e}")
+            return False
+    
+    @classmethod
     def get_connection(cls):
+        """Get connection from pool"""
         if cls._connection_pool is None:
-            # Use the correct class: SimpleConnectionPool
-            cls._connection_pool = pool.SimpleConnectionPool(
-                1, 10, Config.DATABASE_URL
-            )
+            if not cls.initialize_pool():
+                raise Exception("Database connection pool not available")
         return cls._connection_pool.getconn()
     
     @classmethod
     def return_connection(cls, conn):
-        cls._connection_pool.putconn(conn)
-
-# Database setup with retry logic - FIXED
-def setup_database(retries=3, delay=2):
-    conn = None  # Initialize the variable outside the try block :cite[3]
-    for attempt in range(retries):
+        """Return connection to pool"""
+        if cls._connection_pool and conn:
+            cls._connection_pool.putconn(conn)
+    
+    @classmethod
+    def execute_query(cls, query, params=None, fetch=False):
+        """Execute database query with proper error handling"""
+        conn = None
         try:
-            conn = Database.get_connection()  # This assignment is now visible in the finally block
-            cur = conn.cursor()
-            
-            # ... (your existing table creation SQL statements remain the same) ...
-
-            conn.commit()
-            cur.close()
-            logger.info("Database setup completed successfully")
-            return True
-            
+            conn = cls.get_connection()
+            with conn.cursor() as cur:
+                cur.execute(query, params)
+                if fetch:
+                    result = cur.fetchall()
+                    conn.commit()
+                    return result
+                conn.commit()
         except Exception as e:
-            logger.error(f"Database setup attempt {attempt + 1} failed: {e}")
-            if attempt < retries - 1:
-                time.sleep(delay)
-            else:
-                logger.error("All database setup attempts failed")
-                return False
+            if conn:
+                conn.rollback()
+            logger.error(f"Database query error: {e}")
+            raise e
         finally:
-            # This block will now execute without error because 'conn' is always defined
-            if conn is not None:
-                Database.return_connection(conn)
+            if conn:
+                cls.return_connection(conn)
 
 # Rate limiting decorator
 def rate_limit(user_id):
@@ -163,10 +172,17 @@ def cache_response(ttl=300):
         return wrapper
     return decorator
 
-# Database setup with retry logic
+# Database setup with retry logic - FIXED VERSION
 def setup_database(retries=3, delay=2):
+    """Setup database tables with proper error handling"""
+    conn = None  # Initialize conn to None to avoid UnboundLocalError :cite[1]:cite[8]
+    
     for attempt in range(retries):
         try:
+            # Initialize database pool first
+            if not Database.initialize_pool():
+                raise Exception("Failed to initialize database pool")
+            
             conn = Database.get_connection()
             cur = conn.cursor()
             
@@ -247,7 +263,24 @@ def setup_database(retries=3, delay=2):
                 logger.error("All database setup attempts failed")
                 return False
         finally:
-            Database.return_connection(conn)
+            # Only return connection if it was successfully created :cite[1]
+            if conn is not None:
+                Database.return_connection(conn)
+
+# Store user request function
+def store_user_request(user_id, username, first_name, movie_title, group_id=None, message_id=None):
+    """Store user movie request in database"""
+    try:
+        Database.execute_query('''
+            INSERT INTO user_requests (user_id, username, first_name, movie_title, group_id, message_id)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (user_id, movie_title) DO UPDATE SET
+            requested_at = CURRENT_TIMESTAMP
+        ''', (user_id, username, first_name, movie_title, group_id, message_id))
+        return True
+    except Exception as e:
+        logger.error(f"Error storing user request: {e}")
+        return False
 
 # Enhanced movie search with multiple sources
 class MovieSearch:
@@ -257,21 +290,24 @@ class MovieSearch:
         results = []
         
         # Search in database first
-        db_results = Database.execute_query(
-            "SELECT title, url, file_id, quality, size FROM movies WHERE title ILIKE %s OR id IN (SELECT movie_id FROM movie_aliases WHERE alias ILIKE %s) LIMIT %s",
-            (f'%{title}%', f'%{title}%', max_results),
-            fetch=True
-        )
-        
-        for result in db_results:
-            results.append({
-                'title': result[0],
-                'url': result[1],
-                'file_id': result[2],
-                'quality': result[3],
-                'size': result[4],
-                'source': 'database'
-            })
+        try:
+            db_results = Database.execute_query(
+                "SELECT title, url, file_id, quality, size FROM movies WHERE title ILIKE %s OR id IN (SELECT movie_id FROM movie_aliases WHERE alias ILIKE %s) LIMIT %s",
+                (f'%{title}%', f'%{title}%', max_results),
+                fetch=True
+            )
+            
+            for result in db_results:
+                results.append({
+                    'title': result[0],
+                    'url': result[1],
+                    'file_id': result[2],
+                    'quality': result[3],
+                    'size': result[4],
+                    'source': 'database'
+                })
+        except Exception as e:
+            logger.error(f"Database search error: {e}")
         
         # If not enough results, try external sources
         if len(results) < max_results:
@@ -453,7 +489,7 @@ class Keyboards:
             [InlineKeyboardButton("⭐", callback_data="rate_1"),
              InlineKeyboardButton("⭐⭐", callback_data="rate_2"),
              InlineKeyboardButton("⭐⭐⭐", callback_data="rate_3"),
-             InlineKeyboardButton("⭐⭐⭐⭐", callback_data="rate_4"),
+             InInlineKeyboardButton("⭐⭐⭐⭐", callback_data="rate_4"),
              InlineKeyboardButton("⭐⭐⭐⭐⭐", callback_data="rate_5")]
         ]
         return InlineKeyboardMarkup(keyboard)
@@ -487,12 +523,26 @@ class BotHandlers:
             return States.MAIN_MENU
         except Exception as e:
             logger.error(f"Error in start command: {e}")
+            return States.MAIN_MENU
     
-    @rate_limit(user_id='update.effective_user.id')
     async def search_movies(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             user_message = update.message.text.strip()
             user = update.effective_user
+            
+            # Apply rate limiting
+            if redis_conn:
+                key = f"rate_limit:{user.id}"
+                current = redis_conn.get(key)
+                if current and int(current) >= Config.REQUEST_LIMIT:
+                    await update.message.reply_text("🚫 You've reached your hourly request limit. Please try again later.")
+                    return States.MAIN_MENU
+                
+                if current:
+                    redis_conn.incr(key)
+                else:
+                    redis_conn.setex(key, Config.REQUEST_WINDOW, 1)
+            
             UserManager.track_activity(user.id, user.username, user.first_name, 'search')
             
             if len(user_message) < 3:
@@ -573,6 +623,188 @@ class BotHandlers:
             await update.message.reply_text("Sorry, something went wrong. Please try again.")
             return States.MAIN_MENU
 
+# Additional handler functions
+async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle main menu selections"""
+    text = update.message.text
+    user = update.effective_user
+    
+    if text == '🔍 Search Movies':
+        await update.message.reply_text("🔍 Enter movie name to search:")
+        return States.SEARCHING
+    elif text == '🙋 Request Movie':
+        await update.message.reply_text("📝 Enter the movie name you want to request:")
+        return States.REQUESTING
+    elif text == '📊 My Stats':
+        try:
+            stats = Database.execute_query(
+                "SELECT search_count, request_count, last_active FROM user_stats WHERE user_id = %s",
+                (user.id,),
+                fetch=True
+            )
+            if stats:
+                search_count, request_count, last_active = stats[0]
+                response = f"📊 Your Stats:\n\n🔍 Searches: {search_count}\n🙋 Requests: {request_count}\n🕐 Last Active: {last_active.strftime('%Y-%m-%d %H:%M')}"
+            else:
+                response = "📊 Your Stats:\n\nNo activity recorded yet."
+            await update.message.reply_text(response)
+        except Exception as e:
+            logger.error(f"Error getting user stats: {e}")
+            await update.message.reply_text("❌ Error retrieving your stats.")
+    elif text == '⭐ Rate Us':
+        await update.message.reply_text("Please rate our service:", reply_markup=Keyboards.rating_options())
+    elif text == '❓ Help':
+        help_text = """
+🤖 How to use MovieFinder Bot:
+
+🔍 Search Movies - Find movies in our database
+🙋 Request Movie - Request movies we don't have
+📊 My Stats - View your usage statistics
+⭐ Rate Us - Rate our service
+
+Commands:
+/start - Start the bot
+/stats - View your statistics  
+/help - Show this help message
+        """
+        await update.message.reply_text(help_text)
+    
+    return States.MAIN_MENU
+
+async def request_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle movie requests"""
+    movie_title = update.message.text.strip()
+    user = update.effective_user
+    
+    if len(movie_title) < 2:
+        await update.message.reply_text("Please enter a valid movie name (at least 2 characters).")
+        return States.REQUESTING
+    
+    # Store the request
+    success = store_user_request(user.id, user.username, user.first_name, movie_title)
+    
+    if success:
+        # Notify admin
+        try:
+            app = Application.builder().token(Config.TELEGRAM_BOT_TOKEN).build()
+            await NotificationSystem.notify_admin(app, user, movie_title)
+        except Exception as e:
+            logger.error(f"Error notifying admin: {e}")
+        
+        await update.message.reply_text(f"✅ Your request for '{movie_title}' has been recorded! We'll notify you when it's available.")
+    else:
+        await update.message.reply_text("❌ Sorry, there was an error processing your request. Please try again.")
+    
+    await update.message.reply_text("What would you like to do next?", reply_markup=Keyboards.main_menu())
+    return States.MAIN_MENU
+
+async def process_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Process user feedback"""
+    feedback_text = update.message.text.strip()
+    user = update.effective_user
+    
+    try:
+        Database.execute_query(
+            "INSERT INTO feedback (user_id, message) VALUES (%s, %s)",
+            (user.id, feedback_text)
+        )
+        await update.message.reply_text("✅ Thank you for your feedback!")
+    except Exception as e:
+        logger.error(f"Error storing feedback: {e}")
+        await update.message.reply_text("❌ Error saving your feedback.")
+    
+    await update.message.reply_text("What would you like to do next?", reply_markup=Keyboards.main_menu())
+    return States.MAIN_MENU
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle button callbacks"""
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    
+    if data.startswith('rate_'):
+        rating = int(data.split('_')[1])
+        user = update.effective_user
+        
+        try:
+            Database.execute_query(
+                "INSERT INTO feedback (user_id, message, rating) VALUES (%s, %s, %s)",
+                (user.id, f"User rating: {rating} stars", rating)
+            )
+            await query.edit_message_text(f"✅ Thank you for your {rating} star rating!")
+        except Exception as e:
+            logger.error(f"Error storing rating: {e}")
+            await query.edit_message_text("❌ Error saving your rating.")
+    
+    elif data.startswith('request_'):
+        movie_title = data.replace('request_', '')
+        user = update.effective_user
+        
+        success = store_user_request(user.id, user.username, user.first_name, movie_title)
+        if success:
+            await query.edit_message_text(f"✅ Your request for '{movie_title}' has been recorded!")
+        else:
+            await query.edit_message_text("❌ Error processing your request.")
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancel conversation"""
+    await update.message.reply_text("Operation cancelled.", reply_markup=Keyboards.main_menu())
+    return States.MAIN_MENU
+
+async def user_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show user statistics"""
+    user = update.effective_user
+    try:
+        stats = Database.execute_query(
+            "SELECT search_count, request_count, last_active FROM user_stats WHERE user_id = %s",
+            (user.id,),
+            fetch=True
+        )
+        if stats:
+            search_count, request_count, last_active = stats[0]
+            response = f"📊 Your Stats:\n\n🔍 Searches: {search_count}\n🙋 Requests: {request_count}\n🕐 Last Active: {last_active.strftime('%Y-%m-%d %H:%M')}"
+        else:
+            response = "📊 Your Stats:\n\nNo activity recorded yet."
+        await update.message.reply_text(response)
+    except Exception as e:
+        logger.error(f"Error getting user stats: {e}")
+        await update.message.reply_text("❌ Error retrieving your stats.")
+
+async def feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start feedback conversation"""
+    await update.message.reply_text("💬 Please share your feedback or suggestions:")
+    return States.FEEDBACK
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show help message"""
+    help_text = """
+🤖 How to use MovieFinder Bot:
+
+🔍 Search Movies - Find movies in our database
+🙋 Request Movie - Request movies we don't have
+📊 My Stats - View your usage statistics
+⭐ Rate Us - Rate our service
+
+Commands:
+/start - Start the bot
+/stats - View your statistics
+/feedback - Share feedback
+/help - Show this help message
+
+Need help? Contact support.
+    """
+    await update.message.reply_text(help_text)
+
+async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin command to add movies (placeholder)"""
+    user = update.effective_user
+    if user.id != Config.ADMIN_USER_ID:
+        await update.message.reply_text("❌ This command is for administrators only.")
+        return
+    
+    await update.message.reply_text("📝 Admin movie addition feature will be implemented here.")
+
 # Flask routes for web interface
 @app.route('/')
 def home():
@@ -615,11 +847,15 @@ def admin_update():
         return jsonify({"error": "Unauthorized"}), 401
     
     try:
-        # Implement your movie update logic here
-        result = update_movies_from_blog()
-        return jsonify({"status": "success", "result": result})
+        # Placeholder for movie update logic
+        return jsonify({"status": "success", "message": "Update endpoint ready"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+# Update movies function placeholder
+def update_movies_from_blog():
+    """Placeholder for movie update logic"""
+    return {"updated": 0, "message": "Update functionality to be implemented"}
 
 # Main application setup
 def main():
