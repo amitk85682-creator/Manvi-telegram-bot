@@ -4,9 +4,8 @@ import logging
 import json
 import re
 import aiohttp
-import psycopg2
-from psycopg2 import pool
-import threading
+import asyncpg  # Replaced psycopg2 with asyncpg for better async support
+import redis
 import telegram
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -15,13 +14,10 @@ from telegram.ext import (
 )
 from datetime import datetime, timedelta
 from functools import wraps
-from flask import Flask, request, jsonify
 import google.generativeai as genai
-from googleapiclient.discovery import build
-from bs4 import BeautifulSoup
-import redis
 import hashlib
 import time
+import ssl
 
 # Enhanced logging configuration
 logging.basicConfig(
@@ -34,7 +30,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Configuration with defaults for Render
+# Configuration with enhanced connection settings
 class Config:
     TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
     GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -49,94 +45,139 @@ class Config:
     PORT = int(os.environ.get('PORT', 5000))
     REQUEST_LIMIT = int(os.environ.get('REQUEST_LIMIT', 20))
     REQUEST_WINDOW = int(os.environ.get('REQUEST_WINDOW', 3600))
+    
+    # Database connection settings
+    DB_MAX_CONNECTIONS = int(os.environ.get('DB_MAX_CONNECTIONS', 10))
+    DB_MIN_CONNECTIONS = int(os.environ.get('DB_MIN_CONNECTIONS', 1))
+    DB_COMMAND_TIMEOUT = int(os.environ.get('DB_COMMAND_TIMEOUT', 30))
 
 # Conversation states
 class States:
     MAIN_MENU, SEARCHING, REQUESTING, FEEDBACK = range(4)
 
-# Initialize Flask app
-app = Flask(__name__)
+# Enhanced Redis connection with retry logic
+class RedisManager:
+    _instance = None
+    _redis_conn = None
+    
+    @classmethod
+    async def get_connection(cls):
+        if cls._redis_conn is None:
+            await cls.initialize_redis()
+        return cls._redis_conn
+    
+    @classmethod
+    async def initialize_redis(cls, retries=3, delay=2):
+        for attempt in range(retries):
+            try:
+                if Config.REDIS_URL:
+                    # Parse Redis URL for proper configuration
+                    redis_url = Config.REDIS_URL
+                    if redis_url.startswith('rediss://'):  # SSL connection
+                        cls._redis_conn = redis.from_url(
+                            redis_url,
+                            ssl_cert_reqs=ssl.CERT_NONE,
+                            decode_responses=True
+                        )
+                    else:
+                        cls._redis_conn = redis.from_url(redis_url, decode_responses=True)
+                    
+                    # Test connection
+                    cls._redis_conn.ping()
+                    logger.info("✅ Redis connected successfully")
+                    return True
+                else:
+                    logger.warning("⚠️ No REDIS_URL provided, proceeding without Redis")
+                    return False
+            except Exception as e:
+                logger.warning(f"Redis connection attempt {attempt + 1} failed: {e}")
+                if attempt < retries - 1:
+                    await asyncio.sleep(delay)
+                else:
+                    logger.error("❌ All Redis connection attempts failed")
+                    cls._redis_conn = None
+                    return False
 
-# Redis connection for caching and rate limiting
-redis_conn = None
-if Config.REDIS_URL:
-    try:
-        redis_conn = redis.from_url(Config.REDIS_URL)
-        redis_conn.ping()
-        logger.info("Redis connected successfully")
-    except redis.ConnectionError:
-        logger.warning("Redis connection failed, proceeding without cache")
-        redis_conn = None
-
-# Database connection pool
+# Async Database connection pool
 class Database:
-    _connection_pool = None
+    _pool = None
     
     @classmethod
-    def initialize_pool(cls):
-        """Initialize the connection pool"""
-        try:
-            if cls._connection_pool is None:
-                cls._connection_pool = psycopg2.pool.SimpleConnectionPool(
-                    1, 10, Config.DATABASE_URL
+    async def get_pool(cls):
+        if cls._pool is None:
+            await cls.initialize_pool()
+        return cls._pool
+    
+    @classmethod
+    async def initialize_pool(cls, retries=5, delay=3):
+        for attempt in range(retries):
+            try:
+                # Parse DATABASE_URL and ensure SSL for Supabase
+                db_url = Config.DATABASE_URL
+                
+                # For Supabase, we need to use SSL
+                if 'supabase' in db_url:
+                    # Ensure SSL parameters are included
+                    if 'sslmode' not in db_url:
+                        db_url += '?sslmode=require'
+                
+                logger.info(f"🔄 Attempting database connection (attempt {attempt + 1})...")
+                
+                cls._pool = await asyncpg.create_pool(
+                    dsn=db_url,
+                    min_size=Config.DB_MIN_CONNECTIONS,
+                    max_size=Config.DB_MAX_CONNECTIONS,
+                    command_timeout=Config.DB_COMMAND_TIMEOUT,
+                    # SSL configuration for Supabase
+                    ssl='require' if 'supabase' in db_url else False
                 )
-                logger.info("Database connection pool initialized successfully")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to initialize connection pool: {e}")
-            return False
+                
+                # Test connection
+                async with cls._pool.acquire() as conn:
+                    await conn.execute('SELECT 1')
+                
+                logger.info("✅ Database connection pool initialized successfully")
+                return True
+                
+            except Exception as e:
+                logger.error(f"Database connection attempt {attempt + 1} failed: {e}")
+                if attempt < retries - 1:
+                    logger.info(f"Retrying in {delay} seconds...")
+                    await asyncio.sleep(delay)
+                else:
+                    logger.error("❌ All database connection attempts failed")
+                    raise e
     
     @classmethod
-    def get_connection(cls):
-        """Get connection from pool"""
-        if cls._connection_pool is None:
-            if not cls.initialize_pool():
-                raise Exception("Database connection pool not available")
-        return cls._connection_pool.getconn()
-    
-    @classmethod
-    def return_connection(cls, conn):
-        """Return connection to pool"""
-        if cls._connection_pool and conn:
-            cls._connection_pool.putconn(conn)
-    
-    @classmethod
-    def execute_query(cls, query, params=None, fetch=False):
-        """Execute database query with proper error handling"""
-        conn = None
-        try:
-            conn = cls.get_connection()
-            with conn.cursor() as cur:
-                cur.execute(query, params)
+    async def execute_query(cls, query, params=None, fetch=False, fetchval=False, fetchrow=False):
+        pool = await cls.get_pool()
+        async with pool.acquire() as conn:
+            try:
                 if fetch:
-                    result = cur.fetchall()
-                    conn.commit()
-                    return result
-                conn.commit()
-        except Exception as e:
-            if conn:
-                conn.rollback()
-            logger.error(f"Database query error: {e}")
-            raise e
-        finally:
-            if conn:
-                cls.return_connection(conn)
+                    return await conn.fetch(query, *params) if params else await conn.fetch(query)
+                elif fetchval:
+                    return await conn.fetchval(query, *params) if params else await conn.fetchval(query)
+                elif fetchrow:
+                    return await conn.fetchrow(query, *params) if params else await conn.fetchrow(query)
+                else:
+                    return await conn.execute(query, *params) if params else await conn.execute(query)
+            except Exception as e:
+                logger.error(f"Database query error: {e} - Query: {query}")
+                raise e
 
-# Database setup with retry logic
-def setup_database(retries=3, delay=2):
+# Enhanced database setup with proper error handling
+async def setup_database(retries=5, delay=3):
     """Setup database tables with proper error handling"""
-    conn = None
-    
     for attempt in range(retries):
         try:
-            if not Database.initialize_pool():
-                raise Exception("Failed to initialize database pool")
+            logger.info(f"🔄 Setting up database (attempt {attempt + 1})...")
             
-            conn = Database.get_connection()
-            cur = conn.cursor()
+            # Initialize pool first
+            await Database.initialize_pool()
             
-            # Create tables with improved schema
-            cur.execute('''
+            # Create tables
+            tables_queries = [
+                '''
                 CREATE TABLE IF NOT EXISTS movies (
                     id SERIAL PRIMARY KEY,
                     title TEXT NOT NULL,
@@ -151,18 +192,16 @@ def setup_database(retries=3, delay=2):
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(title, quality, language)
                 )
-            ''')
-            
-            cur.execute('''
+                ''',
+                '''
                 CREATE TABLE IF NOT EXISTS movie_aliases (
                     id SERIAL PRIMARY KEY,
                     movie_id INTEGER REFERENCES movies(id) ON DELETE CASCADE,
                     alias TEXT NOT NULL,
                     UNIQUE(movie_id, alias)
                 )
-            ''')
-            
-            cur.execute('''
+                ''',
+                '''
                 CREATE TABLE IF NOT EXISTS user_requests (
                     id SERIAL PRIMARY KEY,
                     user_id BIGINT NOT NULL,
@@ -173,12 +212,10 @@ def setup_database(retries=3, delay=2):
                     notified BOOLEAN DEFAULT FALSE,
                     group_id BIGINT,
                     message_id BIGINT,
-                    priority INTEGER DEFAULT 1,
-                    UNIQUE(user_id, movie_title)
+                    priority INTEGER DEFAULT 1
                 )
-            ''')
-            
-            cur.execute('''
+                ''',
+                '''
                 CREATE TABLE IF NOT EXISTS user_stats (
                     user_id BIGINT PRIMARY KEY,
                     username TEXT,
@@ -187,9 +224,8 @@ def setup_database(retries=3, delay=2):
                     request_count INTEGER DEFAULT 0,
                     last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
-            ''')
-            
-            cur.execute('''
+                ''',
+                '''
                 CREATE TABLE IF NOT EXISTS feedback (
                     id SERIAL PRIMARY KEY,
                     user_id BIGINT NOT NULL,
@@ -197,31 +233,43 @@ def setup_database(retries=3, delay=2):
                     rating INTEGER,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
-            ''')
+                '''
+            ]
             
-            conn.commit()
-            cur.close()
-            logger.info("Database setup completed successfully")
+            for query in tables_queries:
+                await Database.execute_query(query)
+            
+            # Create indexes for better performance
+            index_queries = [
+                'CREATE INDEX IF NOT EXISTS idx_movies_title ON movies(title)',
+                'CREATE INDEX IF NOT EXISTS idx_movies_title_lower ON movies(LOWER(title))',
+                'CREATE INDEX IF NOT EXISTS idx_user_requests_user_id ON user_requests(user_id)',
+                'CREATE INDEX IF NOT EXISTS idx_user_requests_movie_title ON user_requests(movie_title)',
+                'CREATE INDEX IF NOT EXISTS idx_user_requests_notified ON user_requests(notified)'
+            ]
+            
+            for query in index_queries:
+                await Database.execute_query(query)
+            
+            logger.info("✅ Database setup completed successfully")
             return True
             
         except Exception as e:
             logger.error(f"Database setup attempt {attempt + 1} failed: {e}")
             if attempt < retries - 1:
-                time.sleep(delay)
+                logger.info(f"Retrying database setup in {delay} seconds...")
+                await asyncio.sleep(delay)
             else:
-                logger.error("All database setup attempts failed")
+                logger.error("❌ All database setup attempts failed")
                 return False
-        finally:
-            if conn is not None:
-                Database.return_connection(conn)
 
 # Store user request function
-def store_user_request(user_id, username, first_name, movie_title, group_id=None, message_id=None):
+async def store_user_request(user_id, username, first_name, movie_title, group_id=None, message_id=None):
     """Store user movie request in database"""
     try:
-        Database.execute_query('''
+        await Database.execute_query('''
             INSERT INTO user_requests (user_id, username, first_name, movie_title, group_id, message_id)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            VALUES ($1, $2, $3, $4, $5, $6)
             ON CONFLICT (user_id, movie_title) DO UPDATE SET
             requested_at = CURRENT_TIMESTAMP
         ''', (user_id, username, first_name, movie_title, group_id, message_id))
@@ -238,35 +286,24 @@ class MovieSearch:
         
         # Search in database first
         try:
-            db_results = Database.execute_query(
-                "SELECT title, url, file_id, quality, size FROM movies WHERE title ILIKE %s OR id IN (SELECT movie_id FROM movie_aliases WHERE alias ILIKE %s) LIMIT %s",
-                (f'%{title}%', f'%{title}%', max_results),
+            db_results = await Database.execute_query(
+                "SELECT title, url, file_id, quality, size FROM movies WHERE title ILIKE $1 OR id IN (SELECT movie_id FROM movie_aliases WHERE alias ILIKE $2) LIMIT $3",
+                f'%{title}%', f'%{title}%', max_results,
                 fetch=True
             )
             
             for result in db_results:
                 results.append({
-                    'title': result[0],
-                    'url': result[1],
-                    'file_id': result[2],
-                    'quality': result[3],
-                    'size': result[4],
+                    'title': result['title'],
+                    'url': result['url'],
+                    'file_id': result['file_id'],
+                    'quality': result['quality'],
+                    'size': result['size'],
                     'source': 'database'
                 })
         except Exception as e:
             logger.error(f"Database search error: {e}")
         
-        # If not enough results, try external sources
-        if len(results) < max_results:
-            external_results = await MovieSearch._search_external_sources(title, max_results - len(results))
-            results.extend(external_results)
-            
-        return results
-    
-    @staticmethod
-    async def _search_external_sources(title, max_results):
-        results = []
-        # Implement searches from external APIs here
         return results
 
 # AI-powered intent recognition with fallback
@@ -308,12 +345,12 @@ class AIAssistant:
 # User management and analytics
 class UserManager:
     @staticmethod
-    def track_activity(user_id, username, first_name, action_type):
+    async def track_activity(user_id, username, first_name, action_type):
         try:
             # Update user stats
-            Database.execute_query('''
+            await Database.execute_query('''
                 INSERT INTO user_stats (user_id, username, first_name, last_active)
-                VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+                VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
                 ON CONFLICT (user_id) DO UPDATE SET
                 last_active = CURRENT_TIMESTAMP,
                 username = EXCLUDED.username,
@@ -322,18 +359,41 @@ class UserManager:
             
             # Increment specific counter
             if action_type == 'search':
-                Database.execute_query('''
+                await Database.execute_query('''
                     UPDATE user_stats SET search_count = search_count + 1 
-                    WHERE user_id = %s
+                    WHERE user_id = $1
                 ''', (user_id,))
             elif action_type == 'request':
-                Database.execute_query('''
+                await Database.execute_query('''
                     UPDATE user_stats SET request_count = request_count + 1 
-                    WHERE user_id = %s
+                    WHERE user_id = $1
                 ''', (user_id,))
                 
         except Exception as e:
             logger.error(f"Error tracking user activity: {e}")
+
+# Rate limiting with Redis fallback
+async def check_rate_limit(user_id):
+    """Check if user has exceeded rate limit"""
+    try:
+        redis_conn = await RedisManager.get_connection()
+        if redis_conn:
+            key = f"rate_limit:{user_id}"
+            current = redis_conn.get(key)
+            if current and int(current) >= Config.REQUEST_LIMIT:
+                return False
+            
+            if current:
+                redis_conn.incr(key)
+            else:
+                redis_conn.setex(key, Config.REQUEST_WINDOW, 1)
+            return True
+        else:
+            # If Redis is not available, allow all requests
+            return True
+    except Exception as e:
+        logger.error(f"Rate limit check error: {e}")
+        return True  # Allow request if rate limiting fails
 
 # Notification system with multiple channels
 class NotificationSystem:
@@ -367,14 +427,15 @@ Time: {datetime.now().strftime('%Y-%m-%d %I:%M %p')}
     async def notify_users(context, movie_title, movie_url, file_id=None):
         logger.info(f"Notifying users about: {movie_title}")
         try:
-            users = Database.execute_query(
-                "SELECT user_id, group_id FROM user_requests WHERE movie_title ILIKE %s AND notified = FALSE",
-                (f'%{movie_title}%',),
+            users = await Database.execute_query(
+                "SELECT user_id, group_id FROM user_requests WHERE movie_title ILIKE $1 AND notified = FALSE",
+                f'%{movie_title}%',
                 fetch=True
             )
             
             notified_count = 0
-            for user_id, group_id in users:
+            for user in users:
+                user_id = user['user_id']
                 try:
                     if file_id:
                         await context.bot.send_document(chat_id=user_id, document=file_id)
@@ -388,8 +449,8 @@ Time: {datetime.now().strftime('%Y-%m-%d %I:%M %p')}
                         )
                     
                     # Mark as notified
-                    Database.execute_query(
-                        "UPDATE user_requests SET notified = TRUE WHERE user_id = %s AND movie_title ILIKE %s",
+                    await Database.execute_query(
+                        "UPDATE user_requests SET notified = TRUE WHERE user_id = $1 AND movie_title ILIKE $2",
                         (user_id, f'%{movie_title}%')
                     )
                     notified_count += 1
@@ -449,7 +510,7 @@ class BotHandlers:
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             user = update.effective_user
-            UserManager.track_activity(user.id, user.username, user.first_name, 'start')
+            await UserManager.track_activity(user.id, user.username, user.first_name, 'start')
             
             welcome_text = """
             🎬 Welcome to MovieFinder Bot! 🎬
@@ -477,19 +538,11 @@ class BotHandlers:
             user = update.effective_user
             
             # Apply rate limiting
-            if redis_conn:
-                key = f"rate_limit:{user.id}"
-                current = redis_conn.get(key)
-                if current and int(current) >= Config.REQUEST_LIMIT:
-                    await update.message.reply_text("🚫 You've reached your hourly request limit. Please try again later.")
-                    return States.MAIN_MENU
-                
-                if current:
-                    redis_conn.incr(key)
-                else:
-                    redis_conn.setex(key, Config.REQUEST_WINDOW, 1)
+            if not await check_rate_limit(user.id):
+                await update.message.reply_text("🚫 You've reached your hourly request limit. Please try again later.")
+                return States.MAIN_MENU
             
-            UserManager.track_activity(user.id, user.username, user.first_name, 'search')
+            await UserManager.track_activity(user.id, user.username, user.first_name, 'search')
             
             if len(user_message) < 3:
                 await update.message.reply_text("Please enter at least 3 characters to search.")
@@ -548,7 +601,7 @@ class BotHandlers:
                             )
             else:
                 # No results found, offer to request the movie
-                store_user_request(
+                await store_user_request(
                     user.id, user.username, user.first_name, user_message,
                     update.effective_chat.id if update.effective_chat.type != "private" else None,
                     update.message.message_id
@@ -583,14 +636,13 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return States.REQUESTING
     elif text == '📊 My Stats':
         try:
-            stats = Database.execute_query(
-                "SELECT search_count, request_count, last_active FROM user_stats WHERE user_id = %s",
+            stats = await Database.execute_query(
+                "SELECT search_count, request_count, last_active FROM user_stats WHERE user_id = $1",
                 (user.id,),
-                fetch=True
+                fetchrow=True
             )
             if stats:
-                search_count, request_count, last_active = stats[0]
-                response = f"📊 Your Stats:\n\n🔍 Searches: {search_count}\n🙋 Requests: {request_count}\n🕐 Last Active: {last_active.strftime('%Y-%m-%d %H:%M')}"
+                response = f"📊 Your Stats:\n\n🔍 Searches: {stats['search_count']}\n🙋 Requests: {stats['request_count']}\n🕐 Last Active: {stats['last_active'].strftime('%Y-%m-%d %H:%M')}"
             else:
                 response = "📊 Your Stats:\n\nNo activity recorded yet."
             await update.message.reply_text(response)
@@ -627,13 +679,12 @@ async def request_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return States.REQUESTING
     
     # Store the request
-    success = store_user_request(user.id, user.username, user.first_name, movie_title)
+    success = await store_user_request(user.id, user.username, user.first_name, movie_title)
     
     if success:
         # Notify admin
         try:
-            app = Application.builder().token(Config.TELEGRAM_BOT_TOKEN).build()
-            await NotificationSystem.notify_admin(app, user, movie_title)
+            await NotificationSystem.notify_admin(context, user, movie_title)
         except Exception as e:
             logger.error(f"Error notifying admin: {e}")
         
@@ -650,8 +701,8 @@ async def process_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     
     try:
-        Database.execute_query(
-            "INSERT INTO feedback (user_id, message) VALUES (%s, %s)",
+        await Database.execute_query(
+            "INSERT INTO feedback (user_id, message) VALUES ($1, $2)",
             (user.id, feedback_text)
         )
         await update.message.reply_text("✅ Thank you for your feedback!")
@@ -674,8 +725,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         
         try:
-            Database.execute_query(
-                "INSERT INTO feedback (user_id, message, rating) VALUES (%s, %s, %s)",
+            await Database.execute_query(
+                "INSERT INTO feedback (user_id, message, rating) VALUES ($1, $2, $3)",
                 (user.id, f"User rating: {rating} stars", rating)
             )
             await query.edit_message_text(f"✅ Thank you for your {rating} star rating!")
@@ -687,7 +738,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         movie_title = data.replace('request_', '')
         user = update.effective_user
         
-        success = store_user_request(user.id, user.username, user.first_name, movie_title)
+        success = await store_user_request(user.id, user.username, user.first_name, movie_title)
         if success:
             await query.edit_message_text(f"✅ Your request for '{movie_title}' has been recorded!")
         else:
@@ -702,14 +753,13 @@ async def user_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show user statistics"""
     user = update.effective_user
     try:
-        stats = Database.execute_query(
-            "SELECT search_count, request_count, last_active FROM user_stats WHERE user_id = %s",
+        stats = await Database.execute_query(
+            "SELECT search_count, request_count, last_active FROM user_stats WHERE user_id = $1",
             (user.id,),
-            fetch=True
+            fetchrow=True
         )
         if stats:
-            search_count, request_count, last_active = stats[0]
-            response = f"📊 Your Stats:\n\n🔍 Searches: {search_count}\n🙋 Requests: {request_count}\n🕐 Last Active: {last_active.strftime('%Y-%m-%d %H:%M')}"
+            response = f"📊 Your Stats:\n\n🔍 Searches: {stats['search_count']}\n🙋 Requests: {stats['request_count']}\n🕐 Last Active: {stats['last_active'].strftime('%Y-%m-%d %H:%M')}"
         else:
             response = "📊 Your Stats:\n\nNo activity recorded yet."
         await update.message.reply_text(response)
@@ -717,7 +767,7 @@ async def user_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error getting user stats: {e}")
         await update.message.reply_text("❌ Error retrieving your stats.")
 
-async def feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def feedback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start feedback conversation"""
     await update.message.reply_text("💬 Please share your feedback or suggestions:")
     return States.FEEDBACK
@@ -751,11 +801,15 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text("📝 Admin movie addition feature will be implemented here.")
 
-# SIMPLIFIED APPROACH - Run bot and Flask in same process but different approach
-def run_bot():
-    """Run the Telegram bot synchronously"""
+# Main bot runner
+async def run_bot():
+    """Run the Telegram bot asynchronously"""
     try:
-        logger.info("Starting bot...")
+        logger.info("🔄 Starting bot initialization...")
+        
+        # Initialize connections first
+        await RedisManager.initialize_redis()
+        await setup_database()
         
         # Create application
         application = Application.builder().token(Config.TELEGRAM_BOT_TOKEN).build()
@@ -781,70 +835,23 @@ def run_bot():
         # Add command handlers
         application.add_handler(CommandHandler("addmovie", add_movie))
         application.add_handler(CommandHandler("stats", user_stats))
-        application.add_handler(CommandHandler("feedback", feedback))
+        application.add_handler(CommandHandler("feedback", feedback_handler))
         application.add_handler(CommandHandler("help", help_command))
         
         # Run the bot
-        logger.info("Bot starting polling...")
-        application.run_polling(drop_pending_updates=True)
+        logger.info("✅ Bot starting polling...")
+        await application.run_polling(drop_pending_updates=True)
         
     except Exception as e:
-        logger.error(f"Bot failed to start: {e}")
+        logger.error(f"❌ Bot failed to start: {e}")
+        raise e
 
-# Flask routes for web interface
-@app.route('/')
-def home():
-    return jsonify({
-        "status": "online",
-        "service": "MovieFinder Bot",
-        "version": "2.0",
-        "timestamp": datetime.now().isoformat()
-    })
-
-@app.route('/stats')
-def stats():
-    try:
-        users = Database.execute_query(
-            "SELECT COUNT(*) FROM user_stats",
-            fetch=True
-        )[0][0]
-        
-        movies = Database.execute_query(
-            "SELECT COUNT(*) FROM movies",
-            fetch=True
-        )[0][0]
-        
-        requests = Database.execute_query(
-            "SELECT COUNT(*) FROM user_requests WHERE notified = FALSE",
-            fetch=True
-        )[0][0]
-        
-        return jsonify({
-            "users": users,
-            "movies": movies,
-            "pending_requests": requests
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/admin/update', methods=['POST'])
-def admin_update():
-    if request.headers.get('Authorization') != f"Bearer {Config.UPDATE_SECRET}":
-        return jsonify({"error": "Unauthorized"}), 401
-    
-    try:
-        return jsonify({"status": "success", "message": "Update endpoint ready"})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-# For Background Worker, use this in main():
-def main():
-    if not setup_database():
-        logger.error("Failed to initialize database. Exiting.")
-        return
-    
-    # Run only the bot - no Flask
-    run_bot()
+# Main function
+async def main():
+    """Main async function"""
+    logger.info("🚀 Starting MovieFinder Bot...")
+    await run_bot()
 
 if __name__ == "__main__":
-    main()
+    # Run the bot
+    asyncio.run(main())
