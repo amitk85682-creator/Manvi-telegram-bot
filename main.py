@@ -5,6 +5,7 @@ import json
 import re
 import aiohttp
 import psycopg2
+from psycopg2 import
 import telegram
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
