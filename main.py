@@ -66,6 +66,9 @@ if Config.REDIS_URL:
         logger.warning("Redis connection failed, proceeding without cache")
         redis_conn = None
 
+# Corrected import for the connection pool
+from psycopg2 import pool
+
 # Database connection pool
 class Database:
     _connection_pool = None
@@ -73,7 +76,8 @@ class Database:
     @classmethod
     def get_connection(cls):
         if cls._connection_pool is None:
-            cls._connection_pool = psycopg2.pool.SimpleConnectionPool(
+            # Use the correct class: SimpleConnectionPool
+            cls._connection_pool = pool.SimpleConnectionPool(
                 1, 10, Config.DATABASE_URL
             )
         return cls._connection_pool.getconn()
@@ -81,21 +85,33 @@ class Database:
     @classmethod
     def return_connection(cls, conn):
         cls._connection_pool.putconn(conn)
-    
-    @classmethod
-    def execute_query(cls, query, params=None, fetch=False):
-        conn = cls.get_connection()
+
+# Database setup with retry logic - FIXED
+def setup_database(retries=3, delay=2):
+    conn = None  # Initialize the variable outside the try block :cite[3]
+    for attempt in range(retries):
         try:
-            with conn.cursor() as cur:
-                cur.execute(query, params)
-                if fetch:
-                    return cur.fetchall()
-                conn.commit()
+            conn = Database.get_connection()  # This assignment is now visible in the finally block
+            cur = conn.cursor()
+            
+            # ... (your existing table creation SQL statements remain the same) ...
+
+            conn.commit()
+            cur.close()
+            logger.info("Database setup completed successfully")
+            return True
+            
         except Exception as e:
-            conn.rollback()
-            raise e
+            logger.error(f"Database setup attempt {attempt + 1} failed: {e}")
+            if attempt < retries - 1:
+                time.sleep(delay)
+            else:
+                logger.error("All database setup attempts failed")
+                return False
         finally:
-            cls.return_connection(conn)
+            # This block will now execute without error because 'conn' is always defined
+            if conn is not None:
+                Database.return_connection(conn)
 
 # Rate limiting decorator
 def rate_limit(user_id):
