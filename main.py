@@ -5,7 +5,8 @@ import json
 import re
 import aiohttp
 import psycopg2
-from psycopg2 import pool  # Explicit import for connection pool
+from psycopg2 import pool
+import threading  # Add this import
 import telegram
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -67,7 +68,7 @@ if Config.REDIS_URL:
         logger.warning("Redis connection failed, proceeding without cache")
         redis_conn = None
 
-# Database connection pool - FIXED VERSION
+# Database connection pool
 class Database:
     _connection_pool = None
     
@@ -76,7 +77,6 @@ class Database:
         """Initialize the connection pool"""
         try:
             if cls._connection_pool is None:
-                # Use SimpleConnectionPool from psycopg2.pool
                 cls._connection_pool = psycopg2.pool.SimpleConnectionPool(
                     1, 10, Config.DATABASE_URL
                 )
@@ -122,64 +122,13 @@ class Database:
             if conn:
                 cls.return_connection(conn)
 
-# Rate limiting decorator
-def rate_limit(user_id):
-    def decorator(func):
-        @wraps(func)
-        async def wrapper(update, context, *args, **kwargs):
-            if not redis_conn:
-                return await func(update, context, *args, **kwargs)
-                
-            key = f"rate_limit:{user_id}"
-            current = redis_conn.get(key)
-            
-            if current and int(current) >= Config.REQUEST_LIMIT:
-                await update.message.reply_text(
-                    "🚫 You've reached your hourly request limit. Please try again later."
-                )
-                return
-            
-            # Increment counter
-            if current:
-                redis_conn.incr(key)
-            else:
-                redis_conn.setex(key, Config.REQUEST_WINDOW, 1)
-                
-            return await func(update, context, *args, **kwargs)
-        return wrapper
-    return decorator
-
-# Cache decorator
-def cache_response(ttl=300):
-    def decorator(func):
-        @wraps(func)
-        async def wrapper(*args, **kwargs):
-            if not redis_conn:
-                return await func(*args, **kwargs)
-                
-            # Create cache key from function name and arguments
-            key = f"cache:{func.__name__}:{hashlib.md5(str(args).encode() + str(kwargs).encode()).hexdigest()}"
-            
-            # Try to get cached result
-            cached = redis_conn.get(key)
-            if cached:
-                return json.loads(cached)
-                
-            # Call function and cache result
-            result = await func(*args, **kwargs)
-            redis_conn.setex(key, ttl, json.dumps(result))
-            return result
-        return wrapper
-    return decorator
-
-# Database setup with retry logic - FIXED VERSION
+# Database setup with retry logic
 def setup_database(retries=3, delay=2):
     """Setup database tables with proper error handling"""
-    conn = None  # Initialize conn to None to avoid UnboundLocalError :cite[1]:cite[8]
+    conn = None
     
     for attempt in range(retries):
         try:
-            # Initialize database pool first
             if not Database.initialize_pool():
                 raise Exception("Failed to initialize database pool")
             
@@ -263,7 +212,6 @@ def setup_database(retries=3, delay=2):
                 logger.error("All database setup attempts failed")
                 return False
         finally:
-            # Only return connection if it was successfully created :cite[1]
             if conn is not None:
                 Database.return_connection(conn)
 
@@ -285,7 +233,6 @@ def store_user_request(user_id, username, first_name, movie_title, group_id=None
 # Enhanced movie search with multiple sources
 class MovieSearch:
     @staticmethod
-    @cache_response(ttl=3600)
     async def search_movie(title, max_results=5):
         results = []
         
@@ -320,7 +267,6 @@ class MovieSearch:
     async def _search_external_sources(title, max_results):
         results = []
         # Implement searches from external APIs here
-        # Example: TMDB, OMDB, etc.
         return results
 
 # AI-powered intent recognition with fallback
@@ -489,7 +435,7 @@ class Keyboards:
             [InlineKeyboardButton("⭐", callback_data="rate_1"),
              InlineKeyboardButton("⭐⭐", callback_data="rate_2"),
              InlineKeyboardButton("⭐⭐⭐", callback_data="rate_3"),
-             InInlineKeyboardButton("⭐⭐⭐⭐", callback_data="rate_4"),
+             InlineKeyboardButton("⭐⭐⭐⭐", callback_data="rate_4"),
              InlineKeyboardButton("⭐⭐⭐⭐⭐", callback_data="rate_5")]
         ]
         return InlineKeyboardMarkup(keyboard)
@@ -805,6 +751,44 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text("📝 Admin movie addition feature will be implemented here.")
 
+# Fixed run_bot function with proper event loop handling
+def run_bot():
+    """Run the Telegram bot in the background thread with its own event loop."""
+    try:
+        # Create a new event loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        logger.info("Starting bot...")
+        application = Application.builder().token(Config.TELEGRAM_BOT_TOKEN).build()
+        
+        # Add conversation handler
+        conv_handler = ConversationHandler(
+            entry_points=[CommandHandler('start', BotHandlers(application).start)],
+            states={
+                States.MAIN_MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, main_menu)],
+                States.SEARCHING: [MessageHandler(filters.TEXT & ~filters.COMMAND, BotHandlers(application).search_movies)],
+                States.REQUESTING: [MessageHandler(filters.TEXT & ~filters.COMMAND, request_movie)],
+                States.FEEDBACK: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_feedback)],
+            },
+            fallbacks=[CommandHandler('cancel', cancel)],
+        )
+        
+        application.add_handler(conv_handler)
+        application.add_handler(CallbackQueryHandler(button_callback))
+        
+        # Add command handlers
+        application.add_handler(CommandHandler("addmovie", add_movie))
+        application.add_handler(CommandHandler("stats", user_stats))
+        application.add_handler(CommandHandler("feedback", feedback))
+        application.add_handler(CommandHandler("help", help_command))
+        
+        # Run the bot
+        application.run_polling(drop_pending_updates=True)
+        
+    except Exception as e:
+        logger.error(f"Bot failed to start: {e}")
+
 # Flask routes for web interface
 @app.route('/')
 def home():
@@ -847,15 +831,9 @@ def admin_update():
         return jsonify({"error": "Unauthorized"}), 401
     
     try:
-        # Placeholder for movie update logic
         return jsonify({"status": "success", "message": "Update endpoint ready"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
-# Update movies function placeholder
-def update_movies_from_blog():
-    """Placeholder for movie update logic"""
-    return {"updated": 0, "message": "Update functionality to be implemented"}
 
 # Main application setup
 def main():
@@ -864,63 +842,14 @@ def main():
         logger.error("Failed to initialize database. Exiting.")
         return
     
-    # Create Telegram application
-    application = Application.builder().token(Config.TELEGRAM_BOT_TOKEN).build()
-    
-    # Initialize handlers
-    bot_handlers = BotHandlers(application)
-    
-    # Add conversation handler
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler('start', bot_handlers.start)],
-        states={
-            States.MAIN_MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, main_menu)],
-            States.SEARCHING: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot_handlers.search_movies)],
-            States.REQUESTING: [MessageHandler(filters.TEXT & ~filters.COMMAND, request_movie)],
-            States.FEEDBACK: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_feedback)],
-        },
-        fallbacks=[CommandHandler('cancel', cancel)],
-    )
-    
-    application.add_handler(conv_handler)
-    application.add_handler(CallbackQueryHandler(button_callback))
-    
-    # Add command handlers
-    application.add_handler(CommandHandler("addmovie", add_movie))
-    application.add_handler(CommandHandler("stats", user_stats))
-    application.add_handler(CommandHandler("feedback", feedback))
-    application.add_handler(CommandHandler("help", help_command))
-    
-    # Corrected run_bot function
-def run_bot():
-    """Run the Telegram bot in the background thread with its own event loop."""
-    try:
-        # Create a new event loop for this thread
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        logger.info("Starting bot...")
-        # If using python-telegram-bot v21.x with asyncio
-        application.run_polling(
-            drop_pending_updates=True
-        )
-        # Alternatively, for v20.x, you might need:
-        # loop.run_until_complete(application.run_polling(drop_pending_updates=True))
-        
-    except Exception as e:
-        logger.error(f"Bot failed to start: {e}")
-
-# In your main() function, replace the current bot thread startup with:
-def main():
-    # ... (your existing setup code: database, application, handlers)
-    
     # Start bot in a separate thread
     bot_thread = threading.Thread(target=run_bot, daemon=True)
     bot_thread.start()
     
-    # Start Flask app in the main thread
+    # Start Flask app in main thread
     logger.info(f"Starting web server on port {Config.PORT}")
-    app.run(host='0.0.0.0', port=Config.PORT, debug=False, use_reloader=False)
+    from waitress import serve
+    serve(app, host='0.0.0.0', port=Config.PORT)
 
 if __name__ == "__main__":
     main()
