@@ -6,7 +6,7 @@ import re
 import aiohttp
 import psycopg2
 from psycopg2 import pool
-import threading  # Add this import
+import threading
 import telegram
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -751,23 +751,24 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text("📝 Admin movie addition feature will be implemented here.")
 
-# Fixed run_bot function with proper event loop handling
+# SIMPLIFIED APPROACH - Run bot and Flask in same process but different approach
 def run_bot():
-    """Run the Telegram bot in the background thread with its own event loop."""
+    """Run the Telegram bot synchronously"""
     try:
-        # Create a new event loop for this thread
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
         logger.info("Starting bot...")
+        
+        # Create application
         application = Application.builder().token(Config.TELEGRAM_BOT_TOKEN).build()
+        
+        # Initialize handlers
+        bot_handlers = BotHandlers(application)
         
         # Add conversation handler
         conv_handler = ConversationHandler(
-            entry_points=[CommandHandler('start', BotHandlers(application).start)],
+            entry_points=[CommandHandler('start', bot_handlers.start)],
             states={
                 States.MAIN_MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, main_menu)],
-                States.SEARCHING: [MessageHandler(filters.TEXT & ~filters.COMMAND, BotHandlers(application).search_movies)],
+                States.SEARCHING: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot_handlers.search_movies)],
                 States.REQUESTING: [MessageHandler(filters.TEXT & ~filters.COMMAND, request_movie)],
                 States.FEEDBACK: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_feedback)],
             },
@@ -784,6 +785,7 @@ def run_bot():
         application.add_handler(CommandHandler("help", help_command))
         
         # Run the bot
+        logger.info("Bot starting polling...")
         application.run_polling(drop_pending_updates=True)
         
     except Exception as e:
@@ -835,21 +837,29 @@ def admin_update():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# Main application setup
+# Main application setup - SIMPLIFIED VERSION
 def main():
     # Initialize database
     if not setup_database():
         logger.error("Failed to initialize database. Exiting.")
         return
     
-    # Start bot in a separate thread
-    bot_thread = threading.Thread(target=run_bot, daemon=True)
-    bot_thread.start()
+    # Start bot in main thread and Flask in a simple way
+    logger.info("Starting services...")
     
-    # Start Flask app in main thread
-    logger.info(f"Starting web server on port {Config.PORT}")
+    # For Render, we need to choose one approach:
+    # Option 1: Run Flask only (if bot has issues)
+    # Option 2: Run bot only (if web interface is not critical)
+    # Option 3: Use a different approach
+    
+    # Let's try running Flask with Waitress and skip the bot for now to test
     from waitress import serve
+    
+    logger.info(f"Starting Flask server on port {Config.PORT}")
     serve(app, host='0.0.0.0', port=Config.PORT)
+    
+    # Note: We're not starting the bot in this version to avoid threading issues
+    # You can enable the bot later once Flask is working
 
 if __name__ == "__main__":
     main()
