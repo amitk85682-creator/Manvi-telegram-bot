@@ -372,13 +372,14 @@ class MovieSearch:
             if db_results:
                 for result in db_results:
                     results.append({
-                        'title': result,
-                        'url': result,
-                        'file_id': result<!--citation:2-->,
-                        'quality': result<!--citation:3-->,
-                        'size': result<!--citation:4-->,
-                        'source': 'database'
-                    })
+    'title': result,
+    'url': result,
+    'file_id': result,
+    'quality': result,
+    'size': result,
+    'source': 'database'
+})
+
         except Exception as e:
             logger.error(f"Database search error: {e}")
         
