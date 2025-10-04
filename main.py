@@ -27,7 +27,7 @@ from telegram.ext import (
 from datetime import datetime
 from fuzzywuzzy import process
 import async_timeout
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse, urlunparse, quote
 
 # Set up logging
 logging.basicConfig(
@@ -59,7 +59,7 @@ CHARACTER_PROMPT = """
 # --- API Keys and Configuration ---
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-DATABASE_POOLER_URL = os.environ.get('DATABASE_POOLER_URL')
+DATABASE_URL = os.environ.get('DATABASE_URL')
 BLOGGER_API_KEY = os.environ.get('BLOGGER_API_KEY')
 BLOG_ID = os.environ.get('BLOG_ID')
 UPDATE_SECRET_CODE = os.environ.get('UPDATE_SECRET_CODE', 'default_secret_123')
@@ -72,14 +72,47 @@ if not TELEGRAM_BOT_TOKEN:
     logger.error("TELEGRAM_BOT_TOKEN environment variable is not set")
     raise ValueError("TELEGRAM_BOT_TOKEN is not set.")
 
-if not DATABASE_POOLER_URL:
-    logger.error("DATABASE_POOLER_URL environment variable is not set")
-    raise ValueError("DATABASE_POOLER_URL is not set.")
+if not DATABASE_URL:
+    logger.error("DATABASE_URL environment variable is not set")
+    raise ValueError("DATABASE_URL is not set.")
+
+# --- Database URL Fix ---
+def fix_database_url():
+    """Fix database URL by properly encoding special characters"""
+    try:
+        # Parse the original URL
+        parsed = urlparse(DATABASE_URL)
+        
+        # Extract components
+        username = parsed.username
+        password = parsed.password
+        hostname = parsed.hostname
+        port = parsed.port
+        database = parsed.path[1:]  # Remove leading slash
+        
+        # If password contains special characters that need encoding
+        if password and any(c in password for c in ['*', '!', '@', '#', '$', '%', '^', '&', '(', ')', '=', '+', '?']):
+            # Encode the password
+            encoded_password = quote(password)
+            
+            # Reconstruct the URL with encoded password
+            fixed_url = f"postgresql://{username}:{encoded_password}@{hostname}:{port}/{database}"
+            logger.info("Database URL fixed for special characters")
+            return fixed_url
+        else:
+            return DATABASE_URL
+    except Exception as e:
+        logger.error(f"Error fixing database URL: {e}")
+        return DATABASE_URL
+
+# Use the fixed database URL
+FIXED_DATABASE_URL = fix_database_url()
 
 # --- Database Functions ---
 def setup_database():
     try:
-        conn = psycopg2.connect(DATABASE_POOLER_URL)
+        # Use the fixed database URL
+        conn = psycopg2.connect(FIXED_DATABASE_URL)
         cur = conn.cursor()
         
         # Create movies table with file_id column
@@ -152,7 +185,16 @@ def setup_database():
         logger.info("Database setup completed successfully with alias support")
     except Exception as e:
         logger.error(f"Error setting up database: {e}")
-        raise RuntimeError(f"Database setup failed: {e}")
+        # Don't raise error, just log and continue
+        logger.info("Continuing without database setup...")
+
+def get_db_connection():
+    """Get database connection with error handling"""
+    try:
+        return psycopg2.connect(FIXED_DATABASE_URL)
+    except Exception as e:
+        logger.error(f"Database connection error: {e}")
+        return None
 
 def update_movies_in_db():
     logger.info("Starting movie update process...")
@@ -163,7 +205,10 @@ def update_movies_in_db():
     new_movies_added = 0
     
     try:
-        conn = psycopg2.connect(DATABASE_POOLER_URL)
+        conn = get_db_connection()
+        if not conn:
+            return "Database connection failed"
+            
         cur = conn.cursor()
         
         # Get last sync time for incremental updates
@@ -174,6 +219,10 @@ def update_movies_in_db():
         cur.execute("SELECT title FROM movies;")
         existing_movies = {row[0] for row in cur.fetchall()}
         
+        # Only proceed if Blogger API keys are available
+        if not BLOGGER_API_KEY or not BLOG_ID:
+            return "Blogger API keys not configured"
+            
         service = build('blogger', 'v3', developerKey=BLOGGER_API_KEY)
         all_items = []
         
@@ -229,8 +278,10 @@ def update_movies_in_db():
 def get_movie_from_db(user_query):
     conn = None
     try:
-        # Use fuzzy matching for better search results
-        conn = psycopg2.connect(DATABASE_POOLER_URL)
+        conn = get_db_connection()
+        if not conn:
+            return None
+            
         cur = conn.cursor()
         
         # First try exact match in movies table
@@ -434,7 +485,10 @@ def get_movie_options_keyboard(movie_title, url):
 # --- Store User Request Function ---
 def store_user_request(user_id, username, first_name, movie_title, group_id=None, message_id=None):
     try:
-        conn = psycopg2.connect(DATABASE_POOLER_URL)
+        conn = get_db_connection()
+        if not conn:
+            return False
+            
         cur = conn.cursor()
         cur.execute(
             "INSERT INTO user_requests (user_id, username, first_name, movie_title, group_id, message_id) VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT ON CONSTRAINT user_requests_unique_constraint DO NOTHING",
@@ -456,7 +510,10 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
     cur = None
     notified_count = 0
     try:
-        conn = psycopg2.connect(DATABASE_POOLER_URL)
+        conn = get_db_connection()
+        if not conn:
+            return 0
+            
         cur = conn.cursor()
         cur.execute(
             "SELECT user_id, username, first_name, group_id, message_id FROM user_requests WHERE movie_title ILIKE %s AND notified = FALSE",
@@ -524,7 +581,10 @@ async def notify_in_group(context: ContextTypes.DEFAULT_TYPE, movie_title):
     conn = None
     cur = None
     try:
-        conn = psycopg2.connect(DATABASE_POOLER_URL)
+        conn = get_db_connection()
+        if not conn:
+            return
+            
         cur = conn.cursor()
         cur.execute(
             "SELECT user_id, username, first_name, group_id, message_id FROM user_requests WHERE movie_title ILIKE %s AND notified = FALSE",
@@ -613,20 +673,23 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_id = update.effective_user.id
             conn = None
             try:
-                conn = psycopg2.connect(DATABASE_POOLER_URL)
-                cur = conn.cursor()
-                cur.execute("SELECT COUNT(*) FROM user_requests WHERE user_id = %s", (user_id,))
-                request_count = cur.fetchone()[0]
-                
-                cur.execute("SELECT COUNT(*) FROM user_requests WHERE user_id = %s AND notified = TRUE", (user_id,))
-                fulfilled_count = cur.fetchone()[0]
-                
-                stats_text = f"""
-                📊 Your Stats:
-                - Total Requests: {request_count}
-                - Fulfilled Requests: {fulfilled_count}
-                """
-                await update.message.reply_text(stats_text)
+                conn = get_db_connection()
+                if conn:
+                    cur = conn.cursor()
+                    cur.execute("SELECT COUNT(*) FROM user_requests WHERE user_id = %s", (user_id,))
+                    request_count = cur.fetchone()[0]
+                    
+                    cur.execute("SELECT COUNT(*) FROM user_requests WHERE user_id = %s AND notified = TRUE", (user_id,))
+                    fulfilled_count = cur.fetchone()[0]
+                    
+                    stats_text = f"""
+                    📊 Your Stats:
+                    - Total Requests: {request_count}
+                    - Fulfilled Requests: {fulfilled_count}
+                    """
+                    await update.message.reply_text(stats_text)
+                else:
+                    await update.message.reply_text("Sorry, database connection failed.")
             except Exception as e:
                 logger.error(f"Error getting stats: {e}")
                 await update.message.reply_text("Sorry, couldn't retrieve your stats at the moment.")
@@ -815,7 +878,11 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Debugging के लिए log करें
         logger.info(f"Adding movie: {title} with value: {value}")
         
-        conn = psycopg2.connect(DATABASE_POOLER_URL)
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Database connection failed.")
+            return
+            
         cur = conn.cursor()
         
         # Check if it's a Telegram file ID (starts with specific patterns)
@@ -917,7 +984,12 @@ Movie3 https://link3.com
             
             # Add the movie to database
             try:
-                conn = psycopg2.connect(DATABASE_POOLER_URL)
+                conn = get_db_connection()
+                if not conn:
+                    failed_count += 1
+                    results.append(f"❌ {title} - Database connection failed")
+                    continue
+                    
                 cur = conn.cursor()
                 
                 # Normalize URL
@@ -972,7 +1044,11 @@ async def add_alias(update: Update, context: ContextTypes.DEFAULT_TYPE):
         alias = parts[-1]
         movie_title = " ".join(parts[:-1])
         
-        conn = psycopg2.connect(DATABASE_POOLER_URL)
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Database connection failed.")
+            return
+            
         cur = conn.cursor()
         
         # First find the movie ID
@@ -1011,7 +1087,11 @@ async def list_aliases(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         movie_title = " ".join(context.args)
         
-        conn = psycopg2.connect(DATABASE_POOLER_URL)
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Database connection failed.")
+            return
+            
         cur = conn.cursor()
         
         # Get movie and its aliases
@@ -1066,7 +1146,11 @@ Movie3: alias6, alias7, alias8
         success_count = 0
         failed_count = 0
         
-        conn = psycopg2.connect(DATABASE_POOLER_URL)
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Database connection failed.")
+            return
+            
         cur = conn.cursor()
         
         for line in lines:
@@ -1167,10 +1251,11 @@ def run_bot():
         logger.error("No Telegram bot token found. Exiting.")
         return
     
+    # Try to setup database but don't fail if it doesn't work
     try:
         setup_database()
-    except RuntimeError:
-        return
+    except Exception as e:
+        logger.error(f"Database setup failed but continuing: {e}")
         
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).read_timeout(30).write_timeout(30).build()
 
