@@ -895,16 +895,17 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Check if it's any kind of URL
         elif "http" in value or "." in value:
-            # Normalize and validate the URL
-            normalized_url = normalize_url(value)
+            # ADMIN URLs को normalize न करें, वही store करें जो admin ने दिया है
+            normalized_url = value.strip()  # Simply use the URL as provided by admin
             
-            if not is_valid_url(normalized_url):
-                await update.message.reply_text("❌ Invalid URL format. Please provide a valid URL.")
+            # सिर्फ basic validation
+            if not value.startswith(('http://', 'https://')):
+                await update.message.reply_text("❌ Invalid URL format. URL must start with http:// or https://")
                 return
             
             cur.execute(
                 "INSERT INTO movies (title, url) VALUES (%s, %s) ON CONFLICT (title) DO UPDATE SET url = EXCLUDED.url",
-                (title.strip(), normalized_url.strip())
+                (title.strip(), normalized_url)
             )
             message = f"✅ '{title}' को URL के साथ सफलतापूर्वक जोड़ दिया गया है।"
         
