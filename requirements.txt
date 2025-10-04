@@ -10,3 +10,10 @@ beautifulsoup4>=4.11
 async-timeout>=4.0
 aiohttp
 redis
+python-telegram-bot
+psycopg2-binary
+Flask
+google-generativeai
+redis
+aiohttp
+waitress
