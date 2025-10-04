@@ -373,7 +373,7 @@ class MovieSearch:
                 for result in db_results:
                     results.append({
                         'title': result,
-                        'url': result<!--citation:1-->,
+                        'url': result,
                         'file_id': result<!--citation:2-->,
                         'quality': result<!--citation:3-->,
                         'size': result<!--citation:4-->,
