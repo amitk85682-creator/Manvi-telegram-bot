@@ -37,9 +37,9 @@ logger = logging.getLogger(__name__)
 
 # Configuration with defaults for Render
 class Config:
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-DATABASE_URL = os.environ.get('DATABASE_URL')
+    TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+    GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+    DATABASE_URL = os.environ.get('DATABASE_URL')
 
 # Support both direct and pooler URLs
 DATABASE_POOLER_URL = os.environ.get('DATABASE_POOLER_URL', DATABASE_URL)
