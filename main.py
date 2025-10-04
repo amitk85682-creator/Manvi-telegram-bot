@@ -64,7 +64,7 @@ Automatically detects and uses pooler URL if on Render
 db_url = Config.DATABASE_POOLER_URL if Config.USE_POOLER else Config.DATABASE_URL
 
 if not db_url:
-logger.error("No database URL configured!")
+    logger.error("No database URL configured!")
 return None
 
 # Parse the database URL to check if it's a pooler URL
