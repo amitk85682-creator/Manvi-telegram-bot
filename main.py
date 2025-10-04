@@ -811,8 +811,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     
     if data.startswith('rate_'):
-    rating = int(data.split('_'))
-    user = update.effective_user
+        rating = int(data.split('_')
+        user = update.effective_user
         
         try:
             Database.execute_query(
