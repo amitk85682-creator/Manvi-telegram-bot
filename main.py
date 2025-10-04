@@ -4,7 +4,7 @@ import logging
 import json
 import re
 import aiohttp
-import asyncpg  # Replaced psycopg2 with asyncpg for better async support
+import asyncpg
 import redis
 import telegram
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
@@ -12,12 +12,10 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler, filters,
     ContextTypes, ConversationHandler, CallbackQueryHandler
 )
-from datetime import datetime, timedelta
-from functools import wraps
+from datetime import datetime
 import google.generativeai as genai
 import hashlib
 import time
-import ssl
 
 # Enhanced logging configuration
 logging.basicConfig(
@@ -30,154 +28,99 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Configuration with enhanced connection settings
+# Configuration
 class Config:
-    TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-    GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-    DATABASE_URL = os.environ.get('DATABASE_URL')
+    TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "your_bot_token_here")
+    GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+    DATABASE_URL = os.environ.get('DATABASE_URL', '')
     REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379')
-    BLOGGER_API_KEY = os.environ.get('BLOGGER_API_KEY')
-    BLOG_ID = os.environ.get('BLOG_ID')
-    UPDATE_SECRET = os.environ.get('UPDATE_SECRET', 'default_secret_123')
     ADMIN_USER_ID = int(os.environ.get('ADMIN_USER_ID', 0))
-    GROUP_CHAT_ID = os.environ.get('GROUP_CHAT_ID')
-    ADMIN_CHANNEL_ID = os.environ.get('ADMIN_CHANNEL_ID')
-    PORT = int(os.environ.get('PORT', 5000))
+    ADMIN_CHANNEL_ID = os.environ.get('ADMIN_CHANNEL_ID', '')
     REQUEST_LIMIT = int(os.environ.get('REQUEST_LIMIT', 20))
     REQUEST_WINDOW = int(os.environ.get('REQUEST_WINDOW', 3600))
-    
-    # Database connection settings
-    DB_MAX_CONNECTIONS = int(os.environ.get('DB_MAX_CONNECTIONS', 10))
-    DB_MIN_CONNECTIONS = int(os.environ.get('DB_MIN_CONNECTIONS', 1))
-    DB_COMMAND_TIMEOUT = int(os.environ.get('DB_COMMAND_TIMEOUT', 30))
 
 # Conversation states
 class States:
     MAIN_MENU, SEARCHING, REQUESTING, FEEDBACK = range(4)
 
-# Enhanced Redis connection with retry logic
-class RedisManager:
-    _instance = None
-    _redis_conn = None
+# Simple in-memory storage for fallback when database is unavailable
+class MemoryStorage:
+    def __init__(self):
+        self.user_requests = []
+        self.user_stats = {}
+        self.movies = []
+        self.rate_limits = {}
     
-    @classmethod
-    async def get_connection(cls):
-        if cls._redis_conn is None:
-            await cls.initialize_redis()
-        return cls._redis_conn
+    def add_request(self, user_id, username, first_name, movie_title):
+        self.user_requests.append({
+            'user_id': user_id,
+            'username': username,
+            'first_name': first_name,
+            'movie_title': movie_title,
+            'requested_at': datetime.now()
+        })
     
-    @classmethod
-    async def initialize_redis(cls, retries=3, delay=2):
-        for attempt in range(retries):
-            try:
-                if Config.REDIS_URL:
-                    # Parse Redis URL for proper configuration
-                    redis_url = Config.REDIS_URL
-                    if redis_url.startswith('rediss://'):  # SSL connection
-                        cls._redis_conn = redis.from_url(
-                            redis_url,
-                            ssl_cert_reqs=ssl.CERT_NONE,
-                            decode_responses=True
-                        )
-                    else:
-                        cls._redis_conn = redis.from_url(redis_url, decode_responses=True)
-                    
-                    # Test connection
-                    cls._redis_conn.ping()
-                    logger.info("✅ Redis connected successfully")
-                    return True
-                else:
-                    logger.warning("⚠️ No REDIS_URL provided, proceeding without Redis")
-                    return False
-            except Exception as e:
-                logger.warning(f"Redis connection attempt {attempt + 1} failed: {e}")
-                if attempt < retries - 1:
-                    await asyncio.sleep(delay)
-                else:
-                    logger.error("❌ All Redis connection attempts failed")
-                    cls._redis_conn = None
-                    return False
+    def get_user_stats(self, user_id):
+        return self.user_stats.get(user_id, {'search_count': 0, 'request_count': 0})
+    
+    def increment_stat(self, user_id, stat_type):
+        if user_id not in self.user_stats:
+            self.user_stats[user_id] = {'search_count': 0, 'request_count': 0}
+        self.user_stats[user_id][f'{stat_type}_count'] += 1
 
-# Async Database connection pool
-class Database:
+memory_storage = MemoryStorage()
+
+# Database manager with fallback to memory storage
+class DatabaseManager:
     _pool = None
+    _use_memory_fallback = False
     
     @classmethod
-    async def get_pool(cls):
-        if cls._pool is None:
-            await cls.initialize_pool()
-        return cls._pool
-    
-    @classmethod
-    async def initialize_pool(cls, retries=5, delay=3):
-        for attempt in range(retries):
-            try:
-                # Parse DATABASE_URL and ensure SSL for Supabase
-                db_url = Config.DATABASE_URL
-                
-                # For Supabase, we need to use SSL
-                if 'supabase' in db_url:
-                    # Ensure SSL parameters are included
-                    if 'sslmode' not in db_url:
-                        db_url += '?sslmode=require'
-                
-                logger.info(f"🔄 Attempting database connection (attempt {attempt + 1})...")
-                
-                cls._pool = await asyncpg.create_pool(
-                    dsn=db_url,
-                    min_size=Config.DB_MIN_CONNECTIONS,
-                    max_size=Config.DB_MAX_CONNECTIONS,
-                    command_timeout=Config.DB_COMMAND_TIMEOUT,
-                    # SSL configuration for Supabase
-                    ssl='require' if 'supabase' in db_url else False
-                )
-                
-                # Test connection
-                async with cls._pool.acquire() as conn:
-                    await conn.execute('SELECT 1')
-                
-                logger.info("✅ Database connection pool initialized successfully")
-                return True
-                
-            except Exception as e:
-                logger.error(f"Database connection attempt {attempt + 1} failed: {e}")
-                if attempt < retries - 1:
-                    logger.info(f"Retrying in {delay} seconds...")
-                    await asyncio.sleep(delay)
-                else:
-                    logger.error("❌ All database connection attempts failed")
-                    raise e
-    
-    @classmethod
-    async def execute_query(cls, query, params=None, fetch=False, fetchval=False, fetchrow=False):
-        pool = await cls.get_pool()
-        async with pool.acquire() as conn:
-            try:
-                if fetch:
-                    return await conn.fetch(query, *params) if params else await conn.fetch(query)
-                elif fetchval:
-                    return await conn.fetchval(query, *params) if params else await conn.fetchval(query)
-                elif fetchrow:
-                    return await conn.fetchrow(query, *params) if params else await conn.fetchrow(query)
-                else:
-                    return await conn.execute(query, *params) if params else await conn.execute(query)
-            except Exception as e:
-                logger.error(f"Database query error: {e} - Query: {query}")
-                raise e
-
-# Enhanced database setup with proper error handling
-async def setup_database(retries=5, delay=3):
-    """Setup database tables with proper error handling"""
-    for attempt in range(retries):
+    async def initialize(cls):
+        """Initialize database connection with fallback to memory storage"""
+        if not Config.DATABASE_URL:
+            logger.warning("No DATABASE_URL provided, using memory storage")
+            cls._use_memory_fallback = True
+            return True
+        
         try:
-            logger.info(f"🔄 Setting up database (attempt {attempt + 1})...")
+            # Parse and modify DATABASE_URL for Supabase
+            db_url = Config.DATABASE_URL
+            if 'supabase' in db_url and 'sslmode' not in db_url:
+                if '?' in db_url:
+                    db_url += '&sslmode=require'
+                else:
+                    db_url += '?sslmode=require'
             
-            # Initialize pool first
-            await Database.initialize_pool()
+            cls._pool = await asyncpg.create_pool(
+                db_url,
+                min_size=1,
+                max_size=10,
+                command_timeout=30
+            )
             
-            # Create tables
-            tables_queries = [
-                '''
+            # Test connection
+            async with cls._pool.acquire() as conn:
+                await conn.execute('SELECT 1')
+            
+            await cls._create_tables()
+            logger.info("✅ Database connected successfully")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Database connection failed: {e}")
+            logger.warning("🔄 Falling back to memory storage")
+            cls._use_memory_fallback = True
+            return False
+    
+    @classmethod
+    async def _create_tables(cls):
+        """Create necessary tables"""
+        if cls._use_memory_fallback:
+            return
+        
+        async with cls._pool.acquire() as conn:
+            await conn.execute('''
                 CREATE TABLE IF NOT EXISTS movies (
                     id SERIAL PRIMARY KEY,
                     title TEXT NOT NULL,
@@ -186,36 +129,22 @@ async def setup_database(retries=5, delay=3):
                     quality TEXT,
                     size TEXT,
                     language TEXT,
-                    year INTEGER,
-                    imdb_rating FLOAT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(title, quality, language)
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
-                ''',
-                '''
-                CREATE TABLE IF NOT EXISTS movie_aliases (
-                    id SERIAL PRIMARY KEY,
-                    movie_id INTEGER REFERENCES movies(id) ON DELETE CASCADE,
-                    alias TEXT NOT NULL,
-                    UNIQUE(movie_id, alias)
-                )
-                ''',
-                '''
+            ''')
+            
+            await conn.execute('''
                 CREATE TABLE IF NOT EXISTS user_requests (
                     id SERIAL PRIMARY KEY,
                     user_id BIGINT NOT NULL,
                     username TEXT,
                     first_name TEXT,
                     movie_title TEXT NOT NULL,
-                    requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    notified BOOLEAN DEFAULT FALSE,
-                    group_id BIGINT,
-                    message_id BIGINT,
-                    priority INTEGER DEFAULT 1
+                    requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
-                ''',
-                '''
+            ''')
+            
+            await conn.execute('''
                 CREATE TABLE IF NOT EXISTS user_stats (
                     user_id BIGINT PRIMARY KEY,
                     username TEXT,
@@ -224,248 +153,137 @@ async def setup_database(retries=5, delay=3):
                     request_count INTEGER DEFAULT 0,
                     last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
-                ''',
-                '''
-                CREATE TABLE IF NOT EXISTS feedback (
-                    id SERIAL PRIMARY KEY,
-                    user_id BIGINT NOT NULL,
-                    message TEXT NOT NULL,
-                    rating INTEGER,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-                '''
-            ]
-            
-            for query in tables_queries:
-                await Database.execute_query(query)
-            
-            # Create indexes for better performance
-            index_queries = [
-                'CREATE INDEX IF NOT EXISTS idx_movies_title ON movies(title)',
-                'CREATE INDEX IF NOT EXISTS idx_movies_title_lower ON movies(LOWER(title))',
-                'CREATE INDEX IF NOT EXISTS idx_user_requests_user_id ON user_requests(user_id)',
-                'CREATE INDEX IF NOT EXISTS idx_user_requests_movie_title ON user_requests(movie_title)',
-                'CREATE INDEX IF NOT EXISTS idx_user_requests_notified ON user_requests(notified)'
-            ]
-            
-            for query in index_queries:
-                await Database.execute_query(query)
-            
-            logger.info("✅ Database setup completed successfully")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Database setup attempt {attempt + 1} failed: {e}")
-            if attempt < retries - 1:
-                logger.info(f"Retrying database setup in {delay} seconds...")
-                await asyncio.sleep(delay)
-            else:
-                logger.error("❌ All database setup attempts failed")
-                return False
-
-# Store user request function
-async def store_user_request(user_id, username, first_name, movie_title, group_id=None, message_id=None):
-    """Store user movie request in database"""
-    try:
-        await Database.execute_query('''
-            INSERT INTO user_requests (user_id, username, first_name, movie_title, group_id, message_id)
-            VALUES ($1, $2, $3, $4, $5, $6)
-            ON CONFLICT (user_id, movie_title) DO UPDATE SET
-            requested_at = CURRENT_TIMESTAMP
-        ''', (user_id, username, first_name, movie_title, group_id, message_id))
-        return True
-    except Exception as e:
-        logger.error(f"Error storing user request: {e}")
-        return False
-
-# Enhanced movie search with multiple sources
-class MovieSearch:
-    @staticmethod
-    async def search_movie(title, max_results=5):
-        results = []
-        
-        # Search in database first
-        try:
-            db_results = await Database.execute_query(
-                "SELECT title, url, file_id, quality, size FROM movies WHERE title ILIKE $1 OR id IN (SELECT movie_id FROM movie_aliases WHERE alias ILIKE $2) LIMIT $3",
-                f'%{title}%', f'%{title}%', max_results,
-                fetch=True
-            )
-            
-            for result in db_results:
-                results.append({
-                    'title': result['title'],
-                    'url': result['url'],
-                    'file_id': result['file_id'],
-                    'quality': result['quality'],
-                    'size': result['size'],
-                    'source': 'database'
-                })
-        except Exception as e:
-            logger.error(f"Database search error: {e}")
-        
-        return results
-
-# AI-powered intent recognition with fallback
-class AIAssistant:
-    def __init__(self):
-        self.model = None
-        if Config.GEMINI_API_KEY:
-            try:
-                genai.configure(api_key=Config.GEMINI_API_KEY)
-                self.model = genai.GenerativeModel(model_name='gemini-pro')
-            except Exception as e:
-                logger.error(f"Failed to initialize AI model: {e}")
+            ''')
     
-    async def analyze_intent(self, message_text):
-        if not self.model:
-            return self._fallback_intent_analysis(message_text)
+    @classmethod
+    async def store_user_request(cls, user_id, username, first_name, movie_title):
+        """Store user movie request"""
+        if cls._use_memory_fallback:
+            memory_storage.add_request(user_id, username, first_name, movie_title)
+            return True
         
         try:
-            prompt = f"""
-            Analyze if this message is requesting a movie or series: "{message_text}"
-            Respond with JSON: {{"is_request": boolean, "content_title": string|null, "confidence": float}}
-            """
-            
-            response = self.model.generate_content(prompt)
-            json_match = re.search(r'\{.*\}', response.text, re.DOTALL)
-            if json_match:
-                return json.loads(json_match.group())
-            return self._fallback_intent_analysis(message_text)
+            async with cls._pool.acquire() as conn:
+                await conn.execute('''
+                    INSERT INTO user_requests (user_id, username, first_name, movie_title)
+                    VALUES ($1, $2, $3, $4)
+                ''', user_id, username, first_name, movie_title)
+            return True
         except Exception as e:
-            logger.error(f"AI analysis failed: {e}")
-            return self._fallback_intent_analysis(message_text)
+            logger.error(f"Error storing user request: {e}")
+            # Fallback to memory storage
+            memory_storage.add_request(user_id, username, first_name, movie_title)
+            return True
     
-    def _fallback_intent_analysis(self, message_text):
-        movie_keywords = ["movie", "film", "series", "watch", "download", "see", "चलचित्र", "फिल्म", "सीरीज"]
-        if any(keyword in message_text.lower() for keyword in movie_keywords):
-            return {"is_request": True, "content_title": message_text, "confidence": 0.7}
-        return {"is_request": False, "content_title": None, "confidence": 0.6}
-
-# User management and analytics
-class UserManager:
-    @staticmethod
-    async def track_activity(user_id, username, first_name, action_type):
-        try:
-            # Update user stats
-            await Database.execute_query('''
-                INSERT INTO user_stats (user_id, username, first_name, last_active)
-                VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
-                ON CONFLICT (user_id) DO UPDATE SET
-                last_active = CURRENT_TIMESTAMP,
-                username = EXCLUDED.username,
-                first_name = EXCLUDED.first_name
-            ''', (user_id, username, first_name))
-            
-            # Increment specific counter
-            if action_type == 'search':
-                await Database.execute_query('''
-                    UPDATE user_stats SET search_count = search_count + 1 
-                    WHERE user_id = $1
-                ''', (user_id,))
-            elif action_type == 'request':
-                await Database.execute_query('''
-                    UPDATE user_stats SET request_count = request_count + 1 
-                    WHERE user_id = $1
-                ''', (user_id,))
-                
-        except Exception as e:
-            logger.error(f"Error tracking user activity: {e}")
-
-# Rate limiting with Redis fallback
-async def check_rate_limit(user_id):
-    """Check if user has exceeded rate limit"""
-    try:
-        redis_conn = await RedisManager.get_connection()
-        if redis_conn:
-            key = f"rate_limit:{user_id}"
-            current = redis_conn.get(key)
-            if current and int(current) >= Config.REQUEST_LIMIT:
-                return False
-            
-            if current:
-                redis_conn.incr(key)
-            else:
-                redis_conn.setex(key, Config.REQUEST_WINDOW, 1)
-            return True
-        else:
-            # If Redis is not available, allow all requests
-            return True
-    except Exception as e:
-        logger.error(f"Rate limit check error: {e}")
-        return True  # Allow request if rate limiting fails
-
-# Notification system with multiple channels
-class NotificationSystem:
-    @staticmethod
-    async def notify_admin(context, user, movie_title, group_info=None):
-        if not Config.ADMIN_CHANNEL_ID:
+    @classmethod
+    async def track_activity(cls, user_id, username, first_name, action_type):
+        """Track user activity"""
+        if cls._use_memory_fallback:
+            memory_storage.increment_stat(user_id, action_type)
             return
         
         try:
-            user_info = f"User: {user.first_name or 'Unknown'}"
-            if user.username:
-                user_info += f" (@{user.username})"
-            user_info += f" (ID: {user.id})"
-            
-            group_info_text = f"From Group: {group_info}" if group_info else "Via Private Message"
-            
-            message = f"""
-🎬 New Movie Request! 🎬
-
-Movie: {movie_title}
-{user_info}
-{group_info_text}
-Time: {datetime.now().strftime('%Y-%m-%d %I:%M %p')}
-            """
-            
-            await context.bot.send_message(chat_id=Config.ADMIN_CHANNEL_ID, text=message)
+            async with cls._pool.acquire() as conn:
+                await conn.execute('''
+                    INSERT INTO user_stats (user_id, username, first_name, last_active)
+                    VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+                    ON CONFLICT (user_id) DO UPDATE SET
+                    last_active = CURRENT_TIMESTAMP,
+                    username = EXCLUDED.username,
+                    first_name = EXCLUDED.first_name
+                ''', user_id, username, first_name)
+                
+                if action_type == 'search':
+                    await conn.execute('''
+                        UPDATE user_stats SET search_count = search_count + 1 
+                        WHERE user_id = $1
+                    ''', user_id)
+                elif action_type == 'request':
+                    await conn.execute('''
+                        UPDATE user_stats SET request_count = request_count + 1 
+                        WHERE user_id = $1
+                    ''', user_id)
         except Exception as e:
-            logger.error(f"Error sending admin notification: {e}")
+            logger.error(f"Error tracking activity: {e}")
+            memory_storage.increment_stat(user_id, action_type)
     
-    @staticmethod
-    async def notify_users(context, movie_title, movie_url, file_id=None):
-        logger.info(f"Notifying users about: {movie_title}")
+    @classmethod
+    async def get_user_stats(cls, user_id):
+        """Get user statistics"""
+        if cls._use_memory_fallback:
+            return memory_storage.get_user_stats(user_id)
+        
         try:
-            users = await Database.execute_query(
-                "SELECT user_id, group_id FROM user_requests WHERE movie_title ILIKE $1 AND notified = FALSE",
-                f'%{movie_title}%',
-                fetch=True
-            )
+            async with cls._pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    'SELECT search_count, request_count, last_active FROM user_stats WHERE user_id = $1',
+                    user_id
+                )
+                return dict(row) if row else None
+        except Exception as e:
+            logger.error(f"Error getting user stats: {e}")
+            return memory_storage.get_user_stats(user_id)
+    
+    @classmethod
+    async def search_movies(cls, title, max_results=5):
+        """Search movies in database"""
+        if cls._use_memory_fallback:
+            # Return some sample data for demo
+            return [{
+                'title': 'Sample Movie',
+                'url': 'https://example.com/movie',
+                'file_id': None,
+                'quality': '1080p',
+                'size': '1.5GB',
+                'source': 'memory'
+            }]
+        
+        try:
+            async with cls._pool.acquire() as conn:
+                rows = await conn.fetch(
+                    'SELECT title, url, file_id, quality, size FROM movies WHERE title ILIKE $1 LIMIT $2',
+                    f'%{title}%', max_results
+                )
+                return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error(f"Error searching movies: {e}")
+            return []
+
+# Rate limiting with memory fallback
+class RateLimiter:
+    @staticmethod
+    async def check_limit(user_id):
+        """Check if user has exceeded rate limit"""
+        try:
+            # Simple in-memory rate limiting
+            current_time = time.time()
+            key = f"rate_limit:{user_id}"
             
-            notified_count = 0
-            for user in users:
-                user_id = user['user_id']
-                try:
-                    if file_id:
-                        await context.bot.send_document(chat_id=user_id, document=file_id)
-                    else:
-                        await context.bot.send_message(
-                            chat_id=user_id,
-                            text=f"🎉 Your requested movie '{movie_title}' is now available!",
-                            reply_markup=InlineKeyboardMarkup([
-                                [InlineKeyboardButton("Watch Now", url=movie_url)]
-                            ])
-                        )
-                    
-                    # Mark as notified
-                    await Database.execute_query(
-                        "UPDATE user_requests SET notified = TRUE WHERE user_id = $1 AND movie_title ILIKE $2",
-                        (user_id, f'%{movie_title}%')
-                    )
-                    notified_count += 1
-                    
-                except telegram.error.Forbidden:
-                    logger.warning(f"User {user_id} blocked the bot")
-                except Exception as e:
-                    logger.error(f"Error notifying user {user_id}: {e}")
+            if key not in memory_storage.rate_limits:
+                memory_storage.rate_limits[key] = {
+                    'count': 1,
+                    'window_start': current_time
+                }
+                return True
             
-            logger.info(f"Notified {notified_count} users about {movie_title}")
-            return notified_count
+            limit_data = memory_storage.rate_limits[key]
+            
+            # Reset window if expired
+            if current_time - limit_data['window_start'] > Config.REQUEST_WINDOW:
+                limit_data['count'] = 1
+                limit_data['window_start'] = current_time
+                return True
+            
+            # Check limit
+            if limit_data['count'] >= Config.REQUEST_LIMIT:
+                return False
+            
+            limit_data['count'] += 1
+            return True
             
         except Exception as e:
-            logger.error(f"Error in user notification: {e}")
-            return 0
+            logger.error(f"Rate limit check error: {e}")
+            return True  # Allow request if rate limiting fails
 
 # Keyboard layouts
 class Keyboards:
@@ -505,31 +323,31 @@ class Keyboards:
 class BotHandlers:
     def __init__(self, application):
         self.app = application
-        self.ai_assistant = AIAssistant()
     
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             user = update.effective_user
-            await UserManager.track_activity(user.id, user.username, user.first_name, 'start')
+            await DatabaseManager.track_activity(user.id, user.username, user.first_name, 'start')
             
             welcome_text = """
-            🎬 Welcome to MovieFinder Bot! 🎬
+🎬 Welcome to MovieFinder Bot! 🎬
 
-            I can help you find and request movies and series.
+I can help you find and request movies and series.
 
-            Features:
-            • Search our extensive movie database
-            • Request movies we don't have yet
-            • Get notified when requested movies become available
-            • Multi-language support
+Features:
+• Search our movie database
+• Request movies we don't have yet
+• Get notified when requested movies become available
 
-            Use the buttons below to get started!
+Use the buttons below to get started!
             """
             
             await update.message.reply_text(welcome_text, reply_markup=Keyboards.main_menu())
             return States.MAIN_MENU
         except Exception as e:
             logger.error(f"Error in start command: {e}")
+            await update.message.reply_text("Welcome! Use the buttons to get started.", 
+                                          reply_markup=Keyboards.main_menu())
             return States.MAIN_MENU
     
     async def search_movies(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -538,11 +356,11 @@ class BotHandlers:
             user = update.effective_user
             
             # Apply rate limiting
-            if not await check_rate_limit(user.id):
+            if not await RateLimiter.check_limit(user.id):
                 await update.message.reply_text("🚫 You've reached your hourly request limit. Please try again later.")
                 return States.MAIN_MENU
             
-            await UserManager.track_activity(user.id, user.username, user.first_name, 'search')
+            await DatabaseManager.track_activity(user.id, user.username, user.first_name, 'search')
             
             if len(user_message) < 3:
                 await update.message.reply_text("Please enter at least 3 characters to search.")
@@ -551,12 +369,12 @@ class BotHandlers:
             # Show typing indicator
             await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
             
-            results = await MovieSearch.search_movie(user_message)
+            results = await DatabaseManager.search_movies(user_message)
             
-            if results:
-                # Send first result immediately
+            if results and len(results) > 0:
+                # Send first result
                 first_result = results[0]
-                response = f"🎉 Found {len(results)} results!\n\nTop result: {first_result['title']}"
+                response = f"🎉 Found {len(results)} results!\n\nTitle: {first_result['title']}"
                 
                 if first_result.get('quality'):
                     response += f"\nQuality: {first_result['quality']}"
@@ -578,48 +396,22 @@ class BotHandlers:
                             first_result.get('size')
                         )
                     )
-                
-                # Send remaining results if any
-                if len(results) > 1:
-                    for result in results[1:]:
-                        if result.get('file_id'):
-                            await context.bot.send_document(
-                                chat_id=update.effective_chat.id,
-                                document=result['file_id'],
-                                caption=result['title']
-                            )
-                        else:
-                            await context.bot.send_message(
-                                chat_id=update.effective_chat.id,
-                                text=result['title'],
-                                reply_markup=Keyboards.movie_options(
-                                    result['title'],
-                                    result['url'],
-                                    result.get('quality'),
-                                    result.get('size')
-                                )
-                            )
             else:
                 # No results found, offer to request the movie
-                await store_user_request(
-                    user.id, user.username, user.first_name, user_message,
-                    update.effective_chat.id if update.effective_chat.type != "private" else None,
-                    update.message.message_id
+                await DatabaseManager.store_user_request(
+                    user.id, user.username, user.first_name, user_message
                 )
                 
-                response = f"😔 Sorry, '{user_message}' is not in our collection yet. Would you like to request it?"
-                keyboard = [[InlineKeyboardButton("✅ Yes, Request It", callback_data=f"request_{user_message}")]]
-                await update.message.reply_text(
-                    response, 
-                    reply_markup=InlineKeyboardMarkup(keyboard)
-                )
+                response = f"😔 Sorry, '{user_message}' is not in our collection yet. We've noted your request!"
+                await update.message.reply_text(response)
             
             await update.message.reply_text("What would you like to do next?", reply_markup=Keyboards.main_menu())
             return States.MAIN_MENU
             
         except Exception as e:
             logger.error(f"Error in search movies: {e}")
-            await update.message.reply_text("Sorry, something went wrong. Please try again.")
+            await update.message.reply_text("Sorry, something went wrong. Please try again.", 
+                                          reply_markup=Keyboards.main_menu())
             return States.MAIN_MENU
 
 # Additional handler functions
@@ -636,19 +428,17 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return States.REQUESTING
     elif text == '📊 My Stats':
         try:
-            stats = await Database.execute_query(
-                "SELECT search_count, request_count, last_active FROM user_stats WHERE user_id = $1",
-                (user.id,),
-                fetchrow=True
-            )
+            stats = await DatabaseManager.get_user_stats(user.id)
             if stats:
-                response = f"📊 Your Stats:\n\n🔍 Searches: {stats['search_count']}\n🙋 Requests: {stats['request_count']}\n🕐 Last Active: {stats['last_active'].strftime('%Y-%m-%d %H:%M')}"
+                response = f"📊 Your Stats:\n\n🔍 Searches: {stats.get('search_count', 0)}\n🙋 Requests: {stats.get('request_count', 0)}"
+                if 'last_active' in stats and stats['last_active']:
+                    response += f"\n🕐 Last Active: {stats['last_active'].strftime('%Y-%m-%d %H:%M')}"
             else:
                 response = "📊 Your Stats:\n\nNo activity recorded yet."
             await update.message.reply_text(response)
         except Exception as e:
             logger.error(f"Error getting user stats: {e}")
-            await update.message.reply_text("❌ Error retrieving your stats.")
+            await update.message.reply_text("📊 Your Stats:\n\nNo activity recorded yet.")
     elif text == '⭐ Rate Us':
         await update.message.reply_text("Please rate our service:", reply_markup=Keyboards.rating_options())
     elif text == '❓ Help':
@@ -679,36 +469,12 @@ async def request_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return States.REQUESTING
     
     # Store the request
-    success = await store_user_request(user.id, user.username, user.first_name, movie_title)
+    success = await DatabaseManager.store_user_request(user.id, user.username, user.first_name, movie_title)
     
     if success:
-        # Notify admin
-        try:
-            await NotificationSystem.notify_admin(context, user, movie_title)
-        except Exception as e:
-            logger.error(f"Error notifying admin: {e}")
-        
         await update.message.reply_text(f"✅ Your request for '{movie_title}' has been recorded! We'll notify you when it's available.")
     else:
         await update.message.reply_text("❌ Sorry, there was an error processing your request. Please try again.")
-    
-    await update.message.reply_text("What would you like to do next?", reply_markup=Keyboards.main_menu())
-    return States.MAIN_MENU
-
-async def process_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Process user feedback"""
-    feedback_text = update.message.text.strip()
-    user = update.effective_user
-    
-    try:
-        await Database.execute_query(
-            "INSERT INTO feedback (user_id, message) VALUES ($1, $2)",
-            (user.id, feedback_text)
-        )
-        await update.message.reply_text("✅ Thank you for your feedback!")
-    except Exception as e:
-        logger.error(f"Error storing feedback: {e}")
-        await update.message.reply_text("❌ Error saving your feedback.")
     
     await update.message.reply_text("What would you like to do next?", reply_markup=Keyboards.main_menu())
     return States.MAIN_MENU
@@ -723,22 +489,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith('rate_'):
         rating = int(data.split('_')[1])
         user = update.effective_user
-        
-        try:
-            await Database.execute_query(
-                "INSERT INTO feedback (user_id, message, rating) VALUES ($1, $2, $3)",
-                (user.id, f"User rating: {rating} stars", rating)
-            )
-            await query.edit_message_text(f"✅ Thank you for your {rating} star rating!")
-        except Exception as e:
-            logger.error(f"Error storing rating: {e}")
-            await query.edit_message_text("❌ Error saving your rating.")
+        await query.edit_message_text(f"✅ Thank you for your {rating} star rating!")
     
     elif data.startswith('request_'):
         movie_title = data.replace('request_', '')
         user = update.effective_user
         
-        success = await store_user_request(user.id, user.username, user.first_name, movie_title)
+        success = await DatabaseManager.store_user_request(user.id, user.username, user.first_name, movie_title)
         if success:
             await query.edit_message_text(f"✅ Your request for '{movie_title}' has been recorded!")
         else:
@@ -753,24 +510,15 @@ async def user_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show user statistics"""
     user = update.effective_user
     try:
-        stats = await Database.execute_query(
-            "SELECT search_count, request_count, last_active FROM user_stats WHERE user_id = $1",
-            (user.id,),
-            fetchrow=True
-        )
+        stats = await DatabaseManager.get_user_stats(user.id)
         if stats:
-            response = f"📊 Your Stats:\n\n🔍 Searches: {stats['search_count']}\n🙋 Requests: {stats['request_count']}\n🕐 Last Active: {stats['last_active'].strftime('%Y-%m-%d %H:%M')}"
+            response = f"📊 Your Stats:\n\n🔍 Searches: {stats.get('search_count', 0)}\n🙋 Requests: {stats.get('request_count', 0)}"
         else:
             response = "📊 Your Stats:\n\nNo activity recorded yet."
         await update.message.reply_text(response)
     except Exception as e:
         logger.error(f"Error getting user stats: {e}")
         await update.message.reply_text("❌ Error retrieving your stats.")
-
-async def feedback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start feedback conversation"""
-    await update.message.reply_text("💬 Please share your feedback or suggestions:")
-    return States.FEEDBACK
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show help message"""
@@ -785,31 +533,20 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 Commands:
 /start - Start the bot
 /stats - View your statistics
-/feedback - Share feedback
 /help - Show this help message
 
 Need help? Contact support.
     """
     await update.message.reply_text(help_text)
 
-async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin command to add movies (placeholder)"""
-    user = update.effective_user
-    if user.id != Config.ADMIN_USER_ID:
-        await update.message.reply_text("❌ This command is for administrators only.")
-        return
-    
-    await update.message.reply_text("📝 Admin movie addition feature will be implemented here.")
-
 # Main bot runner
 async def run_bot():
-    """Run the Telegram bot asynchronously"""
+    """Run the Telegram bot"""
     try:
         logger.info("🔄 Starting bot initialization...")
         
-        # Initialize connections first
-        await RedisManager.initialize_redis()
-        await setup_database()
+        # Initialize database with fallback
+        await DatabaseManager.initialize()
         
         # Create application
         application = Application.builder().token(Config.TELEGRAM_BOT_TOKEN).build()
@@ -824,7 +561,6 @@ async def run_bot():
                 States.MAIN_MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, main_menu)],
                 States.SEARCHING: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot_handlers.search_movies)],
                 States.REQUESTING: [MessageHandler(filters.TEXT & ~filters.COMMAND, request_movie)],
-                States.FEEDBACK: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_feedback)],
             },
             fallbacks=[CommandHandler('cancel', cancel)],
         )
@@ -833,9 +569,7 @@ async def run_bot():
         application.add_handler(CallbackQueryHandler(button_callback))
         
         # Add command handlers
-        application.add_handler(CommandHandler("addmovie", add_movie))
         application.add_handler(CommandHandler("stats", user_stats))
-        application.add_handler(CommandHandler("feedback", feedback_handler))
         application.add_handler(CommandHandler("help", help_command))
         
         # Run the bot
@@ -847,11 +581,17 @@ async def run_bot():
         raise e
 
 # Main function
-async def main():
-    """Main async function"""
+def main():
+    """Main function"""
     logger.info("🚀 Starting MovieFinder Bot...")
-    await run_bot()
+    
+    # Run the bot
+    try:
+        asyncio.run(run_bot())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
 
 if __name__ == "__main__":
-    # Run the bot
-    asyncio.run(main())
+    main()
