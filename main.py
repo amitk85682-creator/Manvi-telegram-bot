@@ -57,7 +57,7 @@ REQUEST_LIMIT = int(os.environ.get('REQUEST_LIMIT', 20))
 REQUEST_WINDOW = int(os.environ.get('REQUEST_WINDOW', 3600))
 
 def get_database_config():
-"""
+    """
 Get the appropriate database configuration
 Automatically detects and uses pooler URL if on Render
 """
