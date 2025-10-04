@@ -93,7 +93,7 @@ return {'dsn': db_url}
 
 # Conversation states
 class States:
-MAIN_MENU, SEARCHING, REQUESTING, FEEDBACK = range(4)
+    MAIN_MENU, SEARCHING, REQUESTING, FEEDBACK = range(4)
 
 # Initialize Flask app
 app = Flask(__name__)
