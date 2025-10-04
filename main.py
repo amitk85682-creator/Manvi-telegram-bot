@@ -59,7 +59,7 @@ CHARACTER_PROMPT = """
 # --- API Keys and Configuration ---
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-DATABASE_POOLER_URL = os.environ.get('DATABASE_URL')
+DATABASE_POOLER_URL = os.environ.get('DATABASE_POOLER_URL')
 BLOGGER_API_KEY = os.environ.get('BLOGGER_API_KEY')
 BLOG_ID = os.environ.get('BLOG_ID')
 UPDATE_SECRET_CODE = os.environ.get('UPDATE_SECRET_CODE', 'default_secret_123')
@@ -72,14 +72,14 @@ if not TELEGRAM_BOT_TOKEN:
     logger.error("TELEGRAM_BOT_TOKEN environment variable is not set")
     raise ValueError("TELEGRAM_BOT_TOKEN is not set.")
 
-if not DATABASE_URL:
-    logger.error("DATABASE_URL environment variable is not set")
-    raise ValueError("DATABASE_URL is not set.")
+if not DATABASE_POOLER_URL:
+    logger.error("DATABASE_POOLER_URL environment variable is not set")
+    raise ValueError("DATABASE_POOLER_URL is not set.")
 
 # --- Database Functions ---
 def setup_database():
     try:
-        conn = psycopg2.connect(DATABASE_URL)
+        conn = psycopg2.connect(DATABASE_POOLER_URL)
         cur = conn.cursor()
         
         # Create movies table with file_id column
@@ -163,7 +163,7 @@ def update_movies_in_db():
     new_movies_added = 0
     
     try:
-        conn = psycopg2.connect(DATABASE_URL)
+        conn = psycopg2.connect(DATABASE_POOLER_URL)
         cur = conn.cursor()
         
         # Get last sync time for incremental updates
@@ -230,7 +230,7 @@ def get_movie_from_db(user_query):
     conn = None
     try:
         # Use fuzzy matching for better search results
-        conn = psycopg2.connect(DATABASE_URL)
+        conn = psycopg2.connect(DATABASE_POOLER_URL)
         cur = conn.cursor()
         
         # First try exact match in movies table
@@ -434,7 +434,7 @@ def get_movie_options_keyboard(movie_title, url):
 # --- Store User Request Function ---
 def store_user_request(user_id, username, first_name, movie_title, group_id=None, message_id=None):
     try:
-        conn = psycopg2.connect(DATABASE_URL)
+        conn = psycopg2.connect(DATABASE_POOLER_URL)
         cur = conn.cursor()
         cur.execute(
             "INSERT INTO user_requests (user_id, username, first_name, movie_title, group_id, message_id) VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT ON CONSTRAINT user_requests_unique_constraint DO NOTHING",
@@ -456,7 +456,7 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
     cur = None
     notified_count = 0
     try:
-        conn = psycopg2.connect(DATABASE_URL)
+        conn = psycopg2.connect(DATABASE_POOLER_URL)
         cur = conn.cursor()
         cur.execute(
             "SELECT user_id, username, first_name, group_id, message_id FROM user_requests WHERE movie_title ILIKE %s AND notified = FALSE",
@@ -524,7 +524,7 @@ async def notify_in_group(context: ContextTypes.DEFAULT_TYPE, movie_title):
     conn = None
     cur = None
     try:
-        conn = psycopg2.connect(DATABASE_URL)
+        conn = psycopg2.connect(DATABASE_POOLER_URL)
         cur = conn.cursor()
         cur.execute(
             "SELECT user_id, username, first_name, group_id, message_id FROM user_requests WHERE movie_title ILIKE %s AND notified = FALSE",
@@ -613,7 +613,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_id = update.effective_user.id
             conn = None
             try:
-                conn = psycopg2.connect(DATABASE_URL)
+                conn = psycopg2.connect(DATABASE_POOLER_URL)
                 cur = conn.cursor()
                 cur.execute("SELECT COUNT(*) FROM user_requests WHERE user_id = %s", (user_id,))
                 request_count = cur.fetchone()[0]
@@ -815,7 +815,7 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Debugging के लिए log करें
         logger.info(f"Adding movie: {title} with value: {value}")
         
-        conn = psycopg2.connect(DATABASE_URL)
+        conn = psycopg2.connect(DATABASE_POOLER_URL)
         cur = conn.cursor()
         
         # Check if it's a Telegram file ID (starts with specific patterns)
@@ -917,7 +917,7 @@ Movie3 https://link3.com
             
             # Add the movie to database
             try:
-                conn = psycopg2.connect(DATABASE_URL)
+                conn = psycopg2.connect(DATABASE_POOLER_URL)
                 cur = conn.cursor()
                 
                 # Normalize URL
@@ -972,7 +972,7 @@ async def add_alias(update: Update, context: ContextTypes.DEFAULT_TYPE):
         alias = parts[-1]
         movie_title = " ".join(parts[:-1])
         
-        conn = psycopg2.connect(DATABASE_URL)
+        conn = psycopg2.connect(DATABASE_POOLER_URL)
         cur = conn.cursor()
         
         # First find the movie ID
@@ -1011,7 +1011,7 @@ async def list_aliases(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         movie_title = " ".join(context.args)
         
-        conn = psycopg2.connect(DATABASE_URL)
+        conn = psycopg2.connect(DATABASE_POOLER_URL)
         cur = conn.cursor()
         
         # Get movie and its aliases
@@ -1066,7 +1066,7 @@ Movie3: alias6, alias7, alias8
         success_count = 0
         failed_count = 0
         
-        conn = psycopg2.connect(DATABASE_URL)
+        conn = psycopg2.connect(DATABASE_POOLER_URL)
         cur = conn.cursor()
         
         for line in lines:
