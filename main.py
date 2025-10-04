@@ -372,11 +372,11 @@ class MovieSearch:
             if db_results:
                 for result in db_results:
                     results.append({
-                        'title': result,
-                        'url': result<!--citation:1-->,
-                        'file_id': result<!--citation:2-->,
-                        'quality': result<!--citation:3-->,
-                        'size': result<!--citation:4-->,
+                        'title': result[0],
+                        'url': result[1],
+                        'file_id': result[2],
+                        'quality': result[3],
+                        'size': result[4],
                         'source': 'database'
                     })
         except Exception as e:
@@ -552,7 +552,7 @@ class Keyboards:
         if size:
             buttons.append([InlineKeyboardButton(f"Size: {size}", callback_data="info_size")])
             
-        buttons.append([InlineKeyboardButton("📥 Download", callback_data=f"download_{movie_title}")])
+        buttons.append([InlineKeyboardButton("📥 Download", callback_data=f"download_{movie_title[:50]}")])
         
         return InlineKeyboardMarkup(buttons)
     
@@ -636,7 +636,7 @@ Use the buttons below to get started!
             
             if results:
                 # Send first result immediately
-                first_result = results
+                first_result = results[0]
                 response = f"🎉 Found {len(results)} results!\n\nTop result: {first_result['title']}"
                 
                 if first_result.get('quality'):
@@ -654,7 +654,7 @@ Use the buttons below to get started!
                         response,
                         reply_markup=Keyboards.movie_options(
                             first_result['title'],
-                            first_result['url'],
+                            first_result.get('url', '#'),
                             first_result.get('quality'),
                             first_result.get('size')
                         )
@@ -675,7 +675,7 @@ Use the buttons below to get started!
                                 text=result['title'],
                                 reply_markup=Keyboards.movie_options(
                                     result['title'],
-                                    result['url'],
+                                    result.get('url', '#'),
                                     result.get('quality'),
                                     result.get('size')
                                 )
@@ -726,7 +726,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 fetch=True
             )
             if stats:
-                search_count, request_count, last_active = stats
+                search_count, request_count, last_active = stats[0]
                 response = f"📊 Your Stats:\n\n🔍 Searches: {search_count}\n🙋 Requests: {request_count}\n🕐 Last Active: {last_active.strftime('%Y-%m-%d %H:%M')}"
             else:
                 response = "📊 Your Stats:\n\nNo activity recorded yet."
@@ -810,7 +810,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     
     if data.startswith('rate_'):
-        rating = int(data.split('_')<!--citation:1-->)
+        rating = int(data.split('_')[1])
         user = update.effective_user
         
         try:
@@ -852,7 +852,7 @@ async def user_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             fetch=True
         )
         if stats:
-            search_count, request_count, last_active = stats
+            search_count, request_count, last_active = stats[0]
             response = f"📊 Your Stats:\n\n🔍 Searches: {search_count}\n🙋 Requests: {request_count}\n🕐 Last Active: {last_active.strftime('%Y-%m-%d %H:%M')}"
         else:
             response = "📊 Your Stats:\n\nNo activity recorded yet."
@@ -961,23 +961,23 @@ def stats():
         if not Database._connection_pool:
             Database.initialize_pool()
         
-        users = Database.execute_query(
+        users_result = Database.execute_query(
             "SELECT COUNT(*) FROM user_stats",
             fetch=True
         )
-        users = users if users else 0
+        users = users_result[0][0] if users_result else 0
         
-        movies = Database.execute_query(
+        movies_result = Database.execute_query(
             "SELECT COUNT(*) FROM movies",
             fetch=True
         )
-        movies = movies if movies else 0
+        movies = movies_result[0][0] if movies_result else 0
         
-        requests = Database.execute_query(
+        requests_result = Database.execute_query(
             "SELECT COUNT(*) FROM user_requests WHERE notified = FALSE",
             fetch=True
         )
-        requests = requests if requests else 0
+        requests = requests_result[0][0] if requests_result else 0
         
         return jsonify({
             "users": users,
