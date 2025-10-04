@@ -811,7 +811,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     
     if data:
-    rating = int(data.split('_'))
+        rating = int(data.split('_'))
         user = update.effective_user
         
         try:
