@@ -72,7 +72,7 @@ parsed = urlparse(db_url)
 
 # Detect if this is a Supabase pooler URL
 if 'pooler.supabase.com' in parsed.hostname:
-logger.info(f"Using Supabase pooler connection on port {parsed.port}")
+    logger.info(f"Using Supabase pooler connection on port {parsed.port}")
 
 # For transaction mode (port 6543), disable prepared statements
 if parsed.port == 6543:
