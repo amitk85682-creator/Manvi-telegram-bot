@@ -19,3 +19,4 @@ aiohttp
 waitress
 result
 citation
+packaging>=24.0
