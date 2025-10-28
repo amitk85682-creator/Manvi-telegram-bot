@@ -12,7 +12,7 @@ from bs4 import BeautifulSoup
 import telegram
 import psycopg2
 from flask import Flask, request
-import google.generativeai as genai
+import google.generativeai as gemini
 from googleapiclient.discovery import build
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
