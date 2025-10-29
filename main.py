@@ -1769,7 +1769,7 @@ async def get_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error in get_user_info: {e}")
         await update.message.reply_text(f"❌ Error: {e}")
         # List All Users
-    async def list_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def list_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Admin command to list all bot users
     Usage: /listusers [page_number]
@@ -1779,10 +1779,10 @@ async def get_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     try:
-        # Pagination
         page = 1
-        if context.args and context.args.isdigit():
-            page = int(context.args)
+        # ✅ सही तरीका: लिस्ट के पहले एलिमेंट को चेक करें
+        if context.args and context.args[0].isdigit():
+            page = int(context.args[0])
         
         per_page = 10
         offset = (page - 1) * per_page
