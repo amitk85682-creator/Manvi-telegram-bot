@@ -977,353 +977,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Operation cancelled.", reply_markup=get_main_keyboard())
     return MAIN_MENU
 
-# ==================== ADMIN COMMANDS ====================
-async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin command to add a movie manually"""
-    if update.effective_user.id != ADMIN_USER_ID:
-        await update.message.reply_text("Sorry, सिर्फ एडमिन ही इस कमांड का इस्तेमाल कर सकते हैं।")
-        return
-    
-    conn = None
-    try:
-        parts = context.args
-        if len(parts) < 2:
-            await update.message.reply_text("गलत फॉर्मेट! ऐसे इस्तेमाल करें:\n/addmovie टाइटल का नाम [File ID या Link]")
-            return
-        
-        value = parts[-1]
-        title = " ".join(parts[:-1])
-        
-        logger.info(f"Adding movie: {title} with value: {value}")
-        
-        conn = get_db_connection()
-        if not conn:
-            await update.message.reply_text("❌ Database connection failed.")
-            return
-            
-        cur = conn.cursor()
-        
-        # Check if it's a Telegram file ID
-        if value.startswith(("BQAC", "BAAC", "CAAC", "AQAC")):
-            cur.execute(
-                "INSERT INTO movies (title, url, file_id) VALUES (%s, %s, %s) ON CONFLICT (title) DO UPDATE SET url = EXCLUDED.url, file_id = EXCLUDED.file_id",
-                (title.strip(), "", value.strip())
-            )
-            message = f"✅ '{title}' को file ID के साथ सफलतापूर्वक जोड़ दिया गया है।"
-        
-        # Check if it's any kind of URL
-        elif "http" in value or "." in value:
-            normalized_url = value.strip()
-            
-            if not value.startswith(('http://', 'https://')):
-                await update.message.reply_text("❌ Invalid URL format. URL must start with http:// or https://")
-                return
-            
-            cur.execute(
-                "INSERT INTO movies (title, url) VALUES (%s, %s) ON CONFLICT (title) DO UPDATE SET url = EXCLUDED.url",
-                (title.strip(), normalized_url)
-            )
-            message = f"✅ '{title}' को URL के साथ सफलतापूर्वक जोड़ दिया गया है।"
-        
-        else:
-            await update.message.reply_text("❌ Invalid format. कृपया सही File ID या URL दें।")
-            return
-        
-        conn.commit()
-        await update.message.reply_text(message)
-        
-        # Notify users who requested this movie
-        num_notified = await notify_users_for_movie(context, title, value)
-        await notify_in_group(context, title)
-        
-        await update.message.reply_text(f"कुल {num_notified} users को notify किया गया है।")
-            
-    except Exception as e:
-        logger.error(f"Error in add_movie command: {e}")
-        await update.message.reply_text(f"एक एरर आया: {e}")
-    finally:
-        if conn: 
-            conn.close()
-
-async def bulk_add_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Add multiple movies at once"""
-    if update.effective_user.id != ADMIN_USER_ID:
-        await update.message.reply_text("Sorry, सिर्फ एडमिन ही इस कमांड का इस्तेमाल कर सकते हैं।")
-        return
-    
-    try:
-        if not context.args:
-            await update.message.reply_text("""
-गलत फॉर्मेट! ऐसे इस्तेमाल करें:
-
-/bulkadd
-Movie1 https://link1.com
-Movie2 https://link2.com  
-Movie3 https://link3.com
-""")
-            return
-
-        full_text = update.message.text
-        lines = full_text.split('\n')
-        
-        success_count = 0
-        failed_count = 0
-        results = []
-        
-        for line in lines:
-            line = line.strip()
-            if not line or line.startswith('/bulkadd'):
-                continue
-                
-            if line.startswith('/addmovie'):
-                parts = line.split()
-                if len(parts) >= 3:
-                    title = ' '.join(parts[1:-1])
-                    url = parts[-1]
-                else:
-                    continue
-            else:
-                parts = line.split()
-                if len(parts) >= 2:
-                    title = ' '.join(parts[:-1])
-                    url = parts[-1]
-                else:
-                    continue
-            
-            try:
-                conn = get_db_connection()
-                if not conn:
-                    failed_count += 1
-                    results.append(f"❌ {title} - Database connection failed")
-                    continue
-                    
-                cur = conn.cursor()
-                normalized_url = normalize_url(url)
-                
-                cur.execute(
-                    "INSERT INTO movies (title, url) VALUES (%s, %s) ON CONFLICT (title) DO UPDATE SET url = EXCLUDED.url",
-                    (title.strip(), normalized_url.strip())
-                )
-                conn.commit()
-                conn.close()
-                
-                success_count += 1
-                results.append(f"✅ {title}")
-            except Exception as e:
-                failed_count += 1
-                results.append(f"❌ {title} - Error: {str(e)}")
-        
-        result_message = f"""
-📊 Bulk Add Results:
-
-Successfully added: {success_count}
-Failed: {failed_count}
-
-Details:
-""" + "\n".join(results[:10])
-        
-        if len(results) > 10:
-            result_message += f"\n\n... और {len(results) - 10} more items"
-        
-        await update.message.reply_text(result_message)
-        
-    except Exception as e:
-        logger.error(f"Error in bulk_add_movies: {e}")
-        await update.message.reply_text(f"Bulk add में error: {e}")
-
-async def add_alias(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Add an alias for an existing movie"""
-    if update.effective_user.id != ADMIN_USER_ID:
-        await update.message.reply_text("Sorry, सिर्फ एडमिन ही इस कमांड का इस्तेमाल कर सकते हैं।")
-        return
-    
-    conn = None
-    try:
-        if not context.args or len(context.args) < 2:
-            await update.message.reply_text("गलत फॉर्मेट! ऐसे इस्तेमाल करें:\n/addalias मूवी_का_असली_नाम alias_name")
-            return
-        
-        parts = context.args
-        alias = parts[-1]
-        movie_title = " ".join(parts[:-1])
-        
-        conn = get_db_connection()
-        if not conn:
-            await update.message.reply_text("❌ Database connection failed.")
-            return
-            
-        cur = conn.cursor()
-        
-        cur.execute("SELECT id FROM movies WHERE title = %s", (movie_title,))
-        movie = cur.fetchone()
-        
-        if not movie:
-            await update.message.reply_text(f"❌ '{movie_title}' डेटाबेस में नहीं मिली। पहले मूवी को add करें।")
-            return
-        
-        movie_id = movie
-        
-        cur.execute(
-            "INSERT INTO movie_aliases (movie_id, alias) VALUES (%s, %s) ON CONFLICT (movie_id, alias) DO NOTHING",
-            (movie_id, alias.lower())
-        )
-        
-        conn.commit()
-        await update.message.reply_text(f"✅ Alias '{alias}' successfully added for '{movie_title}'")
-        
-    except Exception as e:
-        logger.error(f"Error adding alias: {e}")
-        await update.message.reply_text(f"Error: {e}")
-    finally:
-        if conn:
-            conn.close()
-
-async def list_aliases(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """List all aliases for a movie"""
-    conn = None
-    try:
-        if not context.args:
-            await update.message.reply_text("कृपया मूवी का नाम दें:\n/aliases मूवी_का_नाम")
-            return
-        
-        movie_title = " ".join(context.args)
-        
-        conn = get_db_connection()
-        if not conn:
-            await update.message.reply_text("❌ Database connection failed.")
-            return
-            
-        cur = conn.cursor()
-        
-        cur.execute("""
-            SELECT m.title, COALESCE(array_agg(ma.alias), '{}'::text[]) 
-            FROM movies m 
-            LEFT JOIN movie_aliases ma ON m.id = ma.movie_id 
-            WHERE m.title = %s 
-            GROUP BY m.title
-        """, (movie_title,))
-        
-        result = cur.fetchone()
-        
-        if not result:
-            await update.message.reply_text(f"'{movie_title}' डेटाबेस में नहीं मिली।")
-            return
-        
-        title, aliases = result
-        aliases_list = "\n".join(aliases) if aliases and aliases else "कोई aliases नहीं हैं"
-        
-        await update.message.reply_text(f"🎬 {title}\n\nAliases:\n{aliases_list}")
-        
-    except Exception as e:
-        logger.error(f"Error listing aliases: {e}")
-        await update.message.reply_text(f"Error: {e}")
-    finally:
-        if conn:
-            conn.close()
-
-async def bulk_add_aliases(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Add multiple aliases at once"""
-    if update.effective_user.id != ADMIN_USER_ID:
-        await update.message.reply_text("Sorry, सिर्फ एडमिन ही इस कमांड का इस्तेमाल कर सकते हैं।")
-        return
-    
-    conn = None
-    try:
-        if not context.args:
-            await update.message.reply_text("""
-गलत फॉर्मेट! ऐसे इस्तेमाल करें:
-
-/aliasbulk
-Movie1: alias1, alias2, alias3
-Movie2: alias4, alias5
-""")
-            return
-
-        full_text = update.message.text
-        lines = full_text.split('\n')
-        
-        success_count = 0
-        failed_count = 0
-        
-        conn = get_db_connection()
-        if not conn:
-            await update.message.reply_text("❌ Database connection failed.")
-            return
-            
-        cur = conn.cursor()
-        
-        for line in lines:
-            line = line.strip()
-            if not line or line.startswith('/aliasbulk'):
-                continue
-                
-            if ':' not in line:
-                continue
-                
-            movie_title, aliases_str = line.split(':', 1)
-            movie_title = movie_title.strip()
-            aliases = [alias.strip() for alias in aliases_str.split(',')]
-            
-            cur.execute("SELECT id FROM movies WHERE title = %s", (movie_title,))
-            movie = cur.fetchone()
-            
-            if not movie:
-                failed_count += 1
-                continue
-                
-            movie_id = movie
-            
-            for alias in aliases:
-                if alias:
-                    try:
-                        cur.execute(
-                            "INSERT INTO movie_aliases (movie_id, alias) VALUES (%s, %s) ON CONFLICT (movie_id, alias) DO NOTHING",
-                            (movie_id, alias.lower())
-                        )
-                        success_count += 1
-                    except:
-                        failed_count += 1
-        
-        conn.commit()
-        
-        await update.message.reply_text(f"""
-📊 Alias Bulk Add Results:
-
-Successfully added: {success_count}
-Failed: {failed_count}
-""")
-        
-    except Exception as e:
-        logger.error(f"Error in bulk alias add: {e}")
-        await update.message.reply_text(f"Error: {e}")
-    finally:
-        if conn:
-            conn.close()
-
-async def notify_manually(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Manually notify users about a movie"""
-    if update.effective_user.id != ADMIN_USER_ID:
-        await update.message.reply_text("Sorry, सिर्फ एडमिन ही इस कमांड का इस्तेमाल कर सकते हैं।")
-        return
-    
-    try:
-        if not context.args:
-            await update.message.reply_text("Usage: /notify <movie_title>")
-            return
-        
-        movie_title = " ".join(context.args)
-        movie_found = get_movie_from_db(movie_title)
-        
-        if movie_found:
-            title, value, file_id = movie_found
-            num_notified = await notify_users_for_movie(context, title, value)
-            await update.message.reply_text(f"{num_notified} users को '{title}' के लिए notify किया गया है।")
-            await notify_in_group(context, title)
-        else:
-            await update.message.reply_text(f"'{movie_title}' डेटाबेस में नहीं मिली।")
-    except Exception as e:
-        logger.error(f"Error in notify_manually: {e}")
-        await update.message.reply_text(f"एक एरर आया: {e}")
+# ==================== FIXED ADMIN COMMANDS ====================
 
 async def notify_user_by_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Send text notification to specific user"""
@@ -1336,6 +990,7 @@ async def notify_user_by_username(update: Update, context: ContextTypes.DEFAULT_
             await update.message.reply_text("Usage: /notifyuser @username Your message here")
             return
         
+        # ✅ FIX: Access first element of list, then remove @
         target_username = context.args.replace('@', '')
         message_text = ' '.join(context.args[1:])
         
@@ -1373,9 +1028,425 @@ async def notify_user_by_username(update: Update, context: ContextTypes.DEFAULT_
         conn.close()
         
     except telegram.error.Forbidden:
-        await update.message.reply_text(f"❌ User @{target_username} blocked the bot.")
+        await update.message.reply_text(f"❌ User blocked the bot.")
     except Exception as e:
         logger.error(f"Error in notify_user_by_username: {e}")
+        await update.message.reply_text(f"❌ Error: {e}")
+
+async def list_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """List all bot users"""
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("⛔ Admin only command.")
+        return
+    
+    try:
+        page = 1
+        # ✅ FIX: Check if first element is digit, not the list itself
+        if context.args and len(context.args) > 0 and context.args.isdigit():
+            page = int(context.args)
+        
+        per_page = 10
+        offset = (page - 1) * per_page
+        
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Database connection failed.")
+            return
+        
+        cur = conn.cursor()
+        
+        # ✅ FIX: Extract integer from tuple
+        cur.execute("SELECT COUNT(DISTINCT user_id) FROM user_requests")
+        total_users = cur.fetchone()  # Was: cur.fetchone()
+        
+        cur.execute("""
+            SELECT 
+                user_id,
+                username,
+                first_name,
+                COUNT(*) as requests,
+                MAX(requested_at) as last_seen
+            FROM user_requests 
+            GROUP BY user_id, username, first_name
+            ORDER BY MAX(requested_at) DESC
+            LIMIT %s OFFSET %s
+        """, (per_page, offset))
+        
+        users = cur.fetchall()
+        
+        total_pages = (total_users + per_page - 1) // per_page
+        
+        users_text = f"👥 **Bot Users** (Page {page}/{total_pages})\n\n"
+        
+        for idx, (user_id, username, first_name, req_count, last_seen) in enumerate(users, start=offset+1):
+            username_str = f"@{username}" if username else "N/A"
+            users_text += f"{idx}. {first_name} ({username_str})\n"
+            users_text += f"   ID: `{user_id}` | Requests: {req_count}\n"
+            users_text += f"   Last seen: {last_seen.strftime('%Y-%m-%d %H:%M')}\n\n"
+        
+        users_text += f"\n📊 Total Users: {total_users}"
+        
+        await update.message.reply_text(users_text, parse_mode='Markdown')
+        
+        cur.close()
+        conn.close()
+        
+    except Exception as e:
+        logger.error(f"Error in list_all_users: {e}")
+        await update.message.reply_text(f"❌ Error: {e}")
+
+async def get_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Get user information"""
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("⛔ Admin only command.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("Usage: /userinfo @username")
+        return
+    
+    try:
+        # ✅ FIX: Access first element of list, then remove @
+        target_username = context.args.replace('@', '')
+        
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Database connection failed.")
+            return
+        
+        cur = conn.cursor()
+        
+        cur.execute("""
+            SELECT 
+                user_id,
+                username,
+                first_name,
+                COUNT(*) as total_requests,
+                SUM(CASE WHEN notified = TRUE THEN 1 ELSE 0 END) as fulfilled,
+                MAX(requested_at) as last_request
+            FROM user_requests 
+            WHERE username ILIKE %s 
+            GROUP BY user_id, username, first_name
+        """, (target_username,))
+        
+        user_info = cur.fetchone()
+        
+        if not user_info:
+            await update.message.reply_text(f"❌ No data found for @{target_username}")
+            cur.close()
+            conn.close()
+            return
+        
+        user_id, username, first_name, total, fulfilled, last_request = user_info
+        
+        cur.execute("""
+            SELECT movie_title, requested_at, notified 
+            FROM user_requests 
+            WHERE user_id = %s 
+            ORDER BY requested_at DESC 
+            LIMIT 5
+        """, (user_id,))
+        recent_requests = cur.fetchall()
+        
+        info_text = f"""
+👤 **User Information**
+
+**Basic Info:**
+• Name: {first_name}
+• Username: @{username}
+• User ID: `{user_id}`
+
+**Statistics:**
+• Total Requests: {total}
+• Fulfilled: {fulfilled}
+• Pending: {total - fulfilled}
+• Last Request: {last_request.strftime('%Y-%m-%d %H:%M') if last_request else 'N/A'}
+
+**Recent Requests:**
+"""
+        
+        for movie, req_time, notified in recent_requests:
+            status = "✅" if notified else "⏳"
+            info_text += f"{status} {movie} - {req_time.strftime('%m/%d %H:%M')}\n"
+        
+        await update.message.reply_text(info_text, parse_mode='Markdown')
+        
+        cur.close()
+        conn.close()
+        
+    except Exception as e:
+        logger.error(f"Error in get_user_info: {e}")
+        await update.message.reply_text(f"❌ Error: {e}")
+
+async def get_bot_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Get comprehensive bot statistics"""
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("⛔ Admin only command.")
+        return
+    
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Database connection failed.")
+            return
+        
+        cur = conn.cursor()
+        
+        # ✅ FIX: Extract integers from tuples
+        cur.execute("SELECT COUNT(*) FROM movies")
+        total_movies = cur.fetchone()  # Was: cur.fetchone()
+        
+        cur.execute("SELECT COUNT(DISTINCT user_id) FROM user_requests")
+        total_users = cur.fetchone()
+        
+        cur.execute("SELECT COUNT(*) FROM user_requests")
+        total_requests = cur.fetchone()
+        
+        cur.execute("SELECT COUNT(*) FROM user_requests WHERE notified = TRUE")
+        fulfilled = cur.fetchone()
+        
+        cur.execute("SELECT COUNT(*) FROM user_requests WHERE DATE(requested_at) = CURRENT_DATE")
+        today_requests = cur.fetchone()
+        
+        cur.execute("""
+            SELECT first_name, username, COUNT(*) as req_count
+            FROM user_requests
+            GROUP BY user_id, first_name, username
+            ORDER BY req_count DESC
+            LIMIT 5
+        """)
+        top_users = cur.fetchall()
+        
+        # ✅ FIX: Handle division by zero
+        fulfillment_rate = (fulfilled / total_requests * 100) if total_requests > 0 else 0
+        
+        stats_text = f"""
+📊 **Bot Statistics**
+
+**Database:**
+• Movies: {total_movies}
+• Users: {total_users}
+• Total Requests: {total_requests}
+• Fulfilled: {fulfilled} ({fulfillment_rate:.1f}%)
+• Pending: {total_requests - fulfilled}
+
+**Activity:**
+• Today's Requests: {today_requests}
+• Fulfillment Rate: {fulfillment_rate:.1f}%
+
+**Top Requesters:**
+"""
+        
+        for name, username, count in top_users:
+            username_str = f"@{username}" if username else "N/A"
+            stats_text += f"• {name} ({username_str}): {count} requests\n"
+        
+        await update.message.reply_text(stats_text, parse_mode='Markdown')
+        
+        cur.close()
+        conn.close()
+        
+    except Exception as e:
+        logger.error(f"Error in get_bot_stats: {e}")
+        await update.message.reply_text(f"❌ Error: {e}")
+
+async def schedule_notification(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Schedule a notification for later"""
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("⛔ Admin only command.")
+        return
+    
+    try:
+        if not context.args or len(context.args) < 3:
+            await update.message.reply_text(
+                "Usage: /schedulenotify <minutes> <@username> <message>\n"
+                "Example: /schedulenotify 30 @john New movie arriving soon!"
+            )
+            return
+        
+        # ✅ FIX: Access list elements correctly
+        delay_minutes = int(context.args)
+        target_username = context.args<!--citation:1-->.replace('@', '')
+        message_text = ' '.join(context.args[2:])
+        
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Database connection failed.")
+            return
+        
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT DISTINCT user_id, first_name FROM user_requests WHERE username ILIKE %s LIMIT 1",
+            (target_username,)
+        )
+        user = cur.fetchone()
+        
+        if not user:
+            await update.message.reply_text(f"❌ User @{target_username} not found.")
+            cur.close()
+            conn.close()
+            return
+        
+        user_id, first_name = user
+        
+        async def send_scheduled_notification():
+            await asyncio.sleep(delay_minutes * 60)
+            try:
+                notification_text = f"⏰ **Scheduled Message**\n\n{message_text}"
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=notification_text,
+                    parse_mode='Markdown'
+                )
+                logger.info(f"Scheduled notification sent to {user_id}")
+            except Exception as e:
+                logger.error(f"Failed to send scheduled notification to {user_id}: {e}")
+        
+        asyncio.create_task(send_scheduled_notification())
+        
+        await update.message.reply_text(
+            f"⏰ Notification scheduled!\n\n"
+            f"To: @{target_username} ({first_name})\n"
+            f"Delay: {delay_minutes} minutes\n"
+            f"Message: {message_text[:50]}..."
+        )
+        
+        cur.close()
+        conn.close()
+        
+    except ValueError:
+        await update.message.reply_text("❌ Invalid delay. Please provide number of minutes.")
+    except Exception as e:
+        logger.error(f"Error in schedule_notification: {e}")
+        await update.message.reply_text(f"❌ Error: {e}")
+
+async def notify_user_with_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Notify user with media by replying to a message"""
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("⛔ Admin only command.")
+        return
+    
+    try:
+        if not update.message.reply_to_message:
+            await update.message.reply_text(
+                "❌ Please reply to a message (file/video/audio/photo) with:\n"
+                "/notify @username Optional message"
+            )
+            return
+        
+        if not context.args:
+            await update.message.reply_text(
+                "Usage: /notify @username [optional message]\n"
+                "Example: /notify @amit002 Here's your requested movie!"
+            )
+            return
+        
+        # ✅ FIX: Access first element, then remove @
+        target_username = context.args.replace('@', '')
+        optional_message = ' '.join(context.args[1:]) if len(context.args) > 1 else None
+        
+        replied_message = update.message.reply_to_message
+        
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Database connection failed.")
+            return
+        
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT DISTINCT user_id, first_name FROM user_requests WHERE username ILIKE %s LIMIT 1",
+            (target_username,)
+        )
+        user = cur.fetchone()
+        
+        if not user:
+            await update.message.reply_text(f"❌ User @{target_username} not found in database.")
+            cur.close()
+            conn.close()
+            return
+        
+        user_id, first_name = user
+        
+        notification_header = f"📬 **Message from Admin**\n"
+        if optional_message:
+            notification_header += f"\n{optional_message}\n"
+        
+        warning_msg = await context.bot.send_message(
+            chat_id=user_id,
+            text=notification_header + "\n⚠️ ❌👉This file automatically❗️delete after 1 minute❗️so please forward in another chat👈❌",
+            parse_mode='Markdown'
+        )
+        
+        sent_msg = None
+        media_type = "unknown"
+        
+        if replied_message.document:
+            media_type = "file"
+            sent_msg = await context.bot.send_document(
+                chat_id=user_id,
+                document=replied_message.document.file_id,
+                caption=optional_message if optional_message else None
+            )
+        elif replied_message.video:
+            media_type = "video"
+            sent_msg = await context.bot.send_video(
+                chat_id=user_id,
+                video=replied_message.video.file_id,
+                caption=optional_message if optional_message else None
+            )
+        elif replied_message.audio:
+            media_type = "audio"
+            sent_msg = await context.bot.send_audio(
+                chat_id=user_id,
+                audio=replied_message.audio.file_id,
+                caption=optional_message if optional_message else None
+            )
+        elif replied_message.photo:
+            media_type = "photo"
+            photo = replied_message.photo[-1]
+            sent_msg = await context.bot.send_photo(
+                chat_id=user_id,
+                photo=photo.file_id,
+                caption=optional_message if optional_message else None
+            )
+        elif replied_message.text:
+            media_type = "text"
+            text_to_send = replied_message.text
+            if optional_message:
+                text_to_send = f"{optional_message}\n\n{text_to_send}"
+            sent_msg = await context.bot.send_message(
+                chat_id=user_id,
+                text=text_to_send
+            )
+        else:
+            await update.message.reply_text("❌ Unsupported media type.")
+            cur.close()
+            conn.close()
+            return
+        
+        if sent_msg and media_type != "text":
+            asyncio.create_task(
+                delete_messages_after_delay(
+                    context,
+                    user_id,
+                    [sent_msg.message_id, warning_msg.message_id],
+                    60
+                )
+            )
+        
+        confirmation = f"✅ **Notification Sent!**\n\n"
+        confirmation += f"To: @{target_username} ({first_name})\n"
+        confirmation += f"Media Type: {media_type.capitalize()}"
+        
+        await update.message.reply_text(confirmation, parse_mode='Markdown')
+        
+        cur.close()
+        conn.close()
+        
+    except telegram.error.Forbidden:
+        await update.message.reply_text(f"❌ User blocked the bot.")
+    except Exception as e:
+        logger.error(f"Error in notify_user_with_media: {e}")
         await update.message.reply_text(f"❌ Error: {e}")
 
 async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
