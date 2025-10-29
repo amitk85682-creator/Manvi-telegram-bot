@@ -389,7 +389,7 @@ def get_movie_from_db(user_query):
         
         # Choose the best match with highest score
         matches = [best_match, partial_match, token_match]
-        best_overall = max(matches, key=lambda x: if x else 0)
+        best_overall = max(matches, key=lambda x: x if x else 0)
         
         logger.info(f"Fuzzy matches - Token Sort: {best_match if best_match else 0}, Partial: {partial_match if partial_match else 0}, Token Set: {token_match if token_match else 0}")
         
