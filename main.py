@@ -1878,8 +1878,8 @@ async def schedule_notification(update: Update, context: ContextTypes.DEFAULT_TY
             return
         
         user_id, first_name = user
-        
-        async def send_scheduled_notification(context, chat_id, message, logger):
+        # send scheduled notification
+async def send_scheduled_notification(context, chat_id, message, logger):
     """Sends the actual notification message."""
     try:
         notification_text = f"⏰ **Scheduled Message**\n\n{message}"
