@@ -1676,19 +1676,20 @@ async def notify_user_with_media(update: Update, context: ContextTypes.DEFAULT_T
         conn.close()
         
     except Exception as e:
-        logger.error(f"Error in broadcast_message: {e}")
-        await update.message.reply_text(f"❌ Error: {e}")
+            logger.error(f"Error in broadcast_message: {e}")
+            await update.message.reply_text(f"❌ Error: {e}")
 
-        #Get User Info
-        async def get_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# Get User Info (यह फंक्शन बाहर और सही इंडेंटेशन पर होना चाहिए)
+async def get_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Admin command to get user information
     Usage: /userinfo @username
     """
-    # फंक्शन के कोड को यहाँ इंडेंट करें
-    if update.effective_user.id != ADMIN_USER_ID:
-        await update.message.reply_text("⛔ Admin only command.")
-        return
+    try:
+        # एडमिन चेक
+        if update.effective_user.id != ADMIN_USER_ID:
+            await update.message.reply_text("⛔ Admin only command.")
+            return
     
     try:
         if not context.args:
