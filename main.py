@@ -312,8 +312,12 @@ def get_movie_from_db(user_query):
         partial_match = process.extractOne(user_query, movie_titles, scorer=fuzz.partial_ratio)
         token_match = process.extractOne(user_query, movie_titles, scorer=fuzz.token_set_ratio)
         
-        matches = [best_match, partial_match, token_match]
-best_overall = max(matches, key=lambda x: x if x else 0)
+        try:
+    matches = [best_match, partial_match, token_match]
+    best_overall = max(matches, key=lambda x: x if x else 0)
+except Exception as e:
+    logger.error(f"Error in fuzzy matching: {e}")
+    best_overall = 0
 
 logger.info(
     f"Fuzzy matches - Token Sort: {best_match if best_match else 0}, "
