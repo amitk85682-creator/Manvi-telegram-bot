@@ -1681,10 +1681,10 @@ async def notify_user_with_media(update: Update, context: ContextTypes.DEFAULT_T
 
         #Get User Info
     async def get_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-"""
-Admin command to get user information
-Usage: /userinfo @username
-"""
+    """
+    Admin command to get user information
+    Usage: /userinfo @username
+    """
     if update.effective_user.id != ADMIN_USER_ID:
         await update.message.reply_text("⛔ Admin only command.")
         return
