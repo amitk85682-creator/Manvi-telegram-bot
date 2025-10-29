@@ -1680,7 +1680,7 @@ async def notify_user_with_media(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text(f"❌ Error: {e}")
 
         #Get User Info
-        async def get_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def get_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Admin command to get user information
     Usage: /userinfo @username
@@ -1767,7 +1767,7 @@ async def notify_user_with_media(update: Update, context: ContextTypes.DEFAULT_T
         logger.error(f"Error in get_user_info: {e}")
         await update.message.reply_text(f"❌ Error: {e}")
         # List All Users
-        async def list_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def list_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Admin command to list all bot users
     Usage: /listusers [page_number]
@@ -1834,7 +1834,7 @@ async def notify_user_with_media(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text(f"❌ Error: {e}")
 
         # Schedule Notifications
-        async def schedule_notification(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def schedule_notification(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Admin command to schedule a notification
     Usage: /schedulenotify <minutes> <@username> <message>
@@ -2015,7 +2015,7 @@ async def get_bot_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Error: {e}")
 
         # Broadcast with Media 
-        async def broadcast_with_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def broadcast_with_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Admin command to broadcast media to all users
     Usage: Reply to any media with: /broadcastmedia Optional message
@@ -2120,7 +2120,7 @@ async def get_bot_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Quick Reply Notify
 
-        async def quick_notify(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def quick_notify(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Quick notify - automatically detects username from recent requesters
     Usage: Reply to media with: /qnotify [username or movie_title]
@@ -2226,7 +2226,7 @@ async def get_bot_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Forward from Channel
 
-        async def forward_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def forward_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Forward message from channel to user
     Usage: Reply to any channel message with: /forwardto @username
