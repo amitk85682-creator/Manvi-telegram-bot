@@ -556,8 +556,8 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
                 movie_data = get_movie_from_db(movie_title)
                 sent_msg = None
                 
-                if movie_data and len(movie_data) > 2 and movie_data<!--citation:2-->:
-                    sent_msg = await context.bot.send_document(chat_id=user_id, document=movie_data<!--citation:2-->)
+                if movie_data and len(movie_data) > 2:
+    sent_msg = await context.bot.send_document(chat_id=user_id, document=movie_data)
                 elif movie_url.startswith("https://t.me/c/"):
                     parts = movie_url.split('/')
                     from_chat_id = int("-100" + parts[-2])
@@ -1670,9 +1670,9 @@ async def schedule_notification(update: Update, context: ContextTypes.DEFAULT_TY
             )
             return
         
-        delay_minutes = int(context.args)
-        target_username = context.args<!--citation:1-->.replace('@', '')
-        message_text = ' '.join(context.args[2:])
+        delay_minutes = int(context.args[0])
+target_username = context.args[1].replace('@', '')
+message_text = ' '.join(context.args[2:])
         
         conn = get_db_connection()
         if not conn:
