@@ -610,7 +610,7 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
                 movie_data = get_movie_from_db(movie_title)
                 sent_msg = None
                 
-                if movie_data and len(movie_data) > 2 and movie_data<!--citation:2-->:
+                if movie_data and len(movie_data) > 2:
                     sent_msg = await context.bot.send_document(chat_id=user_id, document=movie_data<!--citation:2-->)
                 elif movie_url.startswith("https://t.me/c/"):
                     parts = movie_url.split('/')
