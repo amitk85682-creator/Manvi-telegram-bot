@@ -1604,7 +1604,7 @@ async def notify_user_with_media(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text(f"❌ Error: {e}")
 
         # Broadcast to All Users
-        async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
     Admin command to broadcast message to all users
     Usage: /broadcast Your message here
