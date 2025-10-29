@@ -313,15 +313,19 @@ def get_movie_from_db(user_query):
         token_match = process.extractOne(user_query, movie_titles, scorer=fuzz.token_set_ratio)
         
         matches = [best_match, partial_match, token_match]
-        best_overall = max(matches, key=lambda x: x<!--citation:1--> if x else 0)
-        
-        logger.info(f"Fuzzy matches - Token Sort: {best_match<!--citation:1--> if best_match else 0}, Partial: {partial_match<!--citation:1--> if partial_match else 0}, Token Set: {token_match<!--citation:1--> if token_match else 0}")
-        
-        if best_overall and best_overall<!--citation:1--> >= 65:
-            for m in all_movies:
-                if m == best_overall:
-                    logger.info(f"Fuzzy match found: '{user_query}' matched to '{m}' with score {best_overall<!--citation:1-->}")
-                    return m
+best_overall = max(matches, key=lambda x: x if x else 0)
+
+logger.info(
+    f"Fuzzy matches - Token Sort: {best_match if best_match else 0}, "
+    f"Partial: {partial_match if partial_match else 0}, "
+    f"Token Set: {token_match if token_match else 0}"
+)
+
+if best_overall and best_overall >= 65:
+    for m in all_movies:
+        if m == best_overall:
+            logger.info(f"Fuzzy match found: '{user_query}' matched to '{m}' with score {best_overall}")
+            return m
         
         return None
     except Exception as e:
