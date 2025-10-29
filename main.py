@@ -1690,7 +1690,6 @@ async def get_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.effective_user.id != ADMIN_USER_ID:
             await update.message.reply_text("⛔ Admin only command.")
             return
-    
     try:
         if not context.args:
             await update.message.reply_text("Usage: /userinfo @username")
