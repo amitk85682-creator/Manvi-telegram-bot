@@ -389,15 +389,15 @@ def get_movie_from_db(user_query):
         
         # Choose the best match with highest score
         matches = [best_match, partial_match, token_match]
-        best_overall = max(matches, key=lambda x: x<!--citation:1--> if x else 0)
+        best_overall = max(matches, key=lambda x: if x else 0)
         
-        logger.info(f"Fuzzy matches - Token Sort: {best_match<!--citation:1--> if best_match else 0}, Partial: {partial_match<!--citation:1--> if partial_match else 0}, Token Set: {token_match<!--citation:1--> if token_match else 0}")
+        logger.info(f"Fuzzy matches - Token Sort: {best_match if best_match else 0}, Partial: {partial_match if partial_match else 0}, Token Set: {token_match if token_match else 0}")
         
         # Lower threshold to 65 for better typo handling
-        if best_overall and best_overall<!--citation:1--> >= 65:
+        if best_overall and best_overall >= 65:
             for m in all_movies:
                 if m == best_overall:
-                    logger.info(f"Fuzzy match found: '{user_query}' matched to '{m}' with score {best_overall<!--citation:1-->}")
+                    logger.info(f"Fuzzy match found: '{user_query}' matched to '{m}' with score {best_overall}")
                     return m
         
         return None
@@ -545,8 +545,8 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
                 movie_data = get_movie_from_db(movie_title)
                 sent_msg = None
                 
-                if movie_data and len(movie_data) > 2 and movie_data<!--citation:2-->:
-                    sent_msg = await context.bot.send_document(chat_id=user_id, document=movie_data<!--citation:2-->)
+                if movie_data and len(movie_data) > 2 and movie_data:
+                    sent_msg = await context.bot.send_document(chat_id=user_id, document=movie_data)
                 elif movie_url.startswith("https://t.me/c/"):
                     parts = movie_url.split('/')
                     from_chat_id = int("-100" + parts[-2])
@@ -1458,7 +1458,7 @@ async def schedule_notification(update: Update, context: ContextTypes.DEFAULT_TY
             return
         
         delay_minutes = int(context.args)
-        target_username = context.args<!--citation:1-->.replace('@', '')
+        target_username = context.args.replace('@', '')
         message_text = ' '.join(context.args[2:])
         
         conn = get_db_connection()
