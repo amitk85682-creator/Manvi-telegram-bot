@@ -1680,11 +1680,12 @@ async def notify_user_with_media(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text(f"❌ Error: {e}")
 
         #Get User Info
-    async def get_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        async def get_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Admin command to get user information
     Usage: /userinfo @username
     """
+    # फंक्शन के कोड को यहाँ इंडेंट करें
     if update.effective_user.id != ADMIN_USER_ID:
         await update.message.reply_text("⛔ Admin only command.")
         return
