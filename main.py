@@ -1836,7 +1836,7 @@ async def list_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Error: {e}")
 
         # Schedule Notifications
-    async def schedule_notification(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def schedule_notification(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Admin command to schedule a notification
     Usage: /schedulenotify <minutes> <@username> <message>
@@ -1846,6 +1846,7 @@ async def list_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     try:
+        # ✅ आर्गुमेंट्स की संख्या चेक करें
         if not context.args or len(context.args) < 3:
             await update.message.reply_text(
                 "Usage: /schedulenotify <minutes> <@username> <message>\n"
@@ -1878,19 +1879,18 @@ async def list_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         user_id, first_name = user
         
-        # Schedule the notification
-        async def send_scheduled_notification():
-            await asyncio.sleep(delay_minutes * 60)
-            try:
-                notification = f"⏰ **Scheduled Message**\n\n{message_text}"
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=notification,
-                    parse_mode='Markdown'
-                )
-                logger.info(f"Scheduled notification sent to {user_id}")
-            except Exception as e:
-                logger.error(f"Failed to send scheduled notification: {e}")
+        async def send_scheduled_notification(context, chat_id, message, logger):
+    """Sends the actual notification message."""
+    try:
+        notification_text = f"⏰ **Scheduled Message**\n\n{message}"
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=notification_text,
+            parse_mode='MarkdownV2'  # 'MarkdownV2' का उपयोग करना बेहतर है
+        )
+        logger.info(f"Scheduled notification sent to {chat_id}")
+    except Exception as e:
+        logger.error(f"Failed to send scheduled notification to {chat_id}: {e}")
         
         # Create task
         asyncio.create_task(send_scheduled_notification())
@@ -2016,23 +2016,22 @@ async def get_bot_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error in get_bot_stats: {e}")
         await update.message.reply_text(f"❌ Error: {e}")
 
-        # Broadcast with Media 
-    async def broadcast_with_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        # Broadcast with Media
+async def broadcast_with_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Admin command to broadcast media to all users
-    Usage: Reply to any media with: /broadcastmedia Optional message
+    Usage: Reply to any media with: /broadcastmedia [Optional message]
     """
+    # 1. एडमिन है या नहीं, यह चेक करें
     if update.effective_user.id != ADMIN_USER_ID:
         await update.message.reply_text("⛔ Admin only command.")
         return
-    
-    try:
-        if not update.message.reply_to_message:
-            await update.message.reply_text(
-                "❌ Please reply to a media message with:\n"
-                "/broadcastmedia Optional message"
-            )
-            return
+
+    # 2. चेक करें कि कमांड किसी मैसेज के रिप्लाई में है या नहीं
+    replied_message = update.message.reply_to_message
+    if not replied_message:
+        await update.message.reply_text("❌ Please reply to a media message to broadcast it.")
+        return
         
         optional_message = ' '.join(context.args) if context.args else None
         replied_message = update.message.reply_to_message
@@ -2121,31 +2120,25 @@ async def get_bot_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Error: {e}")
 
         # Quick Reply Notify
-
-    async def quick_notify(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def quick_notify(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Quick notify - automatically detects username from recent requesters
-    Usage: Reply to media with: /qnotify [username or movie_title]
-    
-    If movie_title provided, finds users who requested that movie
-    If username provided, sends to that user
+    Quick notify - sends media to specific requesters.
+    Usage: Reply to media with: /qnotify <@username_or_user_id | movie_title>
     """
+    # 1. एडमिन चेक
     if update.effective_user.id != ADMIN_USER_ID:
         await update.message.reply_text("⛔ Admin only command.")
         return
-    
-    try:
-        if not update.message.reply_to_message:
-            await update.message.reply_text("❌ Reply to a media message first!")
-            return
+
+    # 2. रिप्लाई और आर्गुमेंट चेक
+    replied_message = update.message.reply_to_message
+    if not replied_message:
+        await update.message.reply_text("❌ Reply to a media message first!")
+        return
         
-        if not context.args:
-            await update.message.reply_text(
-                "Usage: /qnotify @username OR /qnotify MovieTitle\n"
-                "Example: /qnotify @amit002\n"
-                "Example: /qnotify Pathaan"
-            )
-            return
+    if not context.args:
+        await update.message.reply_text("Usage: /qnotify <@username | user_id | MovieTitle>")
+        return
         
         query = ' '.join(context.args)
         replied_message = update.message.reply_to_message
@@ -2227,24 +2220,25 @@ async def get_bot_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Error: {e}")
 
         # Forward from Channel
-
-    async def forward_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def forward_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Forward message from channel to user
+    Forward message from channel to user.
     Usage: Reply to any channel message with: /forwardto @username
     """
+    # 1. एडमिन चेक
     if update.effective_user.id != ADMIN_USER_ID:
         await update.message.reply_text("⛔ Admin only command.")
         return
     
-    try:
-        if not update.message.reply_to_message:
-            await update.message.reply_text("❌ Reply to a message first!")
-            return
+    # 2. रिप्लाई और आर्गुमेंट चेक
+    replied_message = update.message.reply_to_message
+    if not replied_message:
+        await update.message.reply_text("❌ Reply to a message first!")
+        return
         
-        if not context.args:
-            await update.message.reply_text("Usage: /forwardto @username")
-            return
+    if not context.args:
+        await update.message.reply_text("Usage: /forwardto @username_or_userid")
+        return
         
         target_username = context.args.replace('@', '')
         
@@ -2282,11 +2276,11 @@ async def get_bot_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Error: {e}")
 
         # Updated Admin Help
-
-        async def admin_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show admin commands help - UPDATED"""
+async def admin_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show a detailed list of all admin commands."""
+    # 1. एडमिन चेक
     if update.effective_user.id != ADMIN_USER_ID:
-        await update.message.reply_text("⛔ Admin only command.")
+        await update.message.reply_text("⛔ This is an admin-only command.")
         return
     
     help_text = """
