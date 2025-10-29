@@ -24,10 +24,11 @@ from telegram.ext import (
     ConversationHandler,
     CallbackQueryHandler
 )
-from datetime import datetime
-from fuzzywuzzy import process
+from datetime import datetime, timedelta
+from fuzzywuzzy import process, fuzz
 import async_timeout
 from urllib.parse import urlparse, urlunparse, quote
+from collections import defaultdict
 
 # Set up logging
 logging.basicConfig(
@@ -66,6 +67,9 @@ UPDATE_SECRET_CODE = os.environ.get('UPDATE_SECRET_CODE', 'default_secret_123')
 ADMIN_USER_ID = int(os.environ.get('ADMIN_USER_ID', 0))
 GROUP_CHAT_ID = os.environ.get('GROUP_CHAT_ID')
 ADMIN_CHANNEL_ID = os.environ.get('ADMIN_CHANNEL_ID')
+
+# Rate limiting dictionary
+user_last_request = defaultdict(lambda: datetime.min)
 
 # Validate required environment variables
 if not TELEGRAM_BOT_TOKEN:
@@ -108,12 +112,43 @@ def fix_database_url():
 # Use the fixed database URL
 FIXED_DATABASE_URL = fix_database_url()
 
+# --- Query Preprocessing ---
+def preprocess_query(query):
+    """Clean and normalize user query"""
+    # Remove emojis and special symbols
+    query = re.sub(r'[^\w\s-]', '', query)
+    
+    # Remove extra whitespaces
+    query = ' '.join(query.split())
+    
+    # Remove common words that don't help in matching
+    stop_words = ['movie', 'film', 'full', 'download', 'watch', 'online', 'free']
+    words = query.lower().split()
+    words = [w for w in words if w not in stop_words]
+    
+    return ' '.join(words).strip()
+
+# --- Rate Limiting ---
+async def check_rate_limit(user_id):
+    """Check if user is rate limited"""
+    now = datetime.now()
+    last_request = user_last_request[user_id]
+    
+    if now - last_request < timedelta(seconds=2):
+        return False
+    
+    user_last_request[user_id] = now
+    return True
+
 # --- Database Functions ---
 def setup_database():
     try:
         # Use the fixed database URL
         conn = psycopg2.connect(FIXED_DATABASE_URL)
         cur = conn.cursor()
+        
+        # Enable pg_trgm extension for better fuzzy search
+        cur.execute('CREATE EXTENSION IF NOT EXISTS pg_trgm;')
         
         # Create movies table with file_id column
         cur.execute('''
@@ -175,6 +210,7 @@ def setup_database():
         
         # Add indexes for better performance
         cur.execute('CREATE INDEX IF NOT EXISTS idx_movies_title ON movies (title);')
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_movies_title_trgm ON movies USING gin (title gin_trgm_ops);')
         cur.execute('CREATE INDEX IF NOT EXISTS idx_user_requests_movie_title ON user_requests (movie_title);')
         cur.execute('CREATE INDEX IF NOT EXISTS idx_user_requests_user_id ON user_requests (user_id);')
         cur.execute('CREATE INDEX IF NOT EXISTS idx_movie_aliases_alias ON movie_aliases (alias);')
@@ -214,10 +250,10 @@ def update_movies_in_db():
         # Get last sync time for incremental updates
         cur.execute("SELECT last_sync FROM sync_info ORDER BY id DESC LIMIT 1;")
         last_sync = cur.fetchone()
-        last_sync_time = last_sync[0] if last_sync else None
+        last_sync_time = last_sync if last_sync else None
         
         cur.execute("SELECT title FROM movies;")
-        existing_movies = {row[0] for row in cur.fetchall()}
+        existing_movies = {row for row in cur.fetchall()}
         
         # Only proceed if Blogger API keys are available
         if not BLOGGER_API_KEY or not BLOG_ID:
@@ -284,10 +320,13 @@ def get_movie_from_db(user_query):
             
         cur = conn.cursor()
         
+        logger.info(f"Searching for: '{user_query}'")
+        
         # First try exact match in movies table
         cur.execute("SELECT title, url, file_id FROM movies WHERE LOWER(title) = LOWER(%s) LIMIT 1", (user_query,))
         movie = cur.fetchone()
         if movie:
+            logger.info(f"Exact match found: '{movie}'")
             return movie
         
         # Then try alias match
@@ -300,21 +339,40 @@ def get_movie_from_db(user_query):
         """, (user_query,))
         movie = cur.fetchone()
         if movie:
+            logger.info(f"Alias match found: '{movie}'")
             return movie
         
-        # Then try partial match with word boundaries
-        cur.execute("SELECT title, url, file_id FROM movies WHERE title ILIKE %s LIMIT 5", ('%' + user_query + '%',))
-        movies = cur.fetchall()
+        # Get ALL movies for fuzzy matching
+        cur.execute("SELECT title, url, file_id FROM movies")
+        all_movies = cur.fetchall()
         
-        if movies:
-            # Use fuzzy matching to find the best match
-            movie_titles = [m[0] for m in movies]
-            best_match = process.extractOne(user_query, movie_titles)
-            
-            if best_match and best_match[1] > 70:  # Confidence threshold
-                for m in movies:
-                    if m[0] == best_match[0]:
-                        return m
+        if not all_movies:
+            return None
+        
+        # Use fuzzy matching with multiple strategies
+        movie_titles = [m for m in all_movies]
+        
+        # Strategy 1: Token Sort Ratio (handles word order)
+        best_match = process.extractOne(user_query, movie_titles, scorer=fuzz.token_sort_ratio)
+        
+        # Strategy 2: Partial Ratio (handles substrings)
+        partial_match = process.extractOne(user_query, movie_titles, scorer=fuzz.partial_ratio)
+        
+        # Strategy 3: Token Set Ratio (handles extra/missing words)
+        token_match = process.extractOne(user_query, movie_titles, scorer=fuzz.token_set_ratio)
+        
+        # Choose the best match with highest score
+        matches = [best_match, partial_match, token_match]
+        best_overall = max(matches, key=lambda x: x if x else 0)
+        
+        logger.info(f"Fuzzy matches - Token Sort: {best_match if best_match else 0}, Partial: {partial_match if partial_match else 0}, Token Set: {token_match if token_match else 0}")
+        
+        # Lower threshold to 65 for better typo handling
+        if best_overall and best_overall >= 65:
+            for m in all_movies:
+                if m == best_overall:
+                    logger.info(f"Fuzzy match found: '{user_query}' matched to '{m}' with score {best_overall}")
+                    return m
         
         return None
     except Exception as e:
@@ -502,6 +560,24 @@ def store_user_request(user_id, username, first_name, movie_title, group_id=None
         logger.error(f"Error storing user request: {e}")
         return False
 
+# --- Auto-Delete Callback ---
+async def delete_message_callback(context: ContextTypes.DEFAULT_TYPE):
+    """Callback to delete messages after a delay"""
+    try:
+        job_data = context.job.data
+        chat_id = job_data['chat_id']
+        message_ids = job_data['message_ids']
+        
+        for msg_id in message_ids:
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
+                logger.info(f"Deleted message {msg_id} from chat {chat_id}")
+            except Exception as e:
+                logger.error(f"Failed to delete message {msg_id}: {e}")
+                
+    except Exception as e:
+        logger.error(f"Error in delete_message_callback: {e}")
+
 # --- Notification Functions ---
 async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title, movie_url):
     """Notify users who requested a movie when it becomes available"""
@@ -527,20 +603,45 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
                 
                 await context.bot.send_message(chat_id=user_id, text=notification_text)
                 
+                # Send warning message
+                warning_msg = await context.bot.send_message(
+                    chat_id=user_id,
+                    text="⚠️ ❌👉This file automatically❗️delete after 1 minute❗️so please forward in another chat👈❌\n\nJoin » [FilmfyBox](http://t.me/filmfybox)",
+                    parse_mode='Markdown'
+                )
+                
                 # Check if we have a file_id in the database
                 movie_data = get_movie_from_db(movie_title)
-                if movie_data and len(movie_data) > 2 and movie_data[2]:  # file_id exists
-                    file_id = movie_data[2]
-                    await context.bot.send_document(chat_id=user_id, document=file_id)
+                if movie_data and len(movie_data) > 2 and movie_data:  # file_id exists
+                    file_id = movie_data
+                    sent_msg = await context.bot.send_document(chat_id=user_id, document=file_id)
+                    
+                    # Schedule auto-delete
+                    context.job_queue.run_once(
+                        delete_message_callback,
+                        60,
+                        data={'chat_id': user_id, 'message_ids': [sent_msg.message_id, warning_msg.message_id]},
+                        name=f'delete_{sent_msg.message_id}'
+                    )
+                    
                 elif movie_url.startswith("https://t.me/c/"):
                     parts = movie_url.split('/')
                     from_chat_id = int("-100" + parts[-2])
                     msg_id = int(parts[-1])
-                    await context.bot.copy_message(
+                    sent_msg = await context.bot.copy_message(
                         chat_id=user_id, 
                         from_chat_id=from_chat_id, 
                         message_id=msg_id
                     )
+                    
+                    # Schedule auto-delete
+                    context.job_queue.run_once(
+                        delete_message_callback,
+                        60,
+                        data={'chat_id': user_id, 'message_ids': [sent_msg.message_id, warning_msg.message_id]},
+                        name=f'delete_{sent_msg.message_id}'
+                    )
+                    
                 elif movie_url.startswith("http"):
                     # Send message with buttons for HTTP URLs
                     message_with_buttons = f"🎬 {movie_title} is now available!\n\nClick the buttons below:"
@@ -550,7 +651,15 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
                         reply_markup=get_movie_options_keyboard(movie_title, movie_url)
                     )
                 else:
-                    await context.bot.send_document(chat_id=user_id, document=movie_url)
+                    sent_msg = await context.bot.send_document(chat_id=user_id, document=movie_url)
+                    
+                    # Schedule auto-delete
+                    context.job_queue.run_once(
+                        delete_message_callback,
+                        60,
+                        data={'chat_id': user_id, 'message_ids': [sent_msg.message_id, warning_msg.message_id]},
+                        name=f'delete_{sent_msg.message_id}'
+                    )
                 
                 # Mark as notified
                 cur.execute(
@@ -645,11 +754,20 @@ async def notify_in_group(context: ContextTypes.DEFAULT_TYPE, movie_title):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         welcome_text = """
-        क्या हाल है? मैं मानवी। 😉 
-        फिल्मों पर गपशॉप करनी है तो बता।
+📨 Sᴇɴᴅ Mᴏᴠɪᴇ Oʀ Sᴇʀɪᴇs Nᴀᴍᴇ ᴀɴᴅ Yᴇᴀʀ Aꜱ Pᴇʀ Gᴏᴏɢʟᴇ Sᴘᴇʟʟɪɴɢ..!! 👍
 
-        Use the buttons below to get started!
-        """
+⚠️ Exᴀᴍᴘʟᴇ Fᴏʀ Mᴏᴠɪᴇ 👇
+
+👉 Jailer
+👉 Jailer 2023
+
+⚠️ Exᴀᴍᴘʟᴇ Fᴏʀ WᴇʙSᴇʀɪᴇs 👇
+
+👉 Stranger Things 
+👉 Stranger Things S02 E04
+
+⚠️ ᴅᴏɴ'ᴛ ᴀᴅᴅ ᴇᴍᴏᴊɪꜱ ᴀɴᴅ ꜱʏᴍʙᴏʟꜱ ɪɴ ᴍᴏᴠɪᴇ ɴᴀᴍᴇ, ᴜꜱᴇ ʟᴇᴛᴛᴇʀꜱ ᴏɴʟʏ..!! ❌
+"""
         await update.message.reply_text(welcome_text, reply_markup=get_main_keyboard())
         return MAIN_MENU
     except Exception as e:
@@ -677,15 +795,15 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if conn:
                     cur = conn.cursor()
                     cur.execute("SELECT COUNT(*) FROM user_requests WHERE user_id = %s", (user_id,))
-                    request_count = cur.fetchone()[0]
+                    request_count = cur.fetchone()
                     
                     cur.execute("SELECT COUNT(*) FROM user_requests WHERE user_id = %s AND notified = TRUE", (user_id,))
-                    fulfilled_count = cur.fetchone()[0]
+                    fulfilled_count = cur.fetchone()
                     
                     stats_text = f"""
-                    📊 Your Stats:
-                    - Total Requests: {request_count}
-                    - Fulfilled Requests: {fulfilled_count}
+📊 Your Stats:
+- Total Requests: {request_count}
+- Fulfilled Requests: {fulfilled_count}
                     """
                     await update.message.reply_text(stats_text)
                 else:
@@ -700,13 +818,13 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         elif query == '❓ Help':
             help_text = """
-            🤖 How to use Manvi Bot:
-            
-            🔍 Search Movies: Find movies in our collection
-            🙋 Request Movie: Request a new movie to be added
-            📊 My Stats: View your request statistics
-            
-            Just use the buttons below to navigate!
+🤖 How to use Manvi Bot:
+
+🔍 Search Movies: Find movies in our collection
+🙋 Request Movie: Request a new movie to be added
+📊 My Stats: View your request statistics
+
+Just use the buttons below to navigate!
             """
             await update.message.reply_text(help_text)
             return MAIN_MENU
@@ -717,25 +835,62 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle movie search"""
     try:
+        # Check rate limit
+        if not await check_rate_limit(update.effective_user.id):
+            await update.message.reply_text("Please wait a moment before searching again.")
+            return SEARCHING
+        
         user_message = update.message.text.strip()
         
+        # Preprocess the query
+        processed_query = preprocess_query(user_message) if user_message else user_message
+        
+        # Use original query if preprocessing resulted in empty string
+        search_query = processed_query if processed_query else user_message
+        
         # First try to find movie in database
-        movie_found = get_movie_from_db(user_message)
+        movie_found = get_movie_from_db(search_query)
         
         if movie_found:
             title, url, file_id = movie_found
             
+            # Send auto-delete warning first
+            warning_msg = await update.message.reply_text(
+                "⚠️ ❌👉This file automatically❗️delete after 1 minute❗️so please forward in another chat👈❌\n\n"
+                "Join » [FilmfyBox](http://t.me/filmfybox)",
+                parse_mode='Markdown'
+            )
+            
             # If we have a file_id, send the file directly
             if file_id:
-                await update.message.reply_text(f"मिल गई! 😉 '{title}' भेजी जा रही है... कृपया इंतज़ार करें।")
-                await context.bot.send_document(chat_id=update.effective_chat.id, document=file_id)
+                sent_msg = await context.bot.send_document(chat_id=update.effective_chat.id, document=file_id)
+                
+                # Schedule auto-delete after 1 minute
+                context.job_queue.run_once(
+                    delete_message_callback,
+                    60,
+                    data={'chat_id': update.effective_chat.id, 'message_ids': [sent_msg.message_id, warning_msg.message_id]},
+                    name=f'delete_{sent_msg.message_id}'
+                )
+                
             elif url.startswith("https://t.me/c/"):
-                # Handle telegram channel links
                 parts = url.split('/')
                 from_chat_id = int("-100" + parts[-2])
                 message_id = int(parts[-1])
-                await update.message.reply_text(f"मिल गई! 😉 '{title}' भेजी जा रही है... कृपया इंतज़ार करें।")
-                await context.bot.copy_message(chat_id=update.effective_chat.id, from_chat_id=from_chat_id, message_id=message_id)
+                sent_msg = await context.bot.copy_message(
+                    chat_id=update.effective_chat.id, 
+                    from_chat_id=from_chat_id, 
+                    message_id=message_id
+                )
+                
+                # Schedule auto-delete
+                context.job_queue.run_once(
+                    delete_message_callback,
+                    60,
+                    data={'chat_id': update.effective_chat.id, 'message_ids': [sent_msg.message_id, warning_msg.message_id]},
+                    name=f'delete_{sent_msg.message_id}'
+                )
+                
             elif url.startswith("http"):
                 # Handle regular URLs - send message with buttons
                 response = f"🎉 Found it! '{title}' is available!\n\nClick the buttons below:"
@@ -745,8 +900,15 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             else:
                 # Assume it's a file_id or direct file
-                await update.message.reply_text(f"मिल गई! 😉 '{title}' भेजी जा रही है... कृपया इंतज़ार करें।")
-                await context.bot.send_document(chat_id=update.effective_chat.id, document=url)
+                sent_msg = await context.bot.send_document(chat_id=update.effective_chat.id, document=url)
+                
+                # Schedule auto-delete
+                context.job_queue.run_once(
+                    delete_message_callback,
+                    60,
+                    data={'chat_id': update.effective_chat.id, 'message_ids': [sent_msg.message_id, warning_msg.message_id]},
+                    name=f'delete_{sent_msg.message_id}'
+                )
         else:
             # Store the user's request
             user = update.effective_user
@@ -759,12 +921,34 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 update.message.message_id
             )
             
+            # Send first error message
             response = f"😔 Sorry, '{user_message}' is not in my collection right now. Would you like to request it?"
             keyboard = [[InlineKeyboardButton("✅ Yes, Request It", callback_data=f"request_{user_message}")]]
             await update.message.reply_text(
                 response, 
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
+            
+            # Send detailed error message
+            error_msg2 = """
+● I could not find the file you requested 😕
+
+● Is the movie you asked about released on OTT..?
+
+● Pay attention to the following…
+
+● Ask for correct spelling.
+
+● Do not ask for movies that are not released on OTT platforms.
+
+● Also ask [movie name, language] like this..‌‌.
+
+📝 Example:
+👉 Kalki 2898 AD Tamil
+👉 Thamma Hindi
+👉 Stranger Things S02 E04
+"""
+            await update.message.reply_text(error_msg2)
         
         await update.message.reply_text("What would you like to do next?", reply_markup=get_main_keyboard())
         return MAIN_MENU
@@ -844,12 +1028,36 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             if movie_found:
                 title, url, file_id = movie_found
+                
+                # Send warning message
+                warning_msg = await query.message.reply_text(
+                    "⚠️ ❌👉This file automatically❗️delete after 1 minute❗️so please forward in another chat👈❌\n\n"
+                    "Join » [FilmfyBox](http://t.me/filmfybox)",
+                    parse_mode='Markdown'
+                )
+                
                 if file_id:
-                    await query.message.reply_document(document=file_id)
+                    sent_msg = await query.message.reply_document(document=file_id)
+                    
+                    # Schedule auto-delete
+                    context.job_queue.run_once(
+                        delete_message_callback,
+                        60,
+                        data={'chat_id': query.message.chat_id, 'message_ids': [sent_msg.message_id, warning_msg.message_id]},
+                        name=f'delete_{sent_msg.message_id}'
+                    )
                 elif url.startswith("http"):
                     await query.message.reply_text(f"Download options for '{title}':\n{url}")
                 else:
-                    await query.message.reply_document(document=url)
+                    sent_msg = await query.message.reply_document(document=url)
+                    
+                    # Schedule auto-delete
+                    context.job_queue.run_once(
+                        delete_message_callback,
+                        60,
+                        data={'chat_id': query.message.chat_id, 'message_ids': [sent_msg.message_id, warning_msg.message_id]},
+                        name=f'delete_{sent_msg.message_id}'
+                    )
     except Exception as e:
         logger.error(f"Error in button callback: {e}")
 
@@ -895,8 +1103,8 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Check if it's any kind of URL
         elif "http" in value or "." in value:
-            # ADMIN URLs को normalize न करें, वही store करें जो admin ने दिया है
-            normalized_url = value.strip()  # Simply use the URL as provided by admin
+            # Simply use the URL as provided by admin
+            normalized_url = value.strip()
             
             # सिर्फ basic validation
             if not value.startswith(('http://', 'https://')):
@@ -920,7 +1128,7 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         num_notified = await notify_users_for_movie(context, title, value)
         await notify_in_group(context, title)
         
-        await update.message.reply_text(f"कुल {num_notified} users को notify किया गया है。")
+        await update.message.reply_text(f"कुल {num_notified} users को notify किया गया है।")
             
     except Exception as e:
         logger.error(f"Error in add_movie command: {e}")
@@ -1060,7 +1268,7 @@ async def add_alias(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❌ '{movie_title}' डेटाबेस में नहीं मिली। पहले मूवी को add करें।")
             return
         
-        movie_id = movie[0]
+        movie_id = movie
         
         # Add the alias
         cur.execute(
@@ -1174,7 +1382,7 @@ Movie3: alias6, alias7, alias8
                 failed_count += 1
                 continue
                 
-            movie_id = movie[0]
+            movie_id = movie
             
             # Add all aliases
             for alias in aliases:
@@ -1207,7 +1415,7 @@ Failed: {failed_count}
 async def notify_manually(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Manually notify users about a movie"""
     if update.effective_user.id != ADMIN_USER_ID:
-        await update.message.reply_text("Sorry, सिर्फ एडमिन ही इस कमांड का इस्तेमाल कर सकते हैं。")
+        await update.message.reply_text("Sorry, सिर्फ एडमिन ही इस कमांड का इस्तेमाल कर सकते हैं।")
         return
     
     try:
@@ -1221,10 +1429,10 @@ async def notify_manually(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if movie_found:
             title, value, file_id = movie_found
             num_notified = await notify_users_for_movie(context, title, value)
-            await update.message.reply_text(f"{num_notified} users को '{title}' के लिए notify किया गया है。")
+            await update.message.reply_text(f"{num_notified} users को '{title}' के लिए notify किया गया है।")
             await notify_in_group(context, title)
         else:
-            await update.message.reply_text(f"'{movie_title}' डेटाबेस में नहीं मिली。")
+            await update.message.reply_text(f"'{movie_title}' डेटाबेस में नहीं मिली।")
     except Exception as e:
         logger.error(f"Error in notify_manually: {e}")
         await update.message.reply_text(f"एक एरर आया: {e}")
@@ -1269,6 +1477,10 @@ def run_bot():
             REQUESTING: [MessageHandler(filters.TEXT & ~filters.COMMAND, request_movie)],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
+        conversation_timeout=300,  # 5 minutes timeout
+        per_message=False,
+        per_chat=True,
+        name="main_conversation"
     )
 
     application.add_handler(conv_handler)
