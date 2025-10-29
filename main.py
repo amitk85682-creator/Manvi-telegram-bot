@@ -1854,8 +1854,8 @@ async def schedule_notification(update: Update, context: ContextTypes.DEFAULT_TY
             )
             return
         
-        delay_minutes = int(context.args)
-        target_username = context.args<!--citation:1-->.replace('@', '')
+        delay_minutes = int(context.args[0])
+        target_username = context.args[1].replace('@', '')
         message_text = ' '.join(context.args[2:])
         
         # Get user_id
