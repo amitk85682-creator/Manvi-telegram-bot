@@ -688,15 +688,43 @@ Respond as Niyati (Gen-Z style, short, natural, 1-3 lines max, use emoji, hingli
 """
             
             response = await asyncio.to_thread(self.model.generate_content, prompt)
-            
-            if response and response.text:
-                text = response.text.strip()
-                
-                # AI denial filter
-                if any(phrase in text.lower() for phrase in ["i am ai", "i'm a bot", "language model", "artificial intelligence"]):
-                    return random.choice(AI_DENIAL)
-                
-                return text
+    
+    # Handle safety and other finish reasons
+    if not response:
+        logger.warning("Gemini returned no response")
+        return self._fallback_response(message, stage, mood)
+    
+    if response.candidates:
+        candidate = response.candidates[0]
+        finish_reason = candidate.finish_reason
+        
+        if finish_reason == 2:  # SAFETY
+            logger.warning(f"Gemini safety blocked response for user input: {message[:50]}...")
+            return self._safety_fallback(message, stage, mood)
+        elif finish_reason in [3, 4]:  # RECITATION or UNSPECIFIED
+            logger.warning(f"Gemini finish_reason {finish_reason} for: {message[:50]}...")
+            return self._safety_fallback(message, stage, mood)
+        elif finish_reason == 1:  # STOP (normal)
+            if candidate.content and candidate.content.parts:
+                text = candidate.content.parts[0].text.strip()
+                if text:
+                    # AI denial filter
+                    if any(phrase in text.lower() for phrase in ["i am ai", "i'm a bot", "language model", "artificial intelligence"]):
+                        return random.choice(AI_DENIAL)
+                    return text
+            else:
+                logger.warning("Gemini returned empty parts despite STOP")
+                return self._fallback_response(message, stage, mood)
+        else:
+            logger.warning(f"Unknown finish_reason: {finish_reason}")
+            return self._fallback_response(message, stage, mood)
+    else:
+        logger.warning("Gemini returned no candidates")
+        return self._fallback_response(message, stage, mood)
+
+except Exception as e:
+    logger.error(f"AI generation error: {e}")
+    return self._fallback_response(message, stage, mood)
             
         except Exception as e:
             logger.error(f"AI generation error: {e}")
