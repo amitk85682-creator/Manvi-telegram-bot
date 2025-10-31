@@ -2032,60 +2032,62 @@ async def get_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ Admin only command.")
         return
 
-    # FIX: Correctly parse arguments from the list
     if not context.args:
         await update.message.reply_text("Usage: /userinfo @username")
         return
-
+    
     try:
-        target_username = context.args[0].replace('@', '')
-
+        target_username = context.args.replace('@', '')
+        
         conn = get_db_connection()
         if not conn:
             await update.message.reply_text("❌ Database connection failed.")
             return
-
+        
         cur = conn.cursor()
-
+        
         cur.execute("""
-            SELECT
+            SELECT 
                 user_id,
                 username,
                 first_name,
                 COUNT(*) as total_requests,
                 SUM(CASE WHEN notified = TRUE THEN 1 ELSE 0 END) as fulfilled,
                 MAX(requested_at) as last_request
-            FROM user_requests
-            WHERE username ILIKE %s
+            FROM user_requests 
+            WHERE username ILIKE %s 
             GROUP BY user_id, username, first_name
         """, (target_username,))
-
+        
         user_info = cur.fetchone()
-
+        
         if not user_info:
-            await update.message.reply_text(f"❌ No data found for @{target_username}")
+            await update.message.reply_text(f"❌ No data found for `@{target_username}`", parse_mode='Markdown')
             cur.close()
             conn.close()
             return
-
+        
         user_id, username, first_name, total, fulfilled, last_request = user_info
-        fulfilled = fulfilled or 0 # Handle case where fulfilled is None
+        fulfilled = fulfilled or 0
 
         cur.execute("""
-            SELECT movie_title, requested_at, notified
-            FROM user_requests
-            WHERE user_id = %s
-            ORDER BY requested_at DESC
+            SELECT movie_title, requested_at, notified 
+            FROM user_requests 
+            WHERE user_id = %s 
+            ORDER BY requested_at DESC 
             LIMIT 5
         """, (user_id,))
         recent_requests = cur.fetchall()
+        
+        # FIX: Wrap username in backticks to prevent parsing errors
+        username_str = f"`@{username}`" if username else "N/A"
 
         info_text = f"""
 👤 **User Information**
 
 **Basic Info:**
 • Name: {first_name}
-• Username: @{username or 'N/A'}
+• Username: {username_str}
 • User ID: `{user_id}`
 
 **Statistics:**
@@ -2096,7 +2098,7 @@ async def get_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 **Recent Requests:**
 """
-
+        
         if recent_requests:
             for movie, req_time, notified in recent_requests:
                 status = "✅" if notified else "⏳"
@@ -2105,10 +2107,10 @@ async def get_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
             info_text += "No recent requests."
 
         await update.message.reply_text(info_text, parse_mode='Markdown')
-
+        
         cur.close()
         conn.close()
-
+        
     except Exception as e:
         logger.error(f"Error in get_user_info: {e}")
         await update.message.reply_text(f"❌ Error: {e}")
@@ -2118,62 +2120,61 @@ async def list_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
         await update.message.reply_text("⛔ Admin only command.")
         return
-
+    
     try:
         page = 1
-        # FIX: Correctly parse arguments from the list
-        if context.args and len(context.args) > 0 and context.args[0].isdigit():
-            page = int(context.args[0])
-
+        if context.args and len(context.args) > 0 and context.args.isdigit():
+            page = int(context.args)
+        
         per_page = 10
         offset = (page - 1) * per_page
-
+        
         conn = get_db_connection()
         if not conn:
             await update.message.reply_text("❌ Database connection failed.")
             return
-
+        
         cur = conn.cursor()
-
+        
         cur.execute("SELECT COUNT(DISTINCT user_id) FROM user_requests")
-        # FIX: Fetch the first element from the tuple
-        total_users = cur.fetchone()[0]
-
+        total_users = cur.fetchone()
+        
         cur.execute("""
-            SELECT
+            SELECT 
                 user_id,
                 username,
                 first_name,
                 COUNT(*) as requests,
                 MAX(requested_at) as last_seen
-            FROM user_requests
+            FROM user_requests 
             GROUP BY user_id, username, first_name
             ORDER BY MAX(requested_at) DESC
             LIMIT %s OFFSET %s
         """, (per_page, offset))
-
+        
         users = cur.fetchall()
-
-        total_pages = (total_users + per_page - 1) // per_page
-
+        
+        total_pages = (total_users + per_page - 1) // per_page if total_users > 0 else 1
+        
         users_text = f"👥 **Bot Users** (Page {page}/{total_pages})\n\n"
-
+        
         if not users:
             users_text += "No users found on this page."
         else:
             for idx, (user_id, username, first_name, req_count, last_seen) in enumerate(users, start=offset+1):
-                username_str = f"@{username}" if username else "N/A"
+                # FIX: Wrap username in backticks to prevent parsing errors
+                username_str = f"`@{username}`" if username else "N/A"
                 users_text += f"{idx}. {first_name} ({username_str})\n"
                 users_text += f"   ID: `{user_id}` | Requests: {req_count}\n"
                 users_text += f"   Last seen: {last_seen.strftime('%Y-%m-%d %H:%M')}\n\n"
-
+        
         users_text += f"\n📊 Total Users: {total_users}"
-
+        
         await update.message.reply_text(users_text, parse_mode='Markdown')
-
+        
         cur.close()
         conn.close()
-
+        
     except Exception as e:
         logger.error(f"Error in list_all_users: {e}")
         await update.message.reply_text(f"❌ Error: {e}")
@@ -2183,31 +2184,30 @@ async def get_bot_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
         await update.message.reply_text("⛔ Admin only command.")
         return
-
+    
     try:
         conn = get_db_connection()
         if not conn:
             await update.message.reply_text("❌ Database connection failed.")
             return
-
+        
         cur = conn.cursor()
-
-        # FIX: Fetch the first element from the tuple for all COUNT queries
+        
         cur.execute("SELECT COUNT(*) FROM movies")
-        total_movies = cur.fetchone()[0]
-
+        total_movies = cur.fetchone()
+        
         cur.execute("SELECT COUNT(DISTINCT user_id) FROM user_requests")
-        total_users = cur.fetchone()[0]
-
+        total_users = cur.fetchone()
+        
         cur.execute("SELECT COUNT(*) FROM user_requests")
-        total_requests = cur.fetchone()[0]
-
+        total_requests = cur.fetchone()
+        
         cur.execute("SELECT COUNT(*) FROM user_requests WHERE notified = TRUE")
-        fulfilled = cur.fetchone()[0]
-
+        fulfilled = cur.fetchone()
+        
         cur.execute("SELECT COUNT(*) FROM user_requests WHERE DATE(requested_at) = CURRENT_DATE")
-        today_requests = cur.fetchone()[0]
-
+        today_requests = cur.fetchone()
+        
         cur.execute("""
             SELECT first_name, username, COUNT(*) as req_count
             FROM user_requests
@@ -2216,9 +2216,9 @@ async def get_bot_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             LIMIT 5
         """)
         top_users = cur.fetchall()
-
+        
         fulfillment_rate = (fulfilled / total_requests * 100) if total_requests > 0 else 0
-
+        
         stats_text = f"""
 📊 **Bot Statistics**
 
@@ -2235,19 +2235,20 @@ async def get_bot_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 **Top Requesters:**
 """
-
+        
         if top_users:
             for name, username, count in top_users:
-                username_str = f"@{username}" if username else "N/A"
+                # FIX: Wrap username in backticks to prevent parsing errors
+                username_str = f"`@{username}`" if username else "N/A"
                 stats_text += f"• {name} ({username_str}): {count} requests\n"
         else:
             stats_text += "No user data available."
 
         await update.message.reply_text(stats_text, parse_mode='Markdown')
-
+        
         cur.close()
         conn.close()
-
+        
     except Exception as e:
         logger.error(f"Error in get_bot_stats: {e}")
         await update.message.reply_text(f"❌ Error: {e}")
