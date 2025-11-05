@@ -276,10 +276,10 @@ def update_movies_in_db():
         # Get last sync time
         cur.execute("SELECT last_sync FROM sync_info ORDER BY id DESC LIMIT 1;")
         last_sync_result = cur.fetchone()
-        last_sync_time = last_sync_result if last_sync_result else None
+        last_sync_time = last_sync_result[0] if last_sync_result else None
 
         cur.execute("SELECT title FROM movies;")
-        existing_movies = {row for row in cur.fetchall()}
+        existing_movies = {row[0] for row in cur.fetchall()}
 
         # Only proceed if Blogger API keys are available
         if not BLOGGER_API_KEY or not BLOG_ID:
@@ -391,8 +391,8 @@ def get_movies_from_db(user_query, limit=10):
             return []
 
         # Create dictionary for fuzzy matching
-        movie_titles = [movie for movie in all_movies]
-        movie_dict = {movie: movie for movie in all_movies}
+        movie_titles = [movie[1] for movie in all_movies]
+        movie_dict = {movie[1]: movie for movie in all_movies}
 
         # Use fuzzy matching
         matches = process.extract(user_query, movie_titles, scorer=fuzz.token_sort_ratio, limit=limit)
@@ -488,7 +488,7 @@ async def send_admin_notification(context, user, movie_title, group_info=None):
     try:
         user_info = f"User: {user.first_name or 'Unknown'}"
         if user.username:
-            user_info += f" (@{user.username})"
+            user_info += f" (`@{user.username}`)"
         user_info += f" (ID: {user.id})"
 
         group_info_text = f"From Group: {group_info}" if group_info else "Via Private Message"
@@ -502,7 +502,7 @@ Movie: {movie_title}
 Time: {datetime.now().strftime('%Y-%m-%d %I:%M %p')}
         """
 
-        await context.bot.send_message(chat_id=ADMIN_CHANNEL_ID, text=message)
+        await context.bot.send_message(chat_id=ADMIN_CHANNEL_ID, text=message, parse_mode='Markdown')
     except Exception as e:
         logger.error(f"Error sending admin notification: {e}")
 
@@ -837,10 +837,12 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if conn:
                     cur = conn.cursor()
                     cur.execute("SELECT COUNT(*) FROM user_requests WHERE user_id = %s", (user_id,))
-                    request_count = cur.fetchone()
+                    # FIX: Fetch the first element from the tuple
+                    request_count = cur.fetchone()[0]
 
                     cur.execute("SELECT COUNT(*) FROM user_requests WHERE user_id = %s AND notified = TRUE", (user_id,))
-                    fulfilled_count = cur.fetchone()
+                    # FIX: Fetch the first element from the tuple
+                    fulfilled_count = cur.fetchone()[0]
 
                     stats_text = f"""
 📊 Your Stats:
@@ -925,7 +927,7 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(error_msg)
 
         elif len(movies_found) == 1:
-            movie_id, title, url, file_id = movies_found
+            movie_id, title, url, file_id = movies_found[0]
             await send_movie_to_user(update, context, movie_id, title, url, file_id)
 
         else:
@@ -1290,7 +1292,7 @@ async def add_alias(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❌ '{movie_title}' डेटाबेस में नहीं मिली। पहले मूवी को add करें।")
             return
 
-        movie_id = movie
+        movie_id = movie[0]
 
         cur.execute(
             "INSERT INTO movie_aliases (movie_id, alias) VALUES (%s, %s) ON CONFLICT (movie_id, alias) DO NOTHING",
@@ -1400,7 +1402,7 @@ Movie2: alias4, alias5
                 failed_count += len(aliases)
                 continue
 
-            movie_id = movie
+            movie_id = movie[0]
 
             for alias in aliases:
                 try:
@@ -1476,7 +1478,7 @@ async def notify_user_by_username(update: Update, context: ContextTypes.DEFAULT_
             await update.message.reply_text("Usage: /notifyuser @username Your message here")
             return
 
-        target_username = context.args.replace('@', '')
+        target_username = context.args[0].replace('@', '')
         message_text = ' '.join(context.args[1:])
 
         conn = get_db_connection()
@@ -1599,8 +1601,8 @@ async def schedule_notification(update: Update, context: ContextTypes.DEFAULT_TY
             )
             return
 
-        delay_minutes = int(context.args)
-        target_username = context.args.replace('@', '')
+        delay_minutes = int(context.args[0])
+        target_username = context.args[1].replace('@', '')
         message_text = ' '.join(context.args[2:])
 
         conn = get_db_connection()
@@ -1676,7 +1678,7 @@ async def notify_user_with_media(update: Update, context: ContextTypes.DEFAULT_T
             )
             return
 
-        target_username = context.args.replace('@', '')
+        target_username = context.args[0].replace('@', '')
         optional_message = ' '.join(context.args[1:]) if len(context.args) > 1 else None
 
         replied_message = update.message.reply_to_message
@@ -1987,7 +1989,7 @@ async def forward_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        target_username = context.args.replace('@', '')
+        target_username = context.args[0].replace('@', '')
 
         conn = get_db_connection()
         if not conn:
@@ -2031,7 +2033,7 @@ async def get_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     try:
-        target_username = context.args.replace('@', '')
+        target_username = context.args[0].replace('@', '')
         
         conn = get_db_connection()
         if not conn:
@@ -2073,7 +2075,6 @@ async def get_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """, (user_id,))
         recent_requests = cur.fetchall()
         
-        # FIX: Wrap username in backticks to prevent parsing errors
         username_str = f"`@{username}`" if username else "N/A"
 
         info_text = f"""
@@ -2117,8 +2118,9 @@ async def list_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         page = 1
-        if context.args and len(context.args) > 0 and context.args.isdigit():
-            page = int(context.args)
+        # FIX: Check the first argument in the list
+        if context.args and context.args[0].isdigit():
+            page = int(context.args[0])
         
         per_page = 10
         offset = (page - 1) * per_page
@@ -2131,7 +2133,8 @@ async def list_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur = conn.cursor()
         
         cur.execute("SELECT COUNT(DISTINCT user_id) FROM user_requests")
-        total_users = cur.fetchone()
+        # FIX: Fetch the first element from the tuple
+        total_users = cur.fetchone()[0]
         
         cur.execute("""
             SELECT 
@@ -2156,7 +2159,6 @@ async def list_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
             users_text += "No users found on this page."
         else:
             for idx, (user_id, username, first_name, req_count, last_seen) in enumerate(users, start=offset+1):
-                # FIX: Wrap username in backticks to prevent parsing errors
                 username_str = f"`@{username}`" if username else "N/A"
                 users_text += f"{idx}. {first_name} ({username_str})\n"
                 users_text += f"   ID: `{user_id}` | Requests: {req_count}\n"
@@ -2187,20 +2189,21 @@ async def get_bot_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         cur = conn.cursor()
         
+        # FIX: Fetch the first element [0] from the tuple for all COUNT queries
         cur.execute("SELECT COUNT(*) FROM movies")
-        total_movies = cur.fetchone()
+        total_movies = cur.fetchone()[0]
         
         cur.execute("SELECT COUNT(DISTINCT user_id) FROM user_requests")
-        total_users = cur.fetchone()
+        total_users = cur.fetchone()[0]
         
         cur.execute("SELECT COUNT(*) FROM user_requests")
-        total_requests = cur.fetchone()
+        total_requests = cur.fetchone()[0]
         
         cur.execute("SELECT COUNT(*) FROM user_requests WHERE notified = TRUE")
-        fulfilled = cur.fetchone()
+        fulfilled = cur.fetchone()[0]
         
         cur.execute("SELECT COUNT(*) FROM user_requests WHERE DATE(requested_at) = CURRENT_DATE")
-        today_requests = cur.fetchone()
+        today_requests = cur.fetchone()[0]
         
         cur.execute("""
             SELECT first_name, username, COUNT(*) as req_count
@@ -2232,7 +2235,6 @@ async def get_bot_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if top_users:
             for name, username, count in top_users:
-                # FIX: Wrap username in backticks to prevent parsing errors
                 username_str = f"`@{username}`" if username else "N/A"
                 stats_text += f"• {name} ({username_str}): {count} requests\n"
         else:
