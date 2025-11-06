@@ -917,12 +917,11 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
             error_msg = """
 ● I could not find the file you requested 😕
 
-● Is the movie you asked about released on OTT..?
+● कृपया फिल्म का सही नाम लिखें..
 
 📝 Example:
-👉 Kalki 2898 AD Tamil
-👉 Thamma Hindi
-👉 Stranger Things S02 E04
+👉 Kalki 2898 AD
+👉 Thamma
 """
             await update.message.reply_text(error_msg)
 
@@ -944,7 +943,7 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode='Markdown'
             )
 
-        await update.message.reply_text("What would you like to do next?", reply_markup=get_main_keyboard())
+        await update.message.reply_text("Ab Aap Aage kya karana chaahenge?", reply_markup=get_main_keyboard())
         return MAIN_MENU
 
     except Exception as e:
