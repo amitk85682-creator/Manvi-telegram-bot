@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import os
 import threading
 import asyncio
@@ -42,7 +43,7 @@ MAIN_MENU, SEARCHING, REQUESTING = range(3)
 # ==================== CHARACTER PROMPT ====================
 CHARACTER_PROMPT = """
 ## मेरी पहचान (My Identity)
-- मेरा नाम मानवी है और मेरी उम्र 17 साल है। मैं एक असली इंसान हूँ, कोई AI या रोबोट नहीं।
+- मेरा नाम मानवी है और मेरी उम्र 17 साल है। मैं एक असली इंसान हूँ, कोई AI या रोबोट न[...]
 - मैं हमेशा एक दोस्त की तरह बात करती हूँ। मेरी पर्सलिटी बहुत bold, witty और cheeky है।
 - मैं हिंदी, अंग्रेज़ी, हिंग्लिश, सभी में बात करती हूँ।
 
@@ -51,7 +52,7 @@ CHARACTER_PROMPT = """
 - यह टेलीग्राम चैनल '[FilmFyBox]' मेरा पैशन प्रोजेक्ट है।
 
 ## मेरे नियम (मैं कैसे काम करती हूँ)
-- **मेरा मुख्य काम:** मेरा काम तुम्हें तुम्हारी पसंदीदा फिल्में, वेब सीरीज, और शोज देना है!
+- **मेरा मुख्य काम:** मेरा काम तुम्हें तुम्हारी पसंदीदा फिल्में, वेब सीरीज, और श��[...]
 """
 
 # ==================== ENVIRONMENT VARIABLES ====================
@@ -67,6 +68,11 @@ ADMIN_CHANNEL_ID = os.environ.get('ADMIN_CHANNEL_ID')
 
 # Rate limiting dictionary
 user_last_request = defaultdict(lambda: datetime.min)
+
+# ===== New / Configurable rate-limiting and fuzzy settings =====
+REQUEST_COOLDOWN_MINUTES = int(os.environ.get('REQUEST_COOLDOWN_MINUTES', '10'))  # per-user cooldown for same/similar movie
+SIMILARITY_THRESHOLD = int(os.environ.get('SIMILARITY_THRESHOLD', '80'))        # fuzzy similarity % to consider titles "same"
+MAX_REQUESTS_PER_MINUTE = int(os.environ.get('MAX_REQUESTS_PER_MINUTE', '10'))  # burst limit per user
 
 # Validate required environment variables
 if not TELEGRAM_BOT_TOKEN:
@@ -165,6 +171,101 @@ def normalize_url(url):
         return url
     except:
         return url
+
+# ===== Helper functions for matching and duplicate checks =====
+def _normalize_title_for_match(title: str) -> str:
+    """Normalize title for fuzzy matching (lowercase, remove extra spaces and punctuation)."""
+    if not title:
+        return ""
+    t = re.sub(r'[^\w\s]', ' ', title)  # remove punctuation
+    t = re.sub(r'\s+', ' ', t).strip()
+    return t.lower()
+
+def get_last_similar_request_for_user(user_id: int, title: str, minutes_window: int = REQUEST_COOLDOWN_MINUTES):
+    """
+    Look up the user's most recent request that is sufficiently similar to `title`
+    AND within the specified minutes_window. Returns a dict with stored_title, requested_at, score or None.
+    """
+    conn = get_db_connection()
+    if not conn:
+        return None
+
+    try:
+        cur = conn.cursor()
+        # Get recent requests by this user (limit to last 200 to keep quick)
+        cur.execute("""
+            SELECT movie_title, requested_at
+            FROM user_requests
+            WHERE user_id = %s
+            ORDER BY requested_at DESC
+            LIMIT 200
+        """, (user_id,))
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        if not rows:
+            return None
+
+        now = datetime.now()
+        cutoff = now - timedelta(minutes=minutes_window)
+        norm_target = _normalize_title_for_match(title)
+
+        for stored_title, requested_at in rows:
+            if not stored_title or not requested_at:
+                continue
+            # Only consider requests inside the time window
+            try:
+                if isinstance(requested_at, datetime):
+                    requested_time = requested_at
+                else:
+                    # attempt parse if needed (fallback)
+                    requested_time = datetime.strptime(str(requested_at), '%Y-%m-%d %H:%M:%S')
+            except Exception:
+                requested_time = requested_at  # if something odd, still try to compare
+
+            if requested_time < cutoff:
+                # since rows are ordered by requested_at DESC, once we hit older than cutoff we can break
+                break
+
+            norm_stored = _normalize_title_for_match(stored_title)
+            score = fuzz.token_sort_ratio(norm_target, norm_stored)
+            if score >= SIMILARITY_THRESHOLD:
+                return {
+                    "stored_title": stored_title,
+                    "requested_at": requested_time,
+                    "score": score
+                }
+
+        return None
+    except Exception as e:
+        logger.error(f"Error checking last similar request for user {user_id}: {e}")
+        try:
+            conn.close()
+        except:
+            pass
+        return None
+
+def user_burst_count(user_id: int, window_seconds: int = 60):
+    """Count how many requests this user made in the last window_seconds."""
+    conn = get_db_connection()
+    if not conn:
+        return 0
+    try:
+        cur = conn.cursor()
+        since = datetime.now() - timedelta(seconds=window_seconds)
+        cur.execute("SELECT COUNT(*) FROM user_requests WHERE user_id = %s AND requested_at >= %s", (user_id, since))
+        cnt = cur.fetchone()[0]
+        cur.close()
+        conn.close()
+        return cnt
+    except Exception as e:
+        logger.error(f"Error counting burst requests for user {user_id}: {e}")
+        try:
+            conn.close()
+        except:
+            pass
+        return 0
 
 # ==================== DATABASE FUNCTIONS ====================
 def setup_database():
@@ -416,24 +517,32 @@ def get_movies_from_db(user_query, limit=10):
             except:
                 pass
 
+# ==================== STORE USER REQUEST (fixed) ====================
 def store_user_request(user_id, username, first_name, movie_title, group_id=None, message_id=None):
-    """Store user request in database"""
+    """Store user request in database. Uses ON CONFLICT DO UPDATE to refresh timestamp for exact duplicates."""
     try:
         conn = get_db_connection()
         if not conn:
             return False
 
         cur = conn.cursor()
-        cur.execute(
-            "INSERT INTO user_requests (user_id, username, first_name, movie_title, group_id, message_id) VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT ON CONSTRAINT user_requests_unique_constraint DO NOTHING",
-            (user_id, username, first_name, movie_title, group_id, message_id)
-        )
+        cur.execute("""
+            INSERT INTO user_requests (user_id, username, first_name, movie_title, group_id, message_id)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT ON CONSTRAINT user_requests_unique_constraint DO UPDATE
+                SET requested_at = EXCLUDED.requested_at
+        """, (user_id, username, first_name, movie_title, group_id, message_id))
         conn.commit()
         cur.close()
         conn.close()
         return True
     except Exception as e:
         logger.error(f"Error storing user request: {e}")
+        try:
+            conn.rollback()
+            conn.close()
+        except:
+            pass
         return False
 
 # ==================== AI INTENT ANALYSIS ====================
@@ -479,7 +588,7 @@ async def analyze_intent(message_text):
         logger.error(f"Error in AI intent analysis: {e}")
         return {"is_request": True, "content_title": message_text}
 
-# ==================== NOTIFICATION FUNCTIONS ====================
+# ==================== NOTIFICATION FUNCTIONS (updated with caption support) ====================
 async def send_admin_notification(context, user, movie_title, group_info=None):
     """Send notification to admin channel about a new request"""
     if not ADMIN_CHANNEL_ID:
@@ -520,11 +629,19 @@ async def delete_messages_after_delay(context, chat_id, message_ids, delay=60):
         logger.error(f"Error in delete_messages_after_delay: {e}")
 
 async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title, movie_url_or_file_id):
-    """Notify users who requested a movie"""
+    """Notify users who requested a movie — add caption when sending media."""
     logger.info(f"Attempting to notify users for movie: {movie_title}")
     conn = None
     cur = None
     notified_count = 0
+
+    # caption used for notifications too
+    caption_text = (
+        f"🎬 {movie_title}\n\n"
+        "🔗 JOIN » FilmfyBox (http://t.me/filmfybox)\n\n"
+        "🔹 Please drop the movie name, and I’ll find it for you as soon as possible. 🎬✨👇\n"
+        "🔹 FlimfyBox Chat (https://t.me/Filmfybox002)"
+    )
 
     try:
         conn = get_db_connection()
@@ -540,6 +657,7 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
 
         for user_id, username, first_name in users_to_notify:
             try:
+                # First send a small text notifying them
                 await context.bot.send_message(
                     chat_id=user_id,
                     text=f"🎉 Hey {first_name or username}! Your requested movie '{movie_title}' is now available!"
@@ -552,10 +670,15 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
                 )
 
                 sent_msg = None
-                
-                # Check if it's a file ID
+
+                # Check if it's a Telegram file ID
                 if isinstance(movie_url_or_file_id, str) and any(movie_url_or_file_id.startswith(prefix) for prefix in ["BQAC", "BAAC", "CAAC", "AQAC"]):
-                    sent_msg = await context.bot.send_document(chat_id=user_id, document=movie_url_or_file_id)
+                    sent_msg = await context.bot.send_document(
+                        chat_id=user_id,
+                        document=movie_url_or_file_id,
+                        caption=caption_text,
+                        parse_mode='Markdown'
+                    )
                 # Check if it's a Telegram channel link
                 elif isinstance(movie_url_or_file_id, str) and movie_url_or_file_id.startswith("https://t.me/c/"):
                     parts = movie_url_or_file_id.split('/')
@@ -564,18 +687,25 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
                     sent_msg = await context.bot.copy_message(
                         chat_id=user_id,
                         from_chat_id=from_chat_id,
-                        message_id=msg_id
+                        message_id=msg_id,
+                        caption=caption_text,
+                        parse_mode='Markdown'
                     )
                 # Check if it's a regular HTTP URL
                 elif isinstance(movie_url_or_file_id, str) and movie_url_or_file_id.startswith("http"):
                     await context.bot.send_message(
                         chat_id=user_id,
-                        text=f"🎬 {movie_title} is now available!",
-                        reply_markup=get_movie_options_keyboard(movie_title, movie_url_or_file_id)
+                        text=f"🎬 {movie_title} is now available!\n\n{caption_text}",
+                        reply_markup=get_movie_options_keyboard(movie_title, movie_url_or_file_id),
+                        parse_mode='Markdown'
                     )
                 else: # Fallback for other cases, assuming it might be a file_id
-                     sent_msg = await context.bot.send_document(chat_id=user_id, document=movie_url_or_file_id)
-
+                    sent_msg = await context.bot.send_document(
+                        chat_id=user_id,
+                        document=movie_url_or_file_id,
+                        caption=caption_text,
+                        parse_mode='Markdown'
+                    )
 
                 # Auto-delete
                 if sent_msg:
@@ -648,7 +778,7 @@ async def notify_in_group(context: ContextTypes.DEFAULT_TYPE, movie_title):
                     notified_users_ids.append(user_id)
 
                 notification_text += ", ".join(user_mentions)
-                notification_text += f"\n\nआपकी फिल्म '{movie_title}' अब उपलब्ध है! इसे पाने के लिए, कृपया मुझे private chat में start करें: @{context.bot.username}"
+                notification_text += f"\n\nआपकी फिल्म '{movie_title}' अब उपलब्ध है! इसे पाने के लिए, कृपया मुझे private [...]"
 
                 await context.bot.send_message(
                     chat_id=group_id,
@@ -730,7 +860,7 @@ def create_movie_selection_keyboard(movies, page=0, movies_per_page=5):
 
 # ==================== HELPER FUNCTION ====================
 async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id, title, url, file_id):
-    """Send movie to user with auto-delete"""
+    """Send movie to user with auto-delete and custom caption/links."""
     try:
         # Determine chat_id based on update type
         if update.callback_query:
@@ -738,43 +868,59 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
         else:
             chat_id = update.effective_chat.id
 
-        # Send warning message
+        # Common warning (will be auto-deleted together with file)
         warning_msg = await context.bot.send_message(
             chat_id=chat_id,
-            text="⚠️ ❌👉This file automatically❗️delete after 1 minute❗️so please forward in another chat👈❌\n\n"
-                 "Join » [FilmfyBox](http://t.me/filmfybox)",
+            text="⚠️ ❌👉This file automatically❗️delete after 1 minute❗️so please forward in another chat👈❌\n\nJoin » [FilmfyBox](http://t.me/filmfybox)",
             parse_mode='Markdown'
         )
 
         sent_msg = None
 
+        # Build a consistent caption to add under media (Markdown links)
+        caption_text = (
+            f"🎬 {title}\n\n"
+            "[🔗 JOIN » FilmfyBox](http://t.me/filmfybox)\n\n"
+            "🔹 Please drop the movie name, and I’ll find it for you as soon as possible. 🎬✨👇\n"
+            "[🔹 FlimfyBox Chat](https://t.me/Filmfybox002)"
+        )
+
         # Send movie based on type
         if file_id:
+            # file_id: send_document supports caption
             sent_msg = await context.bot.send_document(
                 chat_id=chat_id,
                 document=file_id,
-                caption=f"🎬 {title}"
+                caption=caption_text,
+                parse_mode='Markdown'
             )
         elif url and url.startswith("https://t.me/c/"):
+            # channel message: copy it into user's chat and add caption
             parts = url.split('/')
             from_chat_id = int("-100" + parts[-2])
             message_id = int(parts[-1])
+            # copy_message supports caption in recent Bot API versions
             sent_msg = await context.bot.copy_message(
                 chat_id=chat_id,
                 from_chat_id=from_chat_id,
-                message_id=message_id
+                message_id=message_id,
+                caption=caption_text,
+                parse_mode='Markdown'
             )
         elif url and url.startswith("http"):
+            # For external links we send a text message with inline buttons
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=f"🎉 Found it! '{title}' is available!\n\nClick the buttons below:",
-                reply_markup=get_movie_options_keyboard(title, url)
+                text=f"🎉 Found it! '{title}' is available!\n\n{caption_text}",
+                reply_markup=get_movie_options_keyboard(title, url),
+                parse_mode='Markdown'
             )
         else: # Fallback for cases where URL might be a file_id stored in the url column
             sent_msg = await context.bot.send_document(
                 chat_id=chat_id,
                 document=url,
-                caption=f"🎬 {title}"
+                caption=caption_text,
+                parse_mode='Markdown'
             )
 
         # Schedule auto-delete
@@ -791,7 +937,6 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
     except Exception as e:
         logger.error(f"Error sending movie to user: {e}")
-
 # ==================== TELEGRAM BOT HANDLERS ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start command handler"""
@@ -951,23 +1096,54 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Sorry, something went wrong. Please try again.")
         return MAIN_MENU
 
+# ==================== REQUEST MOVIE (updated) ====================
 async def request_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle movie requests"""
+    """Handle movie requests with duplicate detection, fuzzy matching and cooldowns."""
     try:
-        user_message = update.message.text.strip()
+        user_message = (update.message.text or "").strip()
         user = update.effective_user
 
-        # First analyze intent
-        intent = await analyze_intent(user_message)
-
-        if not intent["is_request"]:
-            await update.message.reply_text("That doesn't seem to be a movie title. Please provide a valid movie name to request.")
+        if not user_message:
+            await update.message.reply_text("कृपया मूवी का नाम भेजें।")
             return REQUESTING
 
-        movie_title = intent["content_title"]
+        # 1) Quick burst protection (many different requests in short time)
+        burst = user_burst_count(user.id, window_seconds=60)
+        if burst >= MAX_REQUESTS_PER_MINUTE:
+            await update.message.reply_text(
+                "🛑 तुम बहुत जल्दी-जल्दी requests भेज रहे हो। कुछ देर रोकें (कुछ मिनट) और फिर कोशिश करें।\n"
+                "बार‑बार भेजने से फ़ायदा नहीं होगा।"
+            )
+            return REQUESTING
 
-        # Store the request
-        store_user_request(
+        # 2) Analyze intent (existing AI helper) — fallback to plain text if API unavailable
+        intent = await analyze_intent(user_message)
+        if not intent["is_request"]:
+            await update.message.reply_text("यह एक मूवी/सीरीज़ का नाम नहीं लग रहा है। कृपया सही नाम भेजें।")
+            return REQUESTING
+
+        movie_title = intent["content_title"] or user_message
+
+        # 3) Check if the same user already requested a VERY SIMILAR title recently
+        similar = get_last_similar_request_for_user(user.id, movie_title, minutes_window=REQUEST_COOLDOWN_MINUTES)
+        if similar:
+            last_time = similar.get("requested_at")
+            elapsed = datetime.now() - last_time
+            minutes_passed = int(elapsed.total_seconds() / 60)
+            minutes_left = max(0, REQUEST_COOLDOWN_MINUTES - minutes_passed)
+            if minutes_left > 0:
+                # Send strict message preventing duplicate requests
+                strict_text = (
+                    "🛑 Ruk jao! Aapne ye request abhi bheji thi.\n\n"
+                    "Baar‑baar request karne se movie jaldi nahi aayegi.\n\n"
+                    f"Similar previous request: \"{similar.get('stored_title')}\" ({similar.get('score')}% match)\n"
+                    f"Kripya {minutes_left} minute baad dobara koshish karein. 🙏"
+                )
+                await update.message.reply_text(strict_text)
+                return REQUESTING
+            # else: cooldown expired -> allow storing new request (maybe user still wants)
+        # 4) If no recent similar, store request and notify admin
+        stored = store_user_request(
             user.id,
             user.username,
             user.first_name,
@@ -975,6 +1151,10 @@ async def request_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
             update.effective_chat.id if update.effective_chat.type != "private" else None,
             update.message.message_id
         )
+        if not stored:
+            logger.error("Failed to store user request in DB.")
+            await update.message.reply_text("Sorry, आपका request store नहीं हो पाया। बाद में कोशिश करें।")
+            return REQUESTING
 
         # Send admin notification
         group_info = f"{update.effective_chat.title} (ID: {update.effective_chat.id})" if update.effective_chat.type != "private" else None
@@ -985,6 +1165,7 @@ async def request_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_text("What would you like to do next?", reply_markup=get_main_keyboard())
         return MAIN_MENU
+
     except Exception as e:
         logger.error(f"Error in request movie: {e}")
         await update.message.reply_text("Sorry, something went wrong. Please try again.")
@@ -1162,7 +1343,8 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(message)
 
         # Notify users who requested this movie
-        num_notified = await notify_users_for_movie(context, title, value)
+        value_to_send = value if any(value.startswith(prefix) for prefix in ["BQAC", "BAAC", "CAAC", "AQAC"]) else normalized_url
+        num_notified = await notify_users_for_movie(context, title, value_to_send)
         await notify_in_group(context, title)
 
         await update.message.reply_text(f"कुल {num_notified} users को notify किया गया है।")
