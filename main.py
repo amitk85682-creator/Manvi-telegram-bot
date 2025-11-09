@@ -848,156 +848,110 @@ def create_movie_selection_keyboard(movies, page=0, movies_per_page=5):
     return InlineKeyboardMarkup(keyboard)
 
 # ==================== HELPER FUNCTION ====================
-async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int, title: str, movie_id=None, movie_title=None, url=None, file_id=None):
+# Replace your existing send_movie_to_user with this version in main.py
+
+async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id, title, url, file_id):
+    """Send movie to user with fallback to movie_files when movies.url/file_id missing."""
     try:
-        # Try fallback from movie_files if needed
+        # Determine chat id
+        if update.callback_query:
+            chat_id = update.callback_query.message.chat.id
+        else:
+            chat_id = update.effective_chat.id
+
+        # small helper to fetch best quality from movie_files
+        def get_quality_order_case():
+            return """
+                CASE quality
+                    WHEN '2160p' THEN 1
+                    WHEN '1080p' THEN 2
+                    WHEN '720p'  THEN 3
+                    WHEN '360p'  THEN 4
+                    ELSE 5
+                END
+            """
+
+        # If both url and file_id are empty/null try to find from movie_files
         if not url and not file_id and movie_id:
             try:
                 conn = get_db_connection()
                 if conn:
                     cur = conn.cursor()
-                    cur.execute("""
+                    query = f"""
                         SELECT url, file_id, quality
                         FROM movie_files
                         WHERE movie_id = %s
-                        ORDER BY CASE quality
-                            WHEN '2160p' THEN 1
-                            WHEN '1080p' THEN 2
-                            WHEN '720p'  THEN 3
-                            WHEN '360p'  THEN 4
-                            ELSE 5
-                        END
+                        ORDER BY {get_quality_order_case()}
                         LIMIT 1
-                    """, (movie_id,))
+                    """
+                    cur.execute(query, (movie_id,))
                     row = cur.fetchone()
                     cur.close()
                     conn.close()
                     if row:
-                        url_from_files, file_id_from_files, _ = row
-                        file_id = file_id_from_files or file_id
-                        url = url_from_files or url
+                        url_from_files, file_id_from_files, quality = row
+                        # prefer file_id if present
+                        if file_id_from_files:
+                            file_id = file_id_from_files
+                        elif url_from_files:
+                            url = url_from_files
             except Exception as e:
-                logger.error(f"movie_files fallback error (movie_id={movie_id}): {e}")
+                logger.error(f"Error reading movie_files for fallback (movie_id={movie_id}): {e}")
 
-        # Send initial warning
+        # Common warning message (auto-delete)
         warning_msg = await context.bot.send_message(
             chat_id=chat_id,
-            text="⚠️ ❌👉This file automatically❗️deletes after 1 minute❗️so please forward it to another chat👈❌\n\nJoin » @FilmfyBox",
+            text="⚠️ ❌👉This file automatically❗️delete after 1 minute❗️so please forward in another chat👈❌\n\nJoin » [FilmfyBox](http://t.me/filmfybox)",
             parse_mode='Markdown'
         )
 
         sent_msg = None
-
-        # Movie caption
         caption_text = (
-            f"🎬 <b>{movie_title}</b>\n\n"
-            "🔗 <b>JOIN »</b> <a href='http://t.me/filmfybox'>FilmfyBox</a>\n\n"
-            "🔹 <b>Please drop the movie name, and I’ll find it for you as soon as possible. 🎬✨👇</b>\n"
-            "🔹 <b><a href='https://t.me/Filmfybox002'>FlimfyBox Chat</a></b>"
+            f"🎬 {title}\n\n"
+            "[🔗 JOIN » FilmfyBox](http://t.me/filmfybox)\n\n"
+            "🔹 Please drop the movie name, and I’ll find it for you as soon as possible. 🎬✨👇\n"
+            "[🔹 FlimfyBox Chat](https://t.me/Filmfybox002)"
         )
 
-        # 1️⃣ Send via file_id if available
+        # 1) If file_id -> send as document
         if file_id:
-            sent_msg = await context.bot.send_document(
-                chat_id=chat_id,
-                document=file_id,
-                caption=caption_text,
-                parse_mode='HTML'
-            )
+            sent_msg = await context.bot.send_document(chat_id=chat_id, document=file_id, caption=caption_text, parse_mode='Markdown')
 
-        # 2️⃣ Telegram private channel link (t.me/c/...)
+        # 2) If t.me channel link -> try copy_message
         elif url and url.startswith("https://t.me/c/"):
             try:
                 parts = url.rstrip('/').split('/')
                 from_chat_id = int("-100" + parts[-2])
                 message_id = int(parts[-1])
-                sent_msg = await context.bot.copy_message(
-                    chat_id=chat_id,
-                    from_chat_id=from_chat_id,
-                    message_id=message_id
-                )
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=caption_text,
-                    parse_mode='HTML'
-                )
+                sent_msg = await context.bot.copy_message(chat_id=chat_id, from_chat_id=from_chat_id, message_id=message_id)
+                # also send caption for context
+                await context.bot.send_message(chat_id=chat_id, text=caption_text, parse_mode='Markdown')
             except Exception as e:
-                logger.error(f"Copy private link failed {url}: {e}")
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=f"🎬 Found: {title}\n\n{caption_text}",
-                    reply_markup=get_movie_options_keyboard(title, url),
-                    parse_mode='HTML'
-                )
+                logger.error(f"Copy message failed for {url}: {e}")
+                await context.bot.send_message(chat_id=chat_id, text=f"🎬 Found: {title}\n\n{caption_text}", reply_markup=get_movie_options_keyboard(title, url), parse_mode='Markdown')
 
-        # 3️⃣ Public channel link (t.me/username/123)
-        elif url and url.startswith("https://t.me/") and "/c/" not in url:
-            try:
-                parts = url.rstrip('/').split('/')
-                username = parts[-2].lstrip("@")
-                message_id = int(parts[-1])
-                from_chat_id = f"@{username}"
-                sent_msg = await context.bot.copy_message(
-                    chat_id=chat_id,
-                    from_chat_id=from_chat_id,
-                    message_id=message_id
-                )
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=caption_text,
-                    parse_mode='HTML'
-                )
-            except Exception as e:
-                logger.error(f"Copy public link failed {url}: {e}")
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=f"🎬 Found: {title}\n\n{caption_text}",
-                    reply_markup=get_movie_options_keyboard(title, url),
-                    parse_mode='HTML'
-                )
-
-        # 4️⃣ Normal external link (http/https)
+        # 3) If http(s) link -> send text + button
         elif url and url.startswith("http"):
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=f"🎉 Found it! '{title}' is available!\n\n{caption_text}",
-                reply_markup=get_movie_options_keyboard(title, url),
-                parse_mode='HTML'
-            )
+            await context.bot.send_message(chat_id=chat_id, text=f"🎉 Found it! '{title}' is available!\n\n{caption_text}", reply_markup=get_movie_options_keyboard(title, url), parse_mode='Markdown')
 
-        # 5️⃣ Nothing valid to send
+        # 4) Fallback: try send_document with url (in case it's actually a file_id or a direct file link)
         else:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=f"❌ Sorry, '{title}' found but no valid file or link is attached in the database.",
-                parse_mode='Markdown'
-            )
+            try:
+                if url:
+                    sent_msg = await context.bot.send_document(chat_id=chat_id, document=url, caption=caption_text, parse_mode='Markdown')
+                else:
+                    # nothing to send, inform user
+                    await context.bot.send_message(chat_id=chat_id, text=f"Sorry, I couldn't find a file for '{title}'. Admin will upload soon.")
+            except Exception as e:
+                logger.error(f"Fallback send_document failed for '{title}' (movie_id={movie_id}): {e}")
+                await context.bot.send_message(chat_id=chat_id, text=f"Sorry, couldn't send the file directly for '{title}'. Try again later.")
 
-        # Schedule deletion after delay
+        # schedule auto-delete if a media/document was sent
         if sent_msg:
-            asyncio.create_task(
-                delete_messages_after_delay(
-                    context,
-                    chat_id,
-                    [sent_msg.message_id, warning_msg.message_id],
-                    60
-                )
-            )
+            asyncio.create_task(delete_messages_after_delay(context, chat_id, [sent_msg.message_id, warning_msg.message_id], 60))
 
     except Exception as e:
         logger.error(f"Error sending movie to user: {e}")
-        try:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text="❌ Server failed to send file. Please report to Admin."
-            )
-        except Exception as e2:
-            logger.error(f"Secondary send error: {e2}")
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text="❌ Sorry, server failed to send the file. Please report this to Admin.",
-                parse_mode='Markdown'
-            )
 
 # ==================== TELEGRAM BOT HANDLERS ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
