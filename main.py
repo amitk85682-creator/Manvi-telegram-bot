@@ -620,7 +620,7 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
     cur = None
     notified_count = 0
 
-    # caption used for notifications toocaption_text = (
+    caption_text = (
     f"🎬 <b>{movie_title}</b>\n\n"
     "🔗 <b>JOIN »</b> FilmfyBox (http://t.me/filmfybox)\n\n"
     "🔹 <b>Please drop the movie name, and I’ll find it for you as soon as possible. 🎬✨👇</b>\n"
