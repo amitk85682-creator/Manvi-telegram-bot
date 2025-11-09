@@ -12,8 +12,10 @@ import re
 from bs4 import BeautifulSoup
 import telegram
 import psycopg2
-from flask import Flask, request
+from flask import Flask, request, session, g # 'session' और 'g' को भी इम्पोर्ट करें
 import google.generativeai as genai
+import admin_views as admin_views_module
+import db_utils
 from googleapiclient.discovery import build
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -82,30 +84,6 @@ if not TELEGRAM_BOT_TOKEN:
 if not DATABASE_URL:
     logger.error("DATABASE_URL environment variable is not set")
     raise ValueError("DATABASE_URL is not set.")
-
-# ==================== DATABASE URL FIX ====================
-def fix_database_url():
-    """Fix database URL by properly encoding special characters"""
-    try:
-        parsed = urlparse(DATABASE_URL)
-        username = parsed.username
-        password = parsed.password
-        hostname = parsed.hostname
-        port = parsed.port
-        database = parsed.path[1:]
-
-        if password and any(c in password for c in ['*', '!', '@', '#', '$', '%', '^', '&', '(', ')', '=', '+', '?']):
-            encoded_password = quote(password)
-            fixed_url = f"postgresql://{username}:{encoded_password}@{hostname}:{port}/{database}"
-            logger.info("Database URL fixed for special characters")
-            return fixed_url
-        else:
-            return DATABASE_URL
-    except Exception as e:
-        logger.error(f"Error fixing database URL: {e}")
-        return DATABASE_URL
-
-FIXED_DATABASE_URL = fix_database_url()
 
 # ==================== UTILITY FUNCTIONS ====================
 def preprocess_query(query):
@@ -2499,8 +2477,20 @@ def trigger_update():
     result = update_movies_in_db()
     return result
 
+# main.py (Replace the existing run_flask function)
 def run_flask():
     port = int(os.environ.get('PORT', 8080))
+    
+    # 1. Set a secret key for session management (MUST BE SET!)
+    flask_app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'your_default_strong_secret')
+    
+    # 2. Register the Admin Blueprint
+    try:
+        flask_app.register_blueprint(admin_views_module.admin)
+        logger.info("Admin blueprint registered successfully.")
+    except Exception as e:
+        logger.error(f"Failed to register admin blueprint: {e}")
+        
     flask_app.run(host='0.0.0.0', port=port)
 
 # ==================== MAIN BOT FUNCTION ====================
