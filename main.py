@@ -2486,17 +2486,19 @@ def trigger_update():
 # main.py (Replace the existing run_flask function)
 def run_flask():
     port = int(os.environ.get('PORT', 8080))
-    
-    # 1. Set a secret key for session management (MUST BE SET!)
-    flask_app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'your_default_strong_secret')
-    
-    # 2. Register the Admin Blueprint
+    # Use a proper secret for sessions (set FLASK_SECRET_KEY in env). Fallback to a random 24-byte key.
+    flask_app.secret_key = os.environ.get('FLASK_SECRET_KEY', None) or os.urandom(24)
+
+    # Register admin blueprint if available. Do late import to avoid circular imports.
     try:
-        flask_app.register_blueprint(admin_views_module.admin)
+        # import admin_views here to avoid circular import during startup
+        from admin_views import admin as admin_blueprint
+        flask_app.register_blueprint(admin_blueprint)
         logger.info("Admin blueprint registered successfully.")
     except Exception as e:
         logger.error(f"Failed to register admin blueprint: {e}")
-        
+
+    # Run the Flask dev server (this is what you already used). For production use a WSGI server.
     flask_app.run(host='0.0.0.0', port=port)
 
 # ==================== MAIN BOT FUNCTION ====================
