@@ -19,6 +19,7 @@ import re
 from bs4 import BeautifulSoup
 import telegram
 import psycopg2
+from typing import Optional
 from flask import Flask, request, session, g # 'session' और 'g' को भी इम्पोर्ट करें
 import google.generativeai as genai
 import admin_views as admin_views_module
