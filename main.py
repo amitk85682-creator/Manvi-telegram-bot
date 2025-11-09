@@ -848,15 +848,15 @@ def create_movie_selection_keyboard(movies, page=0, movies_per_page=5):
     return InlineKeyboardMarkup(keyboard)
 
 # ==================== HELPER FUNCTION ====================
-    # Initial warning (auto-delete with media if media sent)
+        # Initial warning (this one is text; will be auto-deleted with media if sent)
     warning_msg = await context.bot.send_message(
         chat_id=chat_id,
         text="⚠️ ❌👉This file automatically❗️deletes after 1 minute❗️so please forward it to another chat👈❌\n\nJoin » @FilmfyBox",
-        parse_mode='Markdown'
+        parse_mode="Markdown",
     )
 
     sent_msg = None
-    name = movie_title or title  # avoid "None" in caption
+    name = movie_title or title
     caption_text = (
         f"🎬 <b>{name}</b>\n\n"
         "🔗 JOIN » <a href='http://t.me/filmfybox'>FilmfyBox</a>\n\n"
@@ -864,28 +864,27 @@ def create_movie_selection_keyboard(movies, page=0, movies_per_page=5):
         "🔹 <a href='https://t.me/Filmfybox002'>FlimfyBox Chat</a>"
     )
 
-    # 1) file_id -> caption attached under media
+    # 1) Direct Telegram file_id
     if file_id:
         sent_msg = await context.bot.send_document(
             chat_id=chat_id,
             document=file_id,
             caption=caption_text,
-            parse_mode='HTML'
+            parse_mode="HTML",
         )
 
-    # 2) Private channel message link: t.me/c/<chat_id>/<msg_id>
+    # 2) Private channel link t.me/c/<chat>/<msg>
     elif url and url.startswith("https://t.me/c/"):
         try:
-            parts = url.rstrip('/').split('/')
+            parts = url.rstrip("/").split("/")
             from_chat_id = int("-100" + parts[-2])
             message_id = int(parts[-1])
-            # Attach caption directly via copy_message
             sent_msg = await context.bot.copy_message(
                 chat_id=chat_id,
                 from_chat_id=from_chat_id,
                 message_id=message_id,
                 caption=caption_text,
-                parse_mode='HTML'
+                parse_mode="HTML",
             )
         except Exception as e:
             logger.error(f"Copy private link failed {url}: {e}")
@@ -893,13 +892,13 @@ def create_movie_selection_keyboard(movies, page=0, movies_per_page=5):
                 chat_id=chat_id,
                 text=f"🎬 {name}\n\n{caption_text}",
                 reply_markup=get_movie_options_keyboard(name, url),
-                parse_mode='HTML'
+                parse_mode="HTML",
             )
 
-    # 3) Public channel message link: https://t.me/Username/123
+    # 3) Public channel link https://t.me/Username/123
     elif url and url.startswith("https://t.me/") and "/c/" not in url:
         try:
-            parts = url.rstrip('/').split('/')
+            parts = url.rstrip("/").split("/")
             username = parts[-2].lstrip("@")
             message_id = int(parts[-1])
             from_chat_id = f"@{username}"
@@ -908,7 +907,7 @@ def create_movie_selection_keyboard(movies, page=0, movies_per_page=5):
                 from_chat_id=from_chat_id,
                 message_id=message_id,
                 caption=caption_text,
-                parse_mode='HTML'
+                parse_mode="HTML",
             )
         except Exception as e:
             logger.error(f"Copy public link failed {url}: {e}")
@@ -916,7 +915,7 @@ def create_movie_selection_keyboard(movies, page=0, movies_per_page=5):
                 chat_id=chat_id,
                 text=f"🎬 {name}\n\n{caption_text}",
                 reply_markup=get_movie_options_keyboard(name, url),
-                parse_mode='HTML'
+                parse_mode="HTML",
             )
 
     # 4) Normal external link
@@ -925,31 +924,35 @@ def create_movie_selection_keyboard(movies, page=0, movies_per_page=5):
             chat_id=chat_id,
             text=f"🎉 Found it! '{name}' is available!\n\n{caption_text}",
             reply_markup=get_movie_options_keyboard(name, url),
-            parse_mode='HTML'
+            parse_mode="HTML",
         )
 
     # 5) Nothing valid to send
     else:
         await context.bot.send_message(
             chat_id=chat_id,
-            text=f"❌ Sorry, '{name}' found but no valid file or link is attached in the database."
+            text=f"❌ Sorry, '{name}' found but no valid file or link is attached in the database.",
+            parse_mode="Markdown",
         )
 
-    # Auto-delete for media + warning
+    # Auto-delete media + warning
     if sent_msg:
         asyncio.create_task(
             delete_messages_after_delay(
                 context,
                 chat_id,
                 [sent_msg.message_id, warning_msg.message_id],
-                60
+                60,
             )
         )
 
 except Exception as e:
     logger.error(f"Error sending movie to user: {e}")
     try:
-        await context.bot.send_message(chat_id=chat_id, text="❌ Server failed to send file. Please report to Admin.")
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="❌ Server failed to send file. Please report to Admin.",
+        )
     except Exception as e2:
         logger.error(f"Secondary send error: {e2}")
 # ==================== TELEGRAM BOT HANDLERS ====================
