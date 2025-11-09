@@ -19,7 +19,7 @@ import re
 from bs4 import BeautifulSoup
 import telegram
 import psycopg2
-from typing import Optional
+from typing import Optional # FIX: Added Optional import
 from flask import Flask, request, session, g # 'session' और 'g' को भी इम्पोर्ट करें
 import google.generativeai as genai
 import admin_views as admin_views_module
@@ -62,7 +62,7 @@ CHARACTER_PROMPT = """
 - यह टेलीग्राम चैनल '[FilmFyBox]' मेरा पैशन प्रोजेक्ट है।
 
 ## मेरे नियम (मैं कैसे काम करती हूँ)
-- **मेरा मुख्य काम:** मेरा काम तुम्हें तुम्हारी पसंदीदा फिल्में, वेब सीरीज, और श��[...]
+- **मेरा मुख्य काम:** मेरा काम तुम्हें तुम्हारी पसंदीदा फिल्में, वेब सीरीज, और श[...]
 """
 
 # ==================== ENVIRONMENT VARIABLES ====================
@@ -260,7 +260,7 @@ def setup_database():
         conn_str = FIXED_DATABASE_URL or DATABASE_URL
         conn = psycopg2.connect(conn_str)
         cur = conn.cursor()
-        ...
+        # ...
         # Enable pg_trgm extension
         cur.execute('CREATE EXTENSION IF NOT EXISTS pg_trgm;')
 
@@ -678,8 +678,8 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
                         chat_id=user_id,
                         from_chat_id=from_chat_id,
                         message_id=msg_id,
-                        caption=caption_text,
-                        parse_mode='Markdown'
+                        caption=caption_text, # Added caption to notify_users_for_movie as well for consistency
+                        parse_mode='HTML' # Changed to HTML to match the new caption style
                     )
                 # Check if it's a regular HTTP URL
                 elif isinstance(movie_url_or_file_id, str) and movie_url_or_file_id.startswith("http"):
@@ -687,14 +687,14 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
                         chat_id=user_id,
                         text=f"🎬 {movie_title} is now available!\n\n{caption_text}",
                         reply_markup=get_movie_options_keyboard(movie_title, movie_url_or_file_id),
-                        parse_mode='Markdown'
+                        parse_mode='HTML' # Changed to HTML to match the new caption style
                     )
                 else: # Fallback for other cases, assuming it might be a file_id
                     sent_msg = await context.bot.send_document(
                         chat_id=user_id,
                         document=movie_url_or_file_id,
                         caption=caption_text,
-                        parse_mode='Markdown'
+                        parse_mode='HTML' # Changed to HTML to match the new caption style
                     )
 
                 # Auto-delete
@@ -848,7 +848,7 @@ def create_movie_selection_keyboard(movies, page=0, movies_per_page=5):
 
     return InlineKeyboardMarkup(keyboard)
 
-# ==================== HELPER FUNCTION ====================
+# ==================== HELPER FUNCTION (FIXED) ====================
 async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int, title: str, url: Optional[str] = None, file_id: Optional[str] = None):
     """
     Sends the movie file/link to the user with a warning and caption.
@@ -966,7 +966,7 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
         # 4) Normal external link
         elif url and url.startswith("http"):
-            sent_msg = await context.bot.send_message(
+            sent_msg = await context.bot.send_message( # FIX: Assign sent_msg for auto-delete
                 chat_id=chat_id,
                 text=f"🎉 Found it! '{name}' is available!\n\n{caption_text}",
                 reply_markup=get_movie_options_keyboard(name, url),
@@ -975,19 +975,22 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
         # 5) Nothing valid to send
         else:
-            sent_msg = await context.bot.send_message(
+            sent_msg = await context.bot.send_message( # FIX: Assign sent_msg for auto-delete
                 chat_id=chat_id,
                 text=f"❌ Sorry, '{name}' found but no valid file or link is attached in the database."
             )
 
         # Auto-delete for media + warning
-        if sent_msg and (file_id or (url and not url.startswith("http"))): # Only schedule deletion if media/link was actually sent
+        # FIX: Check if sent_msg is valid before scheduling deletion
+        if sent_msg: 
+            message_ids_to_delete = [warning_msg.message_id, sent_msg.message_id] 
+            
             asyncio.create_task(
                 delete_messages_after_delay(
                     context,
                     chat_id,
-                    [sent_msg.message_id, warning_msg.message_id],
-                    60
+                    message_ids_to_delete,
+                    60 # 60 seconds delay
                 )
             )
 
@@ -1103,6 +1106,8 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not movies_found:
             # Movie not found - store request
             user = update.effective_user
+            # Store request only if it's not a burst/similar request (handled in request_movie flow, but better safe)
+            # We don't do the full cooldown check here to let the user proceed to the inline 'Request It' button
             store_user_request(
                 user.id,
                 user.username,
@@ -1132,6 +1137,7 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif len(movies_found) == 1:
             movie_id, title, url, file_id = movies_found[0]
+            # FIX: Updated function call to pass correct arguments: movie_id, title, url, file_id
             await send_movie_to_user(update, context, movie_id, title, url, file_id)
 
         else:
@@ -1164,7 +1170,7 @@ async def request_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
 
         if not user_message:
-            await update.message.reply_text("कृपया मूवी का नाम भेजें।")
+            await update.message.reply_text(" कृपया मूवी का नाम भेजें।")
             return REQUESTING
 
         # 1) Quick burst protection (many different requests in short time)
@@ -1402,12 +1408,20 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.commit()
         await update.message.reply_text(message)
 
-        # Notify users who requested this movie
-        value_to_send = value if any(value.startswith(prefix) for prefix in ["BQAC", "BAAC", "CAAC", "AQAC"]) else normalized_url
-        num_notified = await notify_users_for_movie(context, title, value_to_send)
-        await notify_in_group(context, title)
-
-        await update.message.reply_text(f"कुल {num_notified} users को notify किया गया है।")
+        # --- IMPORTANT: Fetch the movie ID and details again after UPSET to use in notification ---
+        cur.execute("SELECT id, title, url, file_id FROM movies WHERE title = %s", (title.strip(),))
+        movie_found = cur.fetchone()
+        
+        if movie_found:
+            movie_id, title, url, file_id = movie_found
+            value_to_send = file_id if file_id else url
+            
+            # Notify users who requested this movie
+            num_notified = await notify_users_for_movie(context, title, value_to_send)
+            await notify_in_group(context, title)
+            await update.message.reply_text(f"कुल {num_notified} users को notify किया गया है।")
+        else:
+             await update.message.reply_text("Notification failed: Could not retrieve updated movie details.")
 
     except Exception as e:
         logger.error(f"Error in add_movie command: {e}")
