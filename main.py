@@ -256,9 +256,10 @@ def user_burst_count(user_id: int, window_seconds: int = 60):
 def setup_database():
     """Setup database tables and indexes"""
     try:
-        conn = psycopg2.connect(FIXED_DATABASE_URL)
+        conn_str = FIXED_DATABASE_URL or DATABASE_URL
+        conn = psycopg2.connect(conn_str)
         cur = conn.cursor()
-
+        ...
         # Enable pg_trgm extension
         cur.execute('CREATE EXTENSION IF NOT EXISTS pg_trgm;')
 
@@ -338,7 +339,11 @@ def setup_database():
 def get_db_connection():
     """Get database connection with error handling"""
     try:
-        return psycopg2.connect(FIXED_DATABASE_URL)
+        conn_str = FIXED_DATABASE_URL or DATABASE_URL
+        if not conn_str:
+            logger.error("No database URL configured (FIXED_DATABASE_URL or DATABASE_URL).")
+            return None
+        return psycopg2.connect(conn_str)
     except Exception as e:
         logger.error(f"Database connection error: {e}")
         return None
@@ -843,16 +848,57 @@ def create_movie_selection_keyboard(movies, page=0, movies_per_page=5):
     return InlineKeyboardMarkup(keyboard)
 
 # ==================== HELPER FUNCTION ====================
+# Replace your existing send_movie_to_user with this version in main.py
+
 async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id, title, url, file_id):
-    """Send movie to user with auto-delete and custom caption/links."""
+    """Send movie to user with fallback to movie_files when movies.url/file_id missing."""
     try:
-        # Determine chat_id based on update type
+        # Determine chat id
         if update.callback_query:
             chat_id = update.callback_query.message.chat.id
         else:
             chat_id = update.effective_chat.id
 
-        # Common warning (will be auto-deleted together with file)
+        # small helper to fetch best quality from movie_files
+        def get_quality_order_case():
+            return """
+                CASE quality
+                    WHEN '2160p' THEN 1
+                    WHEN '1080p' THEN 2
+                    WHEN '720p'  THEN 3
+                    WHEN '360p'  THEN 4
+                    ELSE 5
+                END
+            """
+
+        # If both url and file_id are empty/null try to find from movie_files
+        if not url and not file_id and movie_id:
+            try:
+                conn = get_db_connection()
+                if conn:
+                    cur = conn.cursor()
+                    query = f"""
+                        SELECT url, file_id, quality
+                        FROM movie_files
+                        WHERE movie_id = %s
+                        ORDER BY {get_quality_order_case()}
+                        LIMIT 1
+                    """
+                    cur.execute(query, (movie_id,))
+                    row = cur.fetchone()
+                    cur.close()
+                    conn.close()
+                    if row:
+                        url_from_files, file_id_from_files, quality = row
+                        # prefer file_id if present
+                        if file_id_from_files:
+                            file_id = file_id_from_files
+                        elif url_from_files:
+                            url = url_from_files
+            except Exception as e:
+                logger.error(f"Error reading movie_files for fallback (movie_id={movie_id}): {e}")
+
+        # Common warning message (auto-delete)
         warning_msg = await context.bot.send_message(
             chat_id=chat_id,
             text="⚠️ ❌👉This file automatically❗️delete after 1 minute❗️so please forward in another chat👈❌\n\nJoin » [FilmfyBox](http://t.me/filmfybox)",
@@ -860,7 +906,6 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
         )
 
         sent_msg = None
-
         # Build a consistent caption to add under media (Markdown links)
         caption_text = (
             f"🎬 {title}\n\n"
@@ -869,55 +914,42 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
             "[🔹 FlimfyBox Chat](https://t.me/Filmfybox002)"
         )
 
-        # Send movie based on type
+        # 1) If file_id -> send as document
         if file_id:
-            # file_id: send_document supports caption
-            sent_msg = await context.bot.send_document(
-                chat_id=chat_id,
-                document=file_id,
-                caption=caption_text,
-                parse_mode='Markdown'
-            )
-        elif url and url.startswith("https://t.me/c/"):
-            # channel message: copy it into user's chat and add caption
-            parts = url.split('/')
-            from_chat_id = int("-100" + parts[-2])
-            message_id = int(parts[-1])
-            # copy_message supports caption in recent Bot API versions
-            sent_msg = await context.bot.copy_message(
-                chat_id=chat_id,
-                from_chat_id=from_chat_id,
-                message_id=message_id,
-                caption=caption_text,
-                parse_mode='Markdown'
-            )
-        elif url and url.startswith("http"):
-            # For external links we send a text message with inline buttons
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=f"🎉 Found it! '{title}' is available!\n\n{caption_text}",
-                reply_markup=get_movie_options_keyboard(title, url),
-                parse_mode='Markdown'
-            )
-        else: # Fallback for cases where URL might be a file_id stored in the url column
-            sent_msg = await context.bot.send_document(
-                chat_id=chat_id,
-                document=url,
-                caption=caption_text,
-                parse_mode='Markdown'
-            )
+            sent_msg = await context.bot.send_document(chat_id=chat_id, document=file_id, caption=caption_text, parse_mode='Markdown')
 
-        # Schedule auto-delete
+        # 2) If t.me channel link -> try copy_message
+        elif url and url.startswith("https://t.me/c/"):
+            try:
+                parts = url.rstrip('/').split('/')
+                from_chat_id = int("-100" + parts[-2])
+                message_id = int(parts[-1])
+                sent_msg = await context.bot.copy_message(chat_id=chat_id, from_chat_id=from_chat_id, message_id=message_id)
+                # also send caption for context
+                await context.bot.send_message(chat_id=chat_id, text=caption_text, parse_mode='Markdown')
+            except Exception as e:
+                logger.error(f"Copy message failed for {url}: {e}")
+                await context.bot.send_message(chat_id=chat_id, text=f"🎬 Found: {title}\n\n{caption_text}", reply_markup=get_movie_options_keyboard(title, url), parse_mode='Markdown')
+
+        # 3) If http(s) link -> send text + button
+        elif url and url.startswith("http"):
+            await context.bot.send_message(chat_id=chat_id, text=f"🎉 Found it! '{title}' is available!\n\n{caption_text}", reply_markup=get_movie_options_keyboard(title, url), parse_mode='Markdown')
+
+        # 4) Fallback: try send_document with url (in case it's actually a file_id or a direct file link)
+        else:
+            try:
+                if url:
+                    sent_msg = await context.bot.send_document(chat_id=chat_id, document=url, caption=caption_text, parse_mode='Markdown')
+                else:
+                    # nothing to send, inform user
+                    await context.bot.send_message(chat_id=chat_id, text=f"Sorry, I couldn't find a file for '{title}'. Admin will upload soon.")
+            except Exception as e:
+                logger.error(f"Fallback send_document failed for '{title}' (movie_id={movie_id}): {e}")
+                await context.bot.send_message(chat_id=chat_id, text=f"Sorry, couldn't send the file directly for '{title}'. Try again later.")
+
+        # schedule auto-delete if a media/document was sent
         if sent_msg:
-            asyncio.create_task(
-                delete_messages_after_delay(
-                    context,
-                    chat_id,
-                    [sent_msg.message_id, warning_msg.message_id],
-                    60
-                )
-            )
-            logger.info(f"🕐 Auto-delete scheduled for messages {sent_msg.message_id}, {warning_msg.message_id}")
+            asyncio.create_task(delete_messages_after_delay(context, chat_id, [sent_msg.message_id, warning_msg.message_id], 60))
 
     except Exception as e:
         logger.error(f"Error sending movie to user: {e}")
