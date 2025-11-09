@@ -957,9 +957,13 @@ except Exception as e:
     logger.error(f"Error sending movie to user: {e}")
     try:
         await context.bot.send_message(chat_id=chat_id, text="❌ Server failed to send file. Please report to Admin.")
-    except:
-        pass
-        await context.bot.send_message(chat_id, "❌ Sorry, server failed to send the file. Please report this to Admin.", parse_mode='Markdown')
+    except Exception as e2:
+        logger.error(f"Secondary send error: {e2}")
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="❌ Sorry, server failed to send the file. Please report this to Admin.",
+            parse_mode='Markdown'
+        )
 # ==================== TELEGRAM BOT HANDLERS ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start command handler"""
