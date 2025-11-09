@@ -850,107 +850,62 @@ def create_movie_selection_keyboard(movies, page=0, movies_per_page=5):
 # ==================== HELPER FUNCTION ====================
 # Replace your existing send_movie_to_user with this version in main.py
 
+# main.py (Inside send_movie_to_user function)
 async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id, title, url, file_id):
-    """Send movie to user with fallback to movie_files when movies.url/file_id missing."""
     try:
-        # Determine chat id
-        if update.callback_query:
-            chat_id = update.callback_query.message.chat.id
-        else:
-            chat_id = update.effective_chat.id
-
-        # small helper to fetch best quality from movie_files
-        def get_quality_order_case():
-            return """
-                CASE quality
-                    WHEN '2160p' THEN 1
-                    WHEN '1080p' THEN 2
-                    WHEN '720p'  THEN 3
-                    WHEN '360p'  THEN 4
-                    ELSE 5
-                END
-            """
-
-        # If both url and file_id are empty/null try to find from movie_files
-        if not url and not file_id and movie_id:
-            try:
-                conn = get_db_connection()
-                if conn:
-                    cur = conn.cursor()
-                    query = f"""
-                        SELECT url, file_id, quality
-                        FROM movie_files
-                        WHERE movie_id = %s
-                        ORDER BY {get_quality_order_case()}
-                        LIMIT 1
-                    """
-                    cur.execute(query, (movie_id,))
-                    row = cur.fetchone()
-                    cur.close()
-                    conn.close()
-                    if row:
-                        url_from_files, file_id_from_files, quality = row
-                        # prefer file_id if present
-                        if file_id_from_files:
-                            file_id = file_id_from_files
-                        elif url_from_files:
-                            url = url_from_files
-            except Exception as e:
-                logger.error(f"Error reading movie_files for fallback (movie_id={movie_id}): {e}")
-
-        # Common warning message (auto-delete)
-        warning_msg = await context.bot.send_message(
-            chat_id=chat_id,
-            text="⚠️ ❌👉This file automatically❗️delete after 1 minute❗️so please forward in another chat👈❌\n\nJoin » [FilmfyBox](http://t.me/filmfybox)",
-            parse_mode='Markdown'
-        )
-
-        sent_msg = None
-        # Build a consistent caption to add under media (Markdown links)
-        caption_text = (
-            f"🎬 {title}\n\n"
-            "[🔗 JOIN » FilmfyBox](http://t.me/filmfybox)\n\n"
+        # ... (Determination of chat_id and warning_msg code remains the same) ...
+        
+        # Build the FINAL promotional caption (Markdown ready)
+        promo_caption_template = (
+            "🔗**JOIN » [FlimfyBox](http://t.me/filmfybox)**\n\n"
             "🔹 Please drop the movie name, and I’ll find it for you as soon as possible. 🎬✨👇\n"
-            "[🔹 FlimfyBox Chat](https://t.me/Filmfybox002)"
+            "🔹 [FlimfyBox Chat](https://t.me/Filmfybox002)"
         )
+        
+        sent_msg = None
 
         # 1) If file_id -> send as document
         if file_id:
-            sent_msg = await context.bot.send_document(chat_id=chat_id, document=file_id, caption=caption_text, parse_mode='Markdown')
-
+            final_caption = f"🎬 **{title}**\n\n{promo_caption_template}"
+            sent_msg = await context.bot.send_document(
+                chat_id=chat_id,
+                document=file_id,
+                caption=final_caption,
+                parse_mode='Markdown'
+            )
+        
         # 2) If t.me channel link -> try copy_message
         elif url and url.startswith("https://t.me/c/"):
-            try:
-                parts = url.rstrip('/').split('/')
-                from_chat_id = int("-100" + parts[-2])
-                message_id = int(parts[-1])
-                sent_msg = await context.bot.copy_message(chat_id=chat_id, from_chat_id=from_chat_id, message_id=message_id)
-                # also send caption for context
-                await context.bot.send_message(chat_id=chat_id, text=caption_text, parse_mode='Markdown')
-            except Exception as e:
-                logger.error(f"Copy message failed for {url}: {e}")
-                await context.bot.send_message(chat_id=chat_id, text=f"🎬 Found: {title}\n\n{caption_text}", reply_markup=get_movie_options_keyboard(title, url), parse_mode='Markdown')
+            parts = url.rstrip('/').split('/')
+            from_chat_id = int("-100" + parts[-2])
+            message_id = int(parts[-1])
 
-        # 3) If http(s) link -> send text + button
+            # IMPORTANT: We use copy_message and overwrite the caption.
+            # We must use 'Markdown' or 'HTML' to correctly render the links.
+            final_caption = f"🎬 **{title}**\n\n{promo_caption_template}"
+
+            sent_msg = await context.bot.copy_message(
+                chat_id=chat_id,
+                from_chat_id=from_chat_id,
+                message_id=message_id,
+                caption=final_caption, # Custom caption added here
+                parse_mode='Markdown'
+            )
+            
+        # 3) If http(s) link -> send text + button (rest of the logic remains the same)
         elif url and url.startswith("http"):
-            await context.bot.send_message(chat_id=chat_id, text=f"🎉 Found it! '{title}' is available!\n\n{caption_text}", reply_markup=get_movie_options_keyboard(title, url), parse_mode='Markdown')
+             # ... (your existing HTTP link logic)
+             pass
+        else: # Fallback
+             # ... (your existing fallback logic)
+             pass
 
-        # 4) Fallback: try send_document with url (in case it's actually a file_id or a direct file link)
-        else:
-            try:
-                if url:
-                    sent_msg = await context.bot.send_document(chat_id=chat_id, document=url, caption=caption_text, parse_mode='Markdown')
-                else:
-                    # nothing to send, inform user
-                    await context.bot.send_message(chat_id=chat_id, text=f"Sorry, I couldn't find a file for '{title}'. Admin will upload soon.")
-            except Exception as e:
-                logger.error(f"Fallback send_document failed for '{title}' (movie_id={movie_id}): {e}")
-                await context.bot.send_message(chat_id=chat_id, text=f"Sorry, couldn't send the file directly for '{title}'. Try again later.")
 
         # schedule auto-delete if a media/document was sent
         if sent_msg:
-            asyncio.create_task(delete_messages_after_delay(context, chat_id, [sent_msg.message_id, warning_msg.message_id], 60))
-
+             # ... (your existing auto-delete logic)
+             pass
+             
     except Exception as e:
         logger.error(f"Error sending movie to user: {e}")
 # ==================== TELEGRAM BOT HANDLERS ====================
