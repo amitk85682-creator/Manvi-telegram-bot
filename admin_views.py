@@ -63,6 +63,7 @@ def add_movie_post():
         flash('Title is required.', 'error')
         return redirect(url_for('admin.add_movie_form'))
 
+    # Ensure at least one non-empty quality (url or file id) before inserting/updating
     if not any(qualities.values()):
         flash('At least one quality link/file id is required.', 'error')
         return redirect(url_for('admin.add_movie_form'))
@@ -74,9 +75,9 @@ def add_movie_post():
 
     movie_id = db_utils.upsert_movie_and_files(conn, title, description, qualities, aliases)
     if movie_id:
-        flash(f'Movie "{title}" added/updated (id={movie_id}).', 'success')
+        flash(f'Movie \"{title}\" added/updated (id={movie_id}).', 'success')
     else:
-        flash(f'Failed to add/update movie "{title}". See logs.', 'error')
+        flash(f'Failed to add/update movie \"{title}\". See logs.', 'error')
 
     return redirect(url_for('admin.add_movie_form'))
 
@@ -114,12 +115,18 @@ def bulk_upload():
                         continue
                     description = (row.get('Description') or row.get('description') or '').strip()
                     qualities = {
-                        '360p': row.get('URL_360') or row.get('url_360') or row.get('360p') or '',
-                        '720p': row.get('URL_720') or row.get('url_720') or row.get('720p') or '',
-                        '1080p': row.get('URL_1080') or row.get('url_1080') or row.get('1080p') or '',
-                        '2160p': row.get('URL_2160') or row.get('url_2160') or row.get('2160p') or ''
+                        '360p': (row.get('URL_360') or row.get('url_360') or row.get('360p') or '').strip(),
+                        '720p': (row.get('URL_720') or row.get('url_720') or row.get('720p') or '').strip(),
+                        '1080p': (row.get('URL_1080') or row.get('url_1080') or row.get('1080p') or '').strip(),
+                        '2160p': (row.get('URL_2160') or row.get('url_2160') or row.get('2160p') or '').strip()
                     }
-                    aliases = row.get('Aliases') or row.get('aliases') or ''
+                    aliases = (row.get('Aliases') or row.get('aliases') or '').strip()
+
+                    # skip rows with no quality/file info
+                    if not any(qualities.values()):
+                        failed += 1
+                        continue
+
                     mid = db_utils.upsert_movie_and_files(conn, title, description, qualities, aliases)
                     if mid:
                         success += 1
@@ -129,7 +136,7 @@ def bulk_upload():
                 flash(f'Bulk upload done. Success: {success}, Failed: {failed}', 'success')
                 return redirect(url_for('admin.add_movie_form'))
             except Exception as e:
-                logger.error(f'Bulk upload error: {e}')
+                logger.exception('Bulk upload error')
                 flash(f'Bulk upload failed: {e}', 'error')
                 return redirect(url_for('admin.bulk_upload'))
         else:
@@ -138,3 +145,71 @@ def bulk_upload():
 
     # GET
     return render_template('admin_add_movie.html')
+
+# --- New: Manage movies and edit endpoints ---
+
+@admin.route('/admin/manage', methods=['GET'])
+@login_required
+def manage_movies():
+    conn = db_utils.get_db_connection()
+    if not conn:
+        flash('DB connection failed', 'error')
+        return redirect(url_for('admin.add_movie_form'))
+    # db_utils.get_all_movies should return list of dicts: id, title, url, file_id, description, aliases
+    movies = []
+    try:
+        movies = db_utils.get_all_movies(conn)
+    except Exception as e:
+        logger.exception('Failed to fetch movies for management')
+        flash('Failed to fetch movies. See logs.', 'error')
+    return render_template('admin_manage_movies.html', movies=movies)
+
+@admin.route('/admin/edit/<int:movie_id>', methods=['GET', 'POST'])
+@login_required
+def edit_movie(movie_id):
+    conn = db_utils.get_db_connection()
+    if not conn:
+        flash('DB connection failed', 'error')
+        return redirect(url_for('admin.manage_movies'))
+
+    if request.method == 'POST':
+        title = request.form.get('title', '').strip()
+        description = request.form.get('description', '').strip()
+        aliases = request.form.get('aliases', '').strip()
+        qualities = {
+            '360p': request.form.get('q_360', '').strip(),
+            '720p': request.form.get('q_720', '').strip(),
+            '1080p': request.form.get('q_1080', '').strip(),
+            '2160p': request.form.get('q_2160', '').strip()
+        }
+
+        if not title:
+            flash('Title is required.', 'error')
+            return redirect(url_for('admin.edit_movie', movie_id=movie_id))
+
+        if not any(qualities.values()):
+            flash('At least one quality link/file id is required.', 'error')
+            return redirect(url_for('admin.edit_movie', movie_id=movie_id))
+
+        mid = db_utils.upsert_movie_and_files(conn, title, description, qualities, aliases, movie_id=movie_id)
+        if mid:
+            flash('Movie updated.', 'success')
+            return redirect(url_for('admin.manage_movies'))
+        else:
+            flash('Failed to update movie. See logs.', 'error')
+            return redirect(url_for('admin.edit_movie', movie_id=movie_id))
+
+    # GET: fetch movie
+    movie = None
+    try:
+        movie = db_utils.get_movie_by_id(conn, movie_id)
+    except Exception as e:
+        logger.exception('Failed to fetch movie for edit')
+        flash('Failed to fetch movie. See logs.', 'error')
+        return redirect(url_for('admin.manage_movies'))
+
+    if not movie:
+        flash('Movie not found.', 'error')
+        return redirect(url_for('admin.manage_movies'))
+
+    return render_template('admin_edit_movie.html', movie=movie)
