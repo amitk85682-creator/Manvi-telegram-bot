@@ -848,124 +848,110 @@ def create_movie_selection_keyboard(movies, page=0, movies_per_page=5):
     return InlineKeyboardMarkup(keyboard)
 
 # ==================== HELPER FUNCTION ====================
-async def send_movie_to_user(context, chat_id, title, movie_title, url, file_id, movie_id):
-    try:
-        # Warn user before delete
-        warning_msg = await context.bot.send_message(
+    # Initial warning (auto-delete with media if media sent)
+    warning_msg = await context.bot.send_message(
+        chat_id=chat_id,
+        text="⚠️ ❌👉This file automatically❗️deletes after 1 minute❗️so please forward it to another chat👈❌\n\nJoin » @FilmfyBox",
+        parse_mode='Markdown'
+    )
+
+    sent_msg = None
+    name = movie_title or title  # avoid "None" in caption
+    caption_text = (
+        f"🎬 <b>{name}</b>\n\n"
+        "🔗 JOIN » <a href='http://t.me/filmfybox'>FilmfyBox</a>\n\n"
+        "🔹 Please drop the movie name, and I’ll find it for you as soon as possible. 🎬✨👇\n"
+        "🔹 <a href='https://t.me/Filmfybox002'>FlimfyBox Chat</a>"
+    )
+
+    # 1) file_id -> caption attached under media
+    if file_id:
+        sent_msg = await context.bot.send_document(
             chat_id=chat_id,
-            text="⚠️ ❌👉This file automatically❗️delete after 1 minute❗️so please forward in another chat👈❌",
+            document=file_id,
+            caption=caption_text,
             parse_mode='HTML'
         )
 
-        # Caption (HTML mode)
-        caption_text = (
-            f"🎬 <b>{movie_title}</b>\n\n"
-            "🔗 <b>JOIN »</b> <a href='http://t.me/filmfybox'>FilmfyBox</a>\n\n"
-            "🔹 <b>Please drop the movie name, and I’ll find it for you as soon as possible. 🎬✨👇</b>\n"
-            "🔹 <b><a href='https://t.me/Filmfybox002'>FlimfyBox Chat</a></b>"
-        )
-
-        sent_msg = None
-
-        # ✅ 1) Direct File ID
-        if file_id:
-            sent_msg = await context.bot.send_document(
+    # 2) Private channel message link: t.me/c/<chat_id>/<msg_id>
+    elif url and url.startswith("https://t.me/c/"):
+        try:
+            parts = url.rstrip('/').split('/')
+            from_chat_id = int("-100" + parts[-2])
+            message_id = int(parts[-1])
+            # Attach caption directly via copy_message
+            sent_msg = await context.bot.copy_message(
                 chat_id=chat_id,
-                document=file_id,
+                from_chat_id=from_chat_id,
+                message_id=message_id,
                 caption=caption_text,
                 parse_mode='HTML'
             )
-
-        # ✅ 2) Private channel link (t.me/c/)
-        elif url and url.startswith("https://t.me/c/"):
-            try:
-                parts = url.rstrip('/').split('/')
-                from_chat_id = int("-100" + parts[-2])
-                message_id = int(parts[-1])
-
-                sent_msg = await context.bot.copy_message(
-                    chat_id=chat_id,
-                    from_chat_id=from_chat_id,
-                    message_id=message_id
-                )
-
-                # ✅ movie ke sath caption attach
-                await context.bot.edit_message_caption(
-                    chat_id=chat_id,
-                    message_id=sent_msg.message_id,
-                    caption=caption_text,
-                    parse_mode='HTML'
-                )
-
-            except Exception as e:
-                logger.error(f"Private copy failed {url}: {e}")
-                await context.bot.send_message(
-                    chat_id, f"🎬 Found: {title}\n\n{caption_text}",
-                    reply_markup=get_movie_options_keyboard(title, url),
-                    parse_mode='HTML'
-                )
-
-        # ✅ 3) Public channel link
-        elif url and url.startswith("https://t.me/") and "/c/" not in url:
-            try:
-                parts = url.rstrip('/').split('/')
-                username = parts[-2].lstrip("@")
-                message_id = int(parts[-1])
-
-                sent_msg = await context.bot.copy_message(
-                    chat_id=chat_id,
-                    from_chat_id=f"@{username}",
-                    message_id=message_id
-                )
-
-                await context.bot.edit_message_caption(
-                    chat_id=chat_id,
-                    message_id=sent_msg.message_id,
-                    caption=caption_text,
-                    parse_mode='HTML'
-                )
-
-            except Exception as e:
-                logger.error(f"Public copy failed {url}: {e}")
-                await context.bot.send_message(
-                    chat_id, f"🎬 Found: {title}\n\n{caption_text}",
-                    reply_markup=get_movie_options_keyboard(title, url),
-                    parse_mode='HTML'
-                )
-
-        # ✅ 4) Normal external link
-        elif url and url.startswith("http"):
+        except Exception as e:
+            logger.error(f"Copy private link failed {url}: {e}")
             await context.bot.send_message(
-                chat_id,
-                text=f"🎉 Found it! '{title}' is available!\n\n{caption_text}",
-                reply_markup=get_movie_options_keyboard(title, url),
+                chat_id=chat_id,
+                text=f"🎬 {name}\n\n{caption_text}",
+                reply_markup=get_movie_options_keyboard(name, url),
                 parse_mode='HTML'
             )
 
-        # ✅ 5) No file/no url
-        else:
+    # 3) Public channel message link: https://t.me/Username/123
+    elif url and url.startswith("https://t.me/") and "/c/" not in url:
+        try:
+            parts = url.rstrip('/').split('/')
+            username = parts[-2].lstrip("@")
+            message_id = int(parts[-1])
+            from_chat_id = f"@{username}"
+            sent_msg = await context.bot.copy_message(
+                chat_id=chat_id,
+                from_chat_id=from_chat_id,
+                message_id=message_id,
+                caption=caption_text,
+                parse_mode='HTML'
+            )
+        except Exception as e:
+            logger.error(f"Copy public link failed {url}: {e}")
             await context.bot.send_message(
-                chat_id,
-                text=f"❌ Sorry, '{title}' found but no valid file or link in database.",
+                chat_id=chat_id,
+                text=f"🎬 {name}\n\n{caption_text}",
+                reply_markup=get_movie_options_keyboard(name, url),
                 parse_mode='HTML'
             )
 
-        # ✅ Auto delete after 60 sec
-        if sent_msg:
-            asyncio.create_task(
-                delete_messages_after_delay(
-                    context, chat_id,
-                    [sent_msg.message_id, warning_msg.message_id],
-                    60
-                )
-            )
-
-    except Exception as e:
-        logger.error(f"Movie send failed: {e}")
+    # 4) Normal external link
+    elif url and url.startswith("http"):
         await context.bot.send_message(
-            chat_id, "❌ Server failed to send the file. Please report to Admin.",
+            chat_id=chat_id,
+            text=f"🎉 Found it! '{name}' is available!\n\n{caption_text}",
+            reply_markup=get_movie_options_keyboard(name, url),
             parse_mode='HTML'
         )
+
+    # 5) Nothing valid to send
+    else:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"❌ Sorry, '{name}' found but no valid file or link is attached in the database."
+        )
+
+    # Auto-delete for media + warning
+    if sent_msg:
+        asyncio.create_task(
+            delete_messages_after_delay(
+                context,
+                chat_id,
+                [sent_msg.message_id, warning_msg.message_id],
+                60
+            )
+        )
+
+except Exception as e:
+    logger.error(f"Error sending movie to user: {e}")
+    try:
+        await context.bot.send_message(chat_id=chat_id, text="❌ Server failed to send file. Please report to Admin.")
+    except Exception as e2:
+        logger.error(f"Secondary send error: {e2}")
 # ==================== TELEGRAM BOT HANDLERS ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start command handler"""
