@@ -852,21 +852,36 @@ def create_movie_selection_keyboard(movies, page=0, movies_per_page=5):
 
 # main.py (Inside send_movie_to_user function)
 async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id, title, url, file_id):
+    """Send movie to user with auto-delete and simple caption logic."""
     try:
-        # ... (Determination of chat_id and warning_msg code remains the same) ...
-        
-        # Build the FINAL promotional caption (Markdown ready)
+        # Determine chat_id based on update type
+        if update.callback_query:
+            chat_id = update.callback_query.message.chat.id
+        else:
+            chat_id = update.effective_chat.id
+
+        # 1. FINAL Promotional Caption (Markdown ready)
         promo_caption_template = (
             "🔗**JOIN » [FlimfyBox](http://t.me/filmfybox)**\n\n"
             "🔹 Please drop the movie name, and I’ll find it for you as soon as possible. 🎬✨👇\n"
             "🔹 [FlimfyBox Chat](https://t.me/Filmfybox002)"
         )
+        # We will use this simple final caption for all media
+        final_caption = f"🎬 **{title}**\n\n{promo_caption_template}"
         
-        sent_msg = None
+        # 2. Warning message (will be auto-deleted)
+        warning_msg = await context.bot.send_message(
+            chat_id=chat_id,
+            text="⚠️ ❌👉This file automatically❗️delete after 1 minute❗️so please forward in another chat👈❌\n\nJoin » [FilmfyBox](http://t.me/filmfybox)",
+            parse_mode='Markdown'
+        )
 
-        # 1) If file_id -> send as document
+        sent_msg = None
+        
+        # --- FILE SENDING LOGIC (Simplifying the logic) ---
+
+        # Case 1: File ID is present (most reliable)
         if file_id:
-            final_caption = f"🎬 **{title}**\n\n{promo_caption_template}"
             sent_msg = await context.bot.send_document(
                 chat_id=chat_id,
                 document=file_id,
@@ -874,40 +889,55 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 parse_mode='Markdown'
             )
         
-        # 2) If t.me channel link -> try copy_message
+        # Case 2: Telegram Channel Link (Copy Message)
         elif url and url.startswith("https://t.me/c/"):
             parts = url.rstrip('/').split('/')
             from_chat_id = int("-100" + parts[-2])
             message_id = int(parts[-1])
-
-            # IMPORTANT: We use copy_message and overwrite the caption.
-            # We must use 'Markdown' or 'HTML' to correctly render the links.
-            final_caption = f"🎬 **{title}**\n\n{promo_caption_template}"
-
+            
+            # Use COPY_MESSAGE, but for simplicity, we send our own caption. 
+            # The original file name/details will still show correctly above the caption.
             sent_msg = await context.bot.copy_message(
                 chat_id=chat_id,
                 from_chat_id=from_chat_id,
                 message_id=message_id,
-                caption=final_caption, # Custom caption added here
+                caption=final_caption, 
                 parse_mode='Markdown'
             )
             
-        # 3) If http(s) link -> send text + button (rest of the logic remains the same)
+        # Case 3: External HTTP Link
         elif url and url.startswith("http"):
-             # ... (your existing HTTP link logic)
-             pass
-        else: # Fallback
-             # ... (your existing fallback logic)
-             pass
+            # Send text message with link button
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"🎉 Found it! **{title}** is available!\n\n{promo_caption_template}",
+                reply_markup=get_movie_options_keyboard(title, url),
+                parse_mode='Markdown'
+            )
+        
+        # Case 4: Fallback (shouldn't happen if data is clean)
+        else:
+            await context.bot.send_message(
+                chat_id=chat_id, 
+                text=f"❌ Sorry, '{title}' found but no valid file or link is attached to it in the database.", 
+                parse_mode='Markdown'
+            )
 
 
-        # schedule auto-delete if a media/document was sent
+        # Schedule auto-delete if a media/document was successfully sent
         if sent_msg:
-             # ... (your existing auto-delete logic)
-             pass
-             
+            asyncio.create_task(
+                delete_messages_after_delay(
+                    context,
+                    chat_id,
+                    [sent_msg.message_id, warning_msg.message_id],
+                    60
+                )
+            )
+
     except Exception as e:
         logger.error(f"Error sending movie to user: {e}")
+        await context.bot.send_message(chat_id, "❌ Sorry, server failed to send the file. Please report this to Admin.", parse_mode='Markdown')
 # ==================== TELEGRAM BOT HANDLERS ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start command handler"""
