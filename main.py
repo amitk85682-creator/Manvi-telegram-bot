@@ -1,3 +1,10 @@
+# Add this snippet near the top of main.py, after your imports:
+try:
+    # prefer db_utils' fixed URL if it exists
+    import db_utils
+    FIXED_DATABASE_URL = getattr(db_utils, "FIXED_DATABASE_URL", None)
+except Exception:
+    FIXED_DATABASE_URL = None
 # -*- coding: utf-8 -*-
 import os
 import threading
@@ -613,13 +620,12 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
     cur = None
     notified_count = 0
 
-    # caption used for notifications too
-    caption_text = (
-        f"🎬 {movie_title}\n\n"
-        "🔗 JOIN » FilmfyBox (http://t.me/filmfybox)\n\n"
-        "🔹 Please drop the movie name, and I’ll find it for you as soon as possible. 🎬✨👇\n"
-        "🔹 FlimfyBox Chat (https://t.me/Filmfybox002)"
-    )
+    # caption used for notifications toocaption_text = (
+    f"🎬 <b>{movie_title}</b>\n\n"
+    "🔗 <b>JOIN »</b> FilmfyBox (http://t.me/filmfybox)\n\n"
+    "🔹 <b>Please drop the movie name, and I’ll find it for you as soon as possible. 🎬✨👇</b>\n"
+    "🔹 <b>FlimfyBox Chat (https://t.me/Filmfybox002)</b>"
+)
 
     try:
         conn = get_db_connection()
