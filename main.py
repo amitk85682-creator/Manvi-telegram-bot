@@ -848,97 +848,99 @@ def create_movie_selection_keyboard(movies, page=0, movies_per_page=5):
     return InlineKeyboardMarkup(keyboard)
 
 # ==================== HELPER FUNCTION ====================
-async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id, title, url, file_id):
-    """Send movie to user with auto-delete and integrated caption logic."""
-    
-    # 1. Determine chat id (No Change)
-    if update.callback_query:
-        chat_id = update.callback_query.message.chat.id
-    else:
-        chat_id = update.effective_chat.id
+caption_text = (
+    f"🎬 <b>{movie_title}</b>\n\n"
+    "🔗 <b>JOIN »</b> <a href='http://t.me/filmfybox'>FilmfyBox</a>\n\n"
+    "🔹 <b>Please drop the movie name, and I’ll find it for you as soon as possible. 🎬✨👇</b>\n"
+    "🔹 <b><a href='https://t.me/Filmfybox002'>FlimfyBox Chat</a></b>"
+)
 
-    sent_msg = None
-    
+# 1️⃣ file_id se bhejna (direct upload)
+if file_id:
+    sent_msg = await context.bot.send_document(
+        chat_id=chat_id,
+        document=file_id,
+        caption=caption_text,
+        parse_mode='HTML'
+    )
+
+# 2️⃣ Private channel se (t.me/c/...)
+elif url and url.startswith("https://t.me/c/"):
     try:
-        # --- FALLBACK LOGIC (Accessing movie_files table for best quality) ---
-        # (This is your movie_files fallback logic, kept simple here as it's complex)
-        if not url and not file_id and movie_id:
-            # Note: The actual complex SQL fallback logic goes here, 
-            # for now, we assume url/file_id is the final best option obtained.
-            pass # Assuming the required fallback variables are already processed
+        parts = url.rstrip('/').split('/')
+        from_chat_id = int("-100" + parts[-2])
+        message_id = int(parts[-1])
         
-        # 2. FINAL Promotional Caption (using HTML for easier link embedding, as shown in previous examples)
-        # We MUST use HTML parse_mode now.
-        final_caption = (
-            f"🎬 <b>{title}</b>\n\n"
-            f"🔗 <b><a href='http://t.me/filmfybox'>JOIN » FlimfyBox</a></b>\n\n"
-            "🔹 Please drop the movie name, and I’ll find it for you as soon as possible. 🎬✨👇\n"
-            f"🔹 <b><a href='https://t.me/Filmfybox002'>FlimfyBox Chat</a></b>"
+        sent_msg = await context.bot.copy_message(
+            chat_id=chat_id,
+            from_chat_id=from_chat_id,
+            message_id=message_id
         )
         
-        # 3. Warning message (must be sent first, using HTML parse_mode)
-        warning_msg = await context.bot.send_message(
+        # 👇 ab caption edit karte hain (movie ke sath attach hoga)
+        await context.bot.edit_message_caption(
             chat_id=chat_id,
-            text="⚠️ ❌👉This file automatically❗️delete after 1 minute❗️so please forward in another chat👈❌\n\n<b>Join » <a href='http://t.me/filmfybox'>FlimfyBox</a></b>",
+            message_id=sent_msg.message_id,
+            caption=caption_text,
             parse_mode='HTML'
         )
 
-        # 4. FILE SENDING LOGIC (Using HTML parse_mode for caption)
+    except Exception as e:
+        logger.error(f"Private link copy failed {url}: {e}")
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"🎬 Found: {title}\n\n{caption_text}",
+            reply_markup=get_movie_options_keyboard(title, url),
+            parse_mode='HTML'
+        )
 
-        # Case 1: File ID is present (most reliable)
-        if file_id:
-            sent_msg = await context.bot.send_document(
-                chat_id=chat_id, document=file_id, 
-                caption=final_caption, 
-                parse_mode='HTML' # <--- IMPORTANT: Changed to HTML
-            )
+# 3️⃣ Public channel (t.me/username/123)
+elif url and url.startswith("https://t.me/") and "/c/" not in url:
+    try:
+        parts = url.rstrip('/').split('/')
+        username = parts[-2].lstrip("@")
+        message_id = int(parts[-1])
+        from_chat_id = f"@{username}"
         
-        # Case 2: Telegram Channel Link (Copy Message)
-        elif url and url.startswith("https://t.me/c/"):
-            parts = url.rstrip('/').split('/')
-            from_chat_id = int("-100" + parts[-2])
-            message_id = int(parts[-1])
-            
-            # copy_message sends the file and integrates the new caption below the filename/details.
-            sent_msg = await context.bot.copy_message(
-                chat_id=chat_id, 
-                from_chat_id=from_chat_id, 
-                message_id=message_id,
-                caption=final_caption, # Custom caption added here
-                parse_mode='HTML' # <--- IMPORTANT: Changed to HTML
-            )
-            
-        # Case 3: Normal http(s) link
-        elif url and url.startswith("http"):
-             # For text links, sending message with inline keyboard is okay (using Markdown is fine here)
-             await context.bot.send_message(
-                chat_id=chat_id,
-                text=f"🎉 Found it! **{title}** is available!", # Simple text for message, buttons will carry the link
-                reply_markup=get_movie_options_keyboard(title, url), 
-                parse_mode='Markdown'
-            )
-            # Note: No 'sent_msg' for auto-delete in this text case.
-            
-        # Case 4: Fallback / Nothing valid to send
-        else:
-            await context.bot.send_message(
-                chat_id=chat_id, 
-                text=f"❌ Sorry, '{title}' found but no valid file or link is attached to it in the database.", 
-                parse_mode='Markdown'
-            )
-            
-        # 5. Schedule auto-delete (only if media was sent)
-        if sent_msg:
-            asyncio.create_task(
-                delete_messages_after_delay(context, chat_id, [sent_msg.message_id, warning_msg.message_id], 60)
-            )
+        sent_msg = await context.bot.copy_message(
+            chat_id=chat_id,
+            from_chat_id=from_chat_id,
+            message_id=message_id
+        )
+
+        # 👇 caption update same message me
+        await context.bot.edit_message_caption(
+            chat_id=chat_id,
+            message_id=sent_msg.message_id,
+            caption=caption_text,
+            parse_mode='HTML'
+        )
 
     except Exception as e:
-        logger.error(f"Error sending movie to user: {e}")
-        try:
-             await context.bot.send_message(chat_id, f"❌ Server failed to send the file for '{title}'. Please report this to Admin.", parse_mode='Markdown')
-        except:
-             pass
+        logger.error(f"Public link copy failed {url}: {e}")
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"🎬 Found: {title}\n\n{caption_text}",
+            reply_markup=get_movie_options_keyboard(title, url),
+            parse_mode='HTML'
+        )
+
+# 4️⃣ External link
+elif url and url.startswith("http"):
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=f"🎉 Found it! '{title}' is available!\n\n{caption_text}",
+        reply_markup=get_movie_options_keyboard(title, url),
+        parse_mode='HTML'
+    )
+
+# 5️⃣ Nothing valid
+else:
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=f"❌ Sorry, '{title}' found but no valid file or link in database.",
+        parse_mode='HTML'
+    )
 
 # ==================== TELEGRAM BOT HANDLERS ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
