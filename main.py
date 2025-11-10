@@ -10,7 +10,7 @@ import os
 import threading
 import asyncio
 import logging
-import random
+import random # FIX 1: Added import random
 import json
 import requests
 import signal
@@ -19,8 +19,8 @@ import re
 from bs4 import BeautifulSoup
 import telegram
 import psycopg2
-from typing import Optional # FIX: Added Optional import
-from flask import Flask, request, session, g # 'session' और 'g' को भी इम्पोर्ट करें
+from typing import Optional 
+from flask import Flask, request, session, g 
 import google.generativeai as genai
 import admin_views as admin_views_module
 import db_utils
@@ -76,8 +76,16 @@ ADMIN_USER_ID = int(os.environ.get('ADMIN_USER_ID', 0))
 GROUP_CHAT_ID = os.environ.get('GROUP_CHAT_ID')
 ADMIN_CHANNEL_ID = os.environ.get('ADMIN_CHANNEL_ID')
 
+# --- Random GIF IDs for Search Failure (Moved here for clarity) ---
+SEARCH_ERROR_GIFS = [
+    'CgACAgQAAxkBAAECz0ppEaLwgDbNfPPFl5lgtFjjmztKKgAC5wIAAmaoDVMH7bkdAqNVnDYE',
+    'CgACAgQAAxkBAAECz0hpEaLaG0MX1lzGmAInHpD-S-a-kwACFQMAAn5FbFDL4qyRIWthFDYE',
+    'CgACAgQAAxkBAAECz0xpEaPKTpy2yI1_nsG8CY40pu0o7gACrwYAAkqhRFKxZzY6q9KWWzYE'
+]
+# ----------------------------------------------
+
 # Rate limiting dictionary
-user_last_request = defaultdict(lambda: datetime.min)
+user_last_request = defaultdict(lambda: datetime.min) # FIX 2: Removed duplicate definition
 
 # ===== New / Configurable rate-limiting and fuzzy settings =====
 REQUEST_COOLDOWN_MINUTES = int(os.environ.get('REQUEST_COOLDOWN_MINUTES', '10'))  # per-user cooldown for same/similar movie
@@ -573,7 +581,7 @@ async def analyze_intent(message_text):
         if json_match:
             return json.loads(json_match.group())
         else:
-            return {"is_request": False, "content_title": None}
+            return {"is_request": false, "content_title": None}
 
     except Exception as e:
         logger.error(f"Error in AI intent analysis: {e}")
@@ -1146,8 +1154,6 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not movies_found:
             # Movie not found - store request
             user = update.effective_user
-            # Store request only if it's not a burst/similar request (handled in request_movie flow, but better safe)
-            # We don't do the full cooldown check here to let the user proceed to the inline 'Request It' button
             store_user_request(
                 user.id,
                 user.username,
@@ -1157,23 +1163,66 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 update.message.message_id
             )
 
-            await update.message.reply_text(
+            messages_to_delete = []
+
+            # --- 1. Random GIF/Animation भेजना ---
+            if SEARCH_ERROR_GIFS:
+                random_gif = random.choice(SEARCH_ERROR_GIFS)
+                try:
+                    # FIX: send_animation used to avoid 'Forwarded from' tag
+                    gif_msg = await context.bot.send_animation(
+                        chat_id=update.effective_chat.id,
+                        animation=random_gif,
+                        caption="🎬 **Movie Search Tips** 🔍", 
+                        parse_mode='Markdown'
+                    )
+                    messages_to_delete.append(gif_msg.message_id)
+                except Exception as e:
+                    logger.error(f"Failed to send random animation: {e}")
+
+            # --- 2. Request बटन भेजना ---
+            request_btn_msg = await update.message.reply_text(
                 f"😔 Sorry, '{user_message}' is not in my collection right now. Would you like to request it?",
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton("✅ Yes, Request It", callback_data=f"request_{user_message[:50]}")
                 ]])
             )
+            messages_to_delete.append(request_btn_msg.message_id)
 
+
+            # --- 3. आकर्षक Search Tip मैसेज भेजना ---
             error_msg = """
-● I could not find the file you requested 😕
+Mᴏᴠɪᴇ ᴋɪ sᴘᴇʟʟɪɴɢ Gᴏᴏɢʟᴇ ᴘᴀʀ sᴇᴀʀᴄʜ ᴋᴀʀᴋᴇ, ᴄᴏᴘʏ ᴋᴀʀᴇ, ᴜsᴋᴇ ʙᴀᴀᴅ ʏᴀʜᴀ́ ᴛʏᴘᴇ/PAST ᴋᴀʀᴇ́. ✔️
 
-● कृपया फिल्म का सही नाम लिखें..
+Bᴀs ᴍᴏᴠɪᴇ ᴋᴀ ɴᴀᴍᴇ + ʏᴇᴀʀ (ᴏʀ Sᴇʀɪᴇs Sᴇᴀsᴏɴ/Eᴘɪsᴏᴅᴇ) ʟɪᴋʜᴇ́, ᴜsᴋᴇ ᴀᴀɢᴇ ᴘɪᴄʜʜᴇ ᴋᴜᴄʜʜ ʙʜɪ ɴᴀ ʟɪᴋʜᴇ́. ❌
 
-📝 Example:
-👉 Kalki 2898 AD
-👉 Thamma
+---
+**📝 Example:**
+**Sᴀʜɪ ʜᴀɪ! 👇**
+👉 `KGF 2` 
+👉 `Asur S01 E03`
+
+**Gᴀʟᴀᴛ ʜᴀɪ! 🙅**
+❌ `KGF 2 Movie`
+❌ `Asur Season 3 Download`
+---
+
+**Dᴏɴ’T ᴀᴅᴅ Eᴍᴏᴊɪs ᴀɴᴅ Sʏᴍʙᴏʟs ɪɴ Mᴏᴠɪᴇ Nᴀᴍᴇs!** ⚠️
 """
-            await update.message.reply_text(error_msg)
+            # Search Tips टेक्स्ट मैसेज
+            tip_msg = await update.message.reply_text(error_msg, parse_mode='Markdown')
+            messages_to_delete.append(tip_msg.message_id)
+
+            # --- 4. Auto-Delete Task शुरू करना (सभी मैसेज) ---
+            if messages_to_delete:
+                asyncio.create_task(
+                    delete_messages_after_delay(
+                        context,
+                        update.effective_chat.id,
+                        messages_to_delete,
+                        60 # 60 seconds delay for deletion
+                    )
+                )
 
         elif len(movies_found) == 1:
             movie_id, title, url, file_id = movies_found[0]
