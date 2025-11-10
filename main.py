@@ -849,157 +849,239 @@ def create_movie_selection_keyboard(movies, page=0, movies_per_page=5):
     return InlineKeyboardMarkup(keyboard)
 
 # ==================== HELPER FUNCTION (FIXED) ====================
-async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int, title: str, url: Optional[str] = None, file_id: Optional[str] = None):
-    """
-    Sends the movie file/link to the user with a warning and caption.
-    Note: The existing movie_title variable in the calling function often equals 'title', 
-    but we use 'title' or 'movie_id' if available for better data fetch/caching if needed.
-    """
-    chat_id = update.effective_chat.id
+# main.py
+
+async def get_quality_keyboard(movie_id, qualities):
+    """Generates an inline keyboard for selecting quality."""
+    keyboard = []
     
-    # ------------------- DATA FALLBACK (Original logic retained) -------------------
+    # qualities list will be like: [('1080p', 'url/file_id'), ('720p', 'url/file_id')]
+    for quality in qualities:
+        # Create a callback data: 'select_quality:<movie_id>:<quality>'
+        callback_data = f"select_quality:{movie_id}:{quality[0]}"
+        keyboard.append([InlineKeyboardButton(quality[0], callback_data=callback_data)])
+    
+    # Add a close button
+    keyboard.append([InlineKeyboardButton("❌ Close", callback_data="close_message")])
+    
+    return InlineKeyboardMarkup(keyboard)
+
+async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id, title, url, file_id):
+    """Sends movie or presents quality options if multiple available."""
+    
+    if update.callback_query:
+        chat_id = update.callback_query.message.chat.id
+        user_name = update.callback_query.from_user.first_name
+    else:
+        chat_id = update.effective_chat.id
+        user_name = update.effective_user.first_name
+
+    # 1. Check for multiple qualities in movie_files
+    qualities_available = []
+    
     try:
-        # Try fallback from movie_files if needed (only if url and file_id are missing from the movies table entry)
-        if not url and not file_id and movie_id:
+        if movie_id:
             conn = get_db_connection()
             if conn:
                 cur = conn.cursor()
-                # Assuming you have the movie_files table with columns: url, file_id, quality
-                cur.execute("""
-                    SELECT url, file_id, quality
+                query = """
+                    SELECT quality
                     FROM movie_files
-                    WHERE movie_id = %s
-                    ORDER BY CASE quality
-                        WHEN '2160p' THEN 1
-                        WHEN '1080p' THEN 2
-                        WHEN '720p'  THEN 3
-                        WHEN '360p'  THEN 4
-                        ELSE 5
-                    END
-                    LIMIT 1
-                """, (movie_id,))
-                row = cur.fetchone()
+                    WHERE movie_id = %s AND (url IS NOT NULL OR file_id IS NOT NULL)
+                    ORDER BY 
+                        CASE quality
+                            WHEN '2160p' THEN 1
+                            WHEN '1080p' THEN 2
+                            WHEN '720p'  THEN 3
+                            WHEN '360p'  THEN 4
+                            ELSE 5
+                        END
+                """
+                cur.execute(query, (movie_id,))
+                # Fetch all distinct qualities
+                qualities_available = [row[0] for row in cur.fetchall()]
                 cur.close()
                 conn.close()
-                if row:
-                    # Update the local variables if better data found
-                    url_from_files, file_id_from_files, _ = row
-                    file_id = file_id_from_files or file_id
-                    url = url_from_files or url
     except Exception as e:
-        logger.error(f"movie_files fallback error (movie_id={movie_id}): {e}")
-    # ------------------------------------------------------------------------------
+        logger.error(f"Error checking qualities in movie_files: {e}")
 
-    try:
-        # Initial warning (auto-delete with media if media sent)
-        warning_msg = await context.bot.send_message(
+    
+    # --- LOGIC BRANCHING ---
+
+    # A) If multiple qualities are found, show buttons
+    if len(qualities_available) > 1:
+        keyboard = await get_quality_keyboard(movie_id, qualities_available)
+        await context.bot.send_message(
             chat_id=chat_id,
-            text="⚠️ ❌👉This file automatically❗️deletes after 1 minute❗️so please forward it to another chat👈❌\n\nJoin » @FilmfyBox",
+            text=f"🎬 **{title}** is available in multiple qualities. Please select your preferred resolution:",
+            reply_markup=keyboard,
             parse_mode='Markdown'
         )
-
-        sent_msg = None
-        name = title  # Use 'title' from the function arguments for the caption
-        caption_text = (
-            f"🎬 <b>{name}</b>\n\n"
-            "🔗 <b>JOIN »</b> <a href='http://t.me/filmfybox'>FilmfyBox</a>\n\n"
-            "🔹 <b>Please drop the movie name, and I’ll find it for you as soon as possible. 🎬✨👇</b>\n"
-            "🔹 <b><a href='https://t.me/Filmfybox002'>FlimfyBox Chat</a></b>"
-        )
-
-        # 1) file_id -> caption attached under media
-        if file_id:
-            sent_msg = await context.bot.send_document(
-                chat_id=chat_id,
-                document=file_id,
-                caption=caption_text,
-                parse_mode='HTML'
-            )
-
-        # 2) Private channel message link: t.me/c/<chat_id>/<msg_id>
-        elif url and url.startswith("https://t.me/c/"):
-            try:
-                parts = url.rstrip('/').split('/')
-                from_chat_id = int("-100" + parts[-2])
-                message_id = int(parts[-1])
-                # Attach caption directly via copy_message
-                sent_msg = await context.bot.copy_message(
-                    chat_id=chat_id,
-                    from_chat_id=from_chat_id,
-                    message_id=message_id,
-                    caption=caption_text,
-                    parse_mode='HTML'
-                )
-            except Exception as e:
-                logger.error(f"Copy private link failed {url}: {e}")
-                # Fallback to sending a message with inline keyboard if copy fails
-                sent_msg = await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=f"🎬 Found: {name}\n\n{caption_text}",
-                    reply_markup=get_movie_options_keyboard(name, url),
-                    parse_mode='HTML'
-                )
+        return # Stop execution here, the file will be sent later via callback
         
-        # 3) Public channel message link: https://t.me/Username/123
-        elif url and url.startswith("https://t.me/") and "/c/" not in url:
-            try:
-                parts = url.rstrip('/').split('/')
-                username = parts[-2].lstrip("@")
-                message_id = int(parts[-1])
-                from_chat_id = f"@{username}"
-                sent_msg = await context.bot.copy_message(
-                    chat_id=chat_id,
-                    from_chat_id=from_chat_id,
-                    message_id=message_id,
-                    caption=caption_text,
-                    parse_mode='HTML'
-                )
-            except Exception as e:
-                logger.error(f"Copy public link failed {url}: {e}")
-                # Fallback to sending a message with inline keyboard if copy fails
-                sent_msg = await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=f"🎬 Found: {name}\n\n{caption_text}",
-                    reply_markup=get_movie_options_keyboard(name, url),
-                    parse_mode='HTML'
-                )
-
-        # 4) Normal external link
-        elif url and url.startswith("http"):
-            sent_msg = await context.bot.send_message( # FIX: Assign sent_msg for auto-delete
-                chat_id=chat_id,
-                text=f"🎉 Found it! '{name}' is available!\n\n{caption_text}",
-                reply_markup=get_movie_options_keyboard(name, url),
-                parse_mode='HTML'
-            )
-
-        # 5) Nothing valid to send
-        else:
-            sent_msg = await context.bot.send_message( # FIX: Assign sent_msg for auto-delete
-                chat_id=chat_id,
-                text=f"❌ Sorry, '{name}' found but no valid file or link is attached in the database."
-            )
-
-        # Auto-delete for media + warning
-        # FIX: Check if sent_msg is valid before scheduling deletion
-        if sent_msg: 
-            message_ids_to_delete = [warning_msg.message_id, sent_msg.message_id] 
+    # B) If only one quality is found OR old movies.url/file_id is present, send file immediately (Fallback)
+    
+    # --- IF ONLY ONE OPTION OR OLD DATA IS USED, PROCEED WITH IMMEDIATE SENDING (Fallback Logic from previous steps) ---
+    
+    # --- IF Fallback is needed, get the best quality data again (if only one option was found)
+    if len(qualities_available) == 1 and not url and not file_id:
+        try:
+            conn = get_db_connection()
+            if conn:
+                cur = conn.cursor()
+                # Select the single best quality link/file_id
+                query = """
+                    SELECT url, file_id 
+                    FROM movie_files
+                    WHERE movie_id = %s AND quality = %s
+                    LIMIT 1
+                """
+                cur.execute(query, (movie_id, qualities_available[0]))
+                row = cur.fetchone()
+                if row:
+                    url, file_id = row[0], row[1]
+                cur.close()
+                conn.close()
+        except Exception as e:
+            logger.error(f"Error fetching single quality file: {e}")
             
-            asyncio.create_task(
-                delete_messages_after_delay(
-                    context,
-                    chat_id,
-                    message_ids_to_delete,
-                    60 # 60 seconds delay
-                )
-            )
+    # Now proceed with the actual file sending logic (use the code from your previous working version)
+    
+    # --- PASTE THE REST OF YOUR WORKING FILE-SENDING LOGIC HERE (Case 1, Case 2, Case 3, Case 4) ---
+    # Since I don't have your full working code, I'll provide the essential part:
 
+    sent_msg = None # Initialize sent_msg for the rest of the logic
+    
+    # 2. FINAL Promotional Caption (HTML mode for strong formatting and links)
+    # ... (Your existing caption generation logic here) ...
+    promo_caption_template = (
+        "\n\n🔗<b>JOIN » <a href='http://t.me/filmfybox'>FlimfyBox</a></b>\n\n"
+        "🔹 Please drop the movie name, and I’ll find it for you as soon as possible. 🎬✨👇\n"
+        "🔹 <a href='https://t.me/Filmfybox002'>FlimfyBox Chat</a>"
+    )
+    final_caption = f"🎬 <b>{title}</b>{promo_caption_template}"
+    
+    # 3. Warning message (must be sent first, using HTML parse_mode)
+    warning_msg = await context.bot.send_message(
+        chat_id=chat_id,
+        text="⚠️ ❌👉This file automatically❗️delete after 1 minute❗️so please forward in another chat👈❌\n\n<b>Join » <a href='http://t.me/filmfybox'>FlimfyBox</a></b>",
+        parse_mode='HTML'
+    )
+    # main.py
+
+async def send_movie_by_quality(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Callback handler to send file after user selects quality button."""
+    
+    query = update.callback_query
+    await query.answer() # Acknowledge the button click
+
+    # Get data: 'select_quality:<movie_id>:<quality>'
+    data = query.data.split(':')
+    movie_id = int(data[1])
+    selected_quality = data[2]
+    
+    # 1. Fetch the required link/file_id for the selected quality
+    url, file_id, title = None, None, "Unknown Movie"
+    
+    try:
+        conn = get_db_connection()
+        if conn:
+            cur = conn.cursor()
+            # First, get the movie title
+            cur.execute("SELECT title FROM movies WHERE id = %s", (movie_id,))
+            title = cur.fetchone()[0]
+            
+            # Then, get the specific file/link
+            query_file = """
+                SELECT url, file_id 
+                FROM movie_files
+                WHERE movie_id = %s AND quality = %s
+                LIMIT 1
+            """
+            cur.execute(query_file, (movie_id, selected_quality))
+            row = cur.fetchone()
+            if row:
+                url, file_id = row[0], row[1]
+                
+            cur.close()
+            conn.close()
+            
+    except Exception as e:
+        logger.error(f"Error fetching selected quality file: {e}")
+        await context.bot.send_message(query.message.chat_id, "❌ Error retrieving selected file details.", parse_mode='Markdown')
+        return
+
+    # 2. Delete the message with buttons (optional, but cleaner)
+    try:
+        await context.bot.delete_message(chat_id=query.message.chat_id, message_id=query.message.message_id)
+    except Exception:
+        pass
+
+    # 3. Call the main sending function (we can re-use the file-sending part logic)
+    # We call send_movie_to_user again with the specific link/file_id
+    await send_movie_to_user(
+        update=update, 
+        context=context, 
+        movie_id=movie_id, 
+        title=title, 
+        url=url, 
+        file_id=file_id
+    )
+    # --- 4. FILE SENDING LOGIC (The actual sending part) ---
+
+    # Case 1: File ID is present (most reliable)
+    if file_id:
+        sent_msg = await context.bot.send_document(
+            chat_id=chat_id, document=file_id, 
+            caption=final_caption, 
+            parse_mode='HTML'
+        )
+    
+    # Case 2: Telegram Channel Link (Copy Message)
+    elif url and url.startswith("https://t.me/c/"):
+        parts = url.rstrip('/').split('/')
+        from_chat_id = int("-100" + parts[-2])
+        message_id = int(parts[-1])
+        
+        sent_msg = await context.bot.copy_message(
+            chat_id=chat_id, 
+            from_chat_id=from_chat_id, 
+            message_id=message_id,
+            caption=final_caption, 
+            parse_mode='HTML'
+        )
+        
+    # Case 3: Normal http(s) link
+    elif url and url.startswith("http"):
+         await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"🎉 Found it! <b>{title}</b> is available!\n\n{final_caption}",
+            reply_markup=get_movie_options_keyboard(title, url), 
+            parse_mode='HTML'
+        )
+        
+    # Case 4: Nothing valid found
+    else:
+        await context.bot.send_message(
+            chat_id=chat_id, 
+            text=f"❌ Sorry, '{title}' found but no valid file or link is attached to it in the database.", 
+            parse_mode='Markdown'
+        )
+        
+    # 5. Schedule auto-delete
+    if sent_msg:
+        asyncio.create_task(
+            delete_messages_after_delay(context, chat_id, [sent_msg.message_id, warning_msg.message_id], 60)
+        )
+        
+    # ... (Your existing try/except block here) ...
     except Exception as e:
         logger.error(f"Error sending movie to user: {e}")
+        # ... (Error handling logic) ...
         try:
-            await context.bot.send_message(chat_id=chat_id, text="❌ Server failed to send file. Please report to Admin.")
-        except Exception as e2:
-            logger.error(f"Secondary send error: {e2}")
+            await context.bot.send_message(chat_id, f"❌ Server failed to send the file for '{title}'. Please report this to Admin.", parse_mode='Markdown')
+        except:
+            pass
 # ==================== TELEGRAM BOT HANDLERS ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start command handler"""
@@ -2606,8 +2688,10 @@ def main():
         logger.error(f"Database setup failed but continuing: {e}")
 
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).read_timeout(30).write_timeout(30).build()
-
-    # Conversation handler for user interaction flow
+    
+    # ----------------------------------------------------
+    # HANDLER SETUP (This block remains the same, but remove the final run_polling() from here)
+    # ----------------------------------------------------
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start)],
         states={
@@ -2620,7 +2704,6 @@ def main():
         per_chat=True,
     )
     
-    # Register callback handler FIRST to prioritize button clicks over text messages.
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(conv_handler)
 
@@ -2631,6 +2714,9 @@ def main():
     application.add_handler(CommandHandler("addalias", add_alias))
     application.add_handler(CommandHandler("aliases", list_aliases))
     application.add_handler(CommandHandler("aliasbulk", bulk_add_aliases))
+    
+    # NEW: Quality Selection Callback
+    application.add_handler(CallbackQueryHandler(send_movie_by_quality, pattern=r'^select_quality:\d+:.+$'))
 
     # Advanced notification commands
     application.add_handler(CommandHandler("notifyuser", notify_user_by_username))
@@ -2650,16 +2736,20 @@ def main():
     application.add_handler(CommandHandler("stats", get_bot_stats))
 
     application.add_error_handler(error_handler)
-
-    # Start Flask in a separate thread
+    
+    # ----------------------------------------------------
+    # FLASK AND POLLING (Corrected Sequence)
+    # ----------------------------------------------------
+    
+    # Start Flask in a separate thread (This runs the Web Admin)
     flask_thread = threading.Thread(target=run_flask)
     flask_thread.daemon = True
     flask_thread.start()
     logger.info("Flask server started in a background thread.")
 
-    # Run the bot
+    # Run the bot's polling loop (Only ONE CALL to run_polling)
     logger.info("Starting bot polling...")
-    application.run_polling()
-
+    application.run_polling() 
+    
 if __name__ == '__main__':
     main()
