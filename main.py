@@ -811,6 +811,18 @@ def get_main_keyboard():
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
 
+def get_admin_request_keyboard(user_id, movie_title):
+    """Inline keyboard for admin actions on a user request."""
+    # Note: movie_title needs to be sanitized for callback data length (max 64 bytes)
+    # We use a short version of the title and the user ID to trace the request back.
+    
+    sanitized_title = movie_title[:30] 
+    
+    keyboard = [
+        [InlineKeyboardButton("✅ FULFILL MOVIE", callback_data=f"admin_fulfill_{user_id}_{sanitized_title}")],
+        [InlineKeyboardButton("❌ IGNORE/DELETE", callback_data=f"admin_delete_{user_id}_{sanitized_title}")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
 def get_movie_options_keyboard(movie_title, url):
     """Get inline keyboard for movie options"""
     keyboard = [
@@ -1312,20 +1324,39 @@ async def request_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return REQUESTING
 
         # Send admin notification
-        group_info = f"{update.effective_chat.title} (ID: {update.effective_chat.id})" if update.effective_chat.type != "private" else None
-        await send_admin_notification(context, user, movie_title, group_info)
+        async def send_admin_notification(context, user, movie_title, group_info=None):
+    """Send notification to admin channel about a new request"""
+    if not ADMIN_CHANNEL_ID:
+        return
 
-        response = f"✅ Got it! Your request for '{movie_title}' has been sent to the admin. Thanks for helping improve our collection!"
-        await update.message.reply_text(response)
+    try:
+        user_info = f"User: {user.first_name or 'Unknown'}"
+        if user.username:
+            user_info += f" (`@{user.username}`)"
+        user_info += f" (ID: {user.id})"
 
-        await update.message.reply_text("What would you like to do next?", reply_markup=get_main_keyboard())
-        return MAIN_MENU
+        group_info_text = f"From Group: {group_info}" if group_info else "Via Private Message"
+
+        message = f"""
+🎬 **NEW MOVIE REQUEST!** 🎬
+
+**Movie:** {movie_title}
+{user_info}
+{group_info_text}
+Time: {datetime.now().strftime('%Y-%m-%d %I:%M %p')}
+        """
+        
+        # FIX: Send notification with inline keyboard
+        # NOTE: We use send_message, not reply_text, as it's a new notification in a different channel.
+        await context.bot.send_message(
+            chat_id=ADMIN_CHANNEL_ID,
+            text=message,
+            reply_markup=get_admin_request_keyboard(user.id, movie_title), # Pass user ID and title
+            parse_mode='Markdown'
+        )
 
     except Exception as e:
-        logger.error(f"Error in request movie: {e}")
-        await update.message.reply_text("Sorry, something went wrong. Please try again.")
-        return MAIN_MENU
-
+        logger.error(f"Error sending admin notification: {e}")
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle inline button callbacks - INCLUDING MOVIE SELECTION"""
     try:
@@ -1385,6 +1416,61 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode='Markdown'
             )
             
+        # --- NEW ADMIN HANDLERS ---
+        elif query.data.startswith("admin_fulfill_"):
+            # Format: 'admin_fulfill_<user_id>_<movie_title>'
+            parts = query.data.split('_', 2)
+            user_id = int(parts[1])
+            movie_title = parts[2]
+            
+            # 1. Update the request status (SET notified=TRUE)
+            conn = get_db_connection()
+            if conn:
+                cur = conn.cursor()
+                # Find movie in movies table
+                cur.execute("SELECT id, url, file_id FROM movies WHERE title = %s LIMIT 1", (movie_title,))
+                movie_data = cur.fetchone()
+                
+                if movie_data:
+                    movie_id, url, file_id = movie_data
+                    value_to_send = file_id if file_id else url
+                    
+                    # Notify the single user (optional: update ALL pending requests for this movie)
+                    num_notified = await notify_users_for_movie(context, movie_title, value_to_send)
+                    
+                    await query.edit_message_text(
+                        f"✅ FULFILLED: Movie '{movie_title}' updated and user (ID: {user_id}) notified ({num_notified} total users).", 
+                        parse_mode='Markdown'
+                    )
+                else:
+                    # Only delete request in user_requests table if fulfill is successful
+                    await query.edit_message_text(f"❌ ERROR: Movie '{movie_title}' not found in the `movies` table. Please add it first.", parse_mode='Markdown')
+                    
+                cur.close()
+                conn.close()
+            else:
+                await query.edit_message_text("❌ Database error during fulfillment.")
+                
+        elif query.data.startswith("admin_delete_"):
+            # Format: 'admin_delete_<user_id>_<movie_title>'
+            parts = query.data.split('_', 2)
+            user_id = int(parts[1])
+            movie_title = parts[2]
+            
+            # 1. Delete the specific user request from the database
+            conn = get_db_connection()
+            if conn:
+                cur = conn.cursor()
+                # Delete only the specific user's request for this exact title
+                cur.execute("DELETE FROM user_requests WHERE user_id = %s AND movie_title = %s", (user_id, movie_title))
+                conn.commit()
+                cur.close()
+                conn.close()
+                await query.edit_message_text(f"❌ DELETED: Request for '{movie_title}' from User ID {user_id} removed.", parse_mode='Markdown')
+            else:
+                await query.edit_message_text("❌ Database error during deletion.")
+                
+        # --- END NEW ADMIN HANDLERS ---
         # --- NEW BLOCK FOR QUALITY SELECTION ---
         elif query.data.startswith("quality_"):
             # Format: 'quality_<movie_id>_<quality>'
