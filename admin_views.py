@@ -53,10 +53,11 @@ def add_movie_post():
     aliases = request.form.get('aliases', '').strip()
 
     qualities = {
-        '360p': request.form.get('q_360', '').strip(),
-        '720p': request.form.get('q_720', '').strip(),
-        '1080p': request.form.get('q_1080', '').strip(),
-        '2160p': request.form.get('q_2160', '').strip()
+        'Low Quality': request.form.get('q_360', '').strip(),
+    'SD Quality': request.form.get('q_480', '').strip(),
+    'Standart Quality': request.form.get('q_720', '').strip(),
+    'HD Quality': request.form.get('q_1080', '').strip(),
+    '4K': request.form.get('q_2160', '').strip()
     }
 
     if not title:
