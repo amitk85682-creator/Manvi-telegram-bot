@@ -55,7 +55,7 @@ def add_movie_post():
     qualities = {
         'Low Quality': request.form.get('q_360', '').strip(),
     'SD Quality': request.form.get('q_480', '').strip(),
-    'Standart Quality': request.form.get('q_720', '').strip(),
+    'Standard Quality': request.form.get('q_720', '').strip(),
     'HD Quality': request.form.get('q_1080', '').strip(),
     '4K': request.form.get('q_2160', '').strip()
     }
@@ -116,11 +116,12 @@ def bulk_upload():
                         continue
                     description = (row.get('Description') or row.get('description') or '').strip()
                     qualities = {
-                        '360p': (row.get('URL_360') or row.get('url_360') or row.get('360p') or '').strip(),
-                        '720p': (row.get('URL_720') or row.get('url_720') or row.get('720p') or '').strip(),
-                        '1080p': (row.get('URL_1080') or row.get('url_1080') or row.get('1080p') or '').strip(),
-                        '2160p': (row.get('URL_2160') or row.get('url_2160') or row.get('2160p') or '').strip()
-                    }
+    'Low Quality': (row.get('URL_360') or row.get('url_360') or row.get('360p') or '').strip(),
+    'SD Quality': (row.get('URL_480') or row.get('url_480') or row.get('480p') or '').strip(),
+    'Standard Quality': (row.get('URL_720') or row.get('url_720') or row.get('720p') or '').strip(),
+    'HD Quality': (row.get('URL_1080') or row.get('url_1080') or row.get('1080p') or '').strip(),
+    '4K': (row.get('URL_2160') or row.get('url_2160') or row.get('2160p') or '').strip()
+}
                     aliases = (row.get('Aliases') or row.get('aliases') or '').strip()
 
                     # skip rows with no quality/file info
@@ -178,11 +179,12 @@ def edit_movie(movie_id):
         description = request.form.get('description', '').strip()
         aliases = request.form.get('aliases', '').strip()
         qualities = {
-            '360p': request.form.get('q_360', '').strip(),
-            '720p': request.form.get('q_720', '').strip(),
-            '1080p': request.form.get('q_1080', '').strip(),
-            '2160p': request.form.get('q_2160', '').strip()
-        }
+            'Low Quality': request.form.get('q_360', '').strip(),
+    'SD Quality': request.form.get('q_480', '').strip(),
+    'Standard Quality': request.form.get('q_720', '').strip(),
+    'HD Quality': request.form.get('q_1080', '').strip(),
+    '4K': request.form.get('q_2160', '').strip()
+}
 
         if not title:
             flash('Title is required.', 'error')
