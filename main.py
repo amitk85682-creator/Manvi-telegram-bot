@@ -881,10 +881,10 @@ def get_all_movie_qualities(movie_id):
             FROM movie_files
             WHERE movie_id = %s AND (url IS NOT NULL OR file_id IS NOT NULL)
             ORDER BY CASE quality
-                WHEN '2160p' THEN 1
-                WHEN '1080p' THEN 2
-                WHEN '720p'  THEN 3
-                WHEN '360p'  THEN 4
+                WHEN '4K' THEN 1
+                WHEN 'HD Quality' THEN 2
+                WHEN 'Standart Quality'  THEN 3
+                WHEN 'Low Quality'  THEN 4
                 ELSE 5
             END DESC
         """, (movie_id,))
