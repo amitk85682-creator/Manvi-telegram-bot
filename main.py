@@ -1160,20 +1160,51 @@ Just use the buttons below to navigate!
 async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle movie search with multiple results support"""
     try:
-        # Rate limiting
+        user_message = update.message.text.strip()
+        chat_type = update.message.chat.type
+        
+        # Rate limiting check
         if not await check_rate_limit(update.effective_user.id):
-            await update.message.reply_text("⚠️ Please wait a moment before searching again.")
+            # ग्रुप में रेट लिमिट मैसेज न भेजें तो बेहतर है (spam कम करने के लिए)
+            if chat_type == 'private':
+                await update.message.reply_text("⚠️ Please wait a moment before searching again.")
             return SEARCHING
 
-        user_message = update.message.text.strip()
-        processed_query = preprocess_query(user_message) if user_message else user_message
-        search_query = processed_query if processed_query else user_message
+        search_query = user_message # Default
+
+        # ==================================================================
+        # 🧠 GEMINI INTELLIGENCE FILTER (सिर्फ ग्रुप्स के लिए)
+        # ==================================================================
+        if chat_type in ['group', 'supergroup']:
+            # 1. अगर मैसेज बहुत छोटा है (जैसे "Hi", "Ok"), तो इग्नोर करें
+            if len(user_message) < 2:
+                return MAIN_MENU
+
+            # 2. Gemini से पूछें: क्या यह मूवी रिक्वेस्ट है?
+            intent = await analyze_intent(user_message)
+            
+            # अगर Gemini कहता है "नहीं, यह मूवी नहीं है", तो बॉट चुप रहेगा
+            if not intent.get("is_request"):
+                return MAIN_MENU # Stop here, don't reply anything
+            
+            # अगर मूवी है, तो Gemini द्वारा साफ़ किया गया नाम लें
+            if intent.get("content_title"):
+                search_query = intent["content_title"]
+        
+        else:
+            # Private Chat में हम सीधे प्री-प्रोसेसिंग का उपयोग कर सकते हैं
+            processed_query = preprocess_query(user_message) 
+            search_query = processed_query if processed_query else user_message
+        # ==================================================================
 
         # Search for MULTIPLE movies in database
         movies_found = get_movies_from_db(search_query, limit=10)
 
         if not movies_found:
-            # Movie not found - store request
+            # ग्रुप में अगर मूवी न मिले, तो क्या हमें "Sorry" बोलना चाहिए?
+            # अगर हम नहीं बोलते हैं, तो यूजर सोचेगा बॉट खराब है।
+            # इसलिए हम बोलते हैं, लेकिन वो Auto-Delete हो जाएगा।
+            
             user = update.effective_user
             store_user_request(
                 user.id,
@@ -1190,11 +1221,10 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if SEARCH_ERROR_GIFS:
                 random_gif = random.choice(SEARCH_ERROR_GIFS)
                 try:
-                    # FIX: send_animation used to avoid 'Forwarded from' tag
                     gif_msg = await context.bot.send_animation(
                         chat_id=update.effective_chat.id,
                         animation=random_gif,
-                        caption="🎬 **Movie Search Tips** 🔍",
+                        caption=f"🎬 **Result for:** `{search_query}`\n🔍 Not Found!", 
                         parse_mode='Markdown'
                     )
                     messages_to_delete.append(gif_msg.message_id)
@@ -1203,75 +1233,67 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # --- 2. Request बटन भेजना ---
             request_btn_msg = await update.message.reply_text(
-                f"😔 Sorry, '{user_message}' is not in my collection right now. Would you like to request it?",
+                f"😔 Sorry, '{search_query}' is not in my collection right now. Would you like to request it?",
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton("✅ Yes, Request It", callback_data=f"request_{user_message[:50]}")
                 ]])
             )
             messages_to_delete.append(request_btn_msg.message_id)
 
-
-            # --- 3. आकर्षक Search Tip मैसेज भेजना ---
+            # --- 3. Search Tip (Optional in groups to reduce spam) ---
+            # ग्रुप में टिप्स भेजना कभी-कभी ज्यादा हो सकता है, आप इसे हटा भी सकते हैं
             error_msg = """
-Mᴏᴠɪᴇ ᴋɪ sᴘᴇʟʟɪɴɢ Gᴏᴏɢʟᴇ ᴘᴀʀ sᴇᴀʀᴄʜ ᴋᴀʀᴋᴇ, ᴄᴏᴘʏ ᴋᴀʀᴇ, ᴜsᴋᴇ ʙᴀᴀᴅ ʏᴀʜᴀ́ ᴛʏᴘᴇ/PAST ᴋᴀʀᴇ́. ✔️
-
-Bᴀs ᴍᴏᴠɪᴇ ᴋᴀ ɴᴀᴍᴇ + ʏᴇᴀʀ (ᴏʀ Sᴇʀɪᴇs Sᴇᴀsᴏɴ/Eᴘɪsᴏᴅᴇ) ʟɪᴋʜᴇ́, ᴜsᴋᴇ ᴀᴀɢᴇ ᴘɪᴄʜʜᴇ ᴋᴜᴄʜʜ ʙʜɪ ɴᴀ ʟɪᴋʜᴇ́. ❌
-
----
-**📝 Example:**
-**Sᴀʜɪ ʜᴀɪ! 👇**
-👉 `KGF 2`
-👉 `Asur S01 E03`
-
-**Gᴀʟᴀᴛ ʜᴀɪ! 🙅**
-❌ `KGF 2 Movie`
-❌ `Asur Season 3 Download`
----
-
-**Dᴏɴ’T ᴀᴅᴅ Eᴍᴏᴊɪs ᴀɴᴅ Sʏᴍʙᴏʟs ɪɴ Mᴏᴠɪᴇ Nᴀᴍᴇs!** ⚠️
+⚠️ **Search Tips:**
+Spelling Google से कॉपी करें। 
+एक्स्ट्रा इमोजी न लगाएं।
 """
-            # Search Tips टेक्स्ट मैसेज
             tip_msg = await update.message.reply_text(error_msg, parse_mode='Markdown')
             messages_to_delete.append(tip_msg.message_id)
 
-            # --- 4. Auto-Delete Task शुरू करना (सभी मैसेज) ---
+            # --- 4. Auto-Delete Task ---
             if messages_to_delete:
                 asyncio.create_task(
                     delete_messages_after_delay(
                         context,
                         update.effective_chat.id,
                         messages_to_delete,
-                        60 # 60 seconds delay for deletion
+                        60 # 60 seconds delay
                     )
                 )
 
         elif len(movies_found) == 1:
             movie_id, title, url, file_id = movies_found[0]
-            # When only one result, check for multi-quality files within send_movie_to_user
             await send_movie_to_user(update, context, movie_id, title, url, file_id)
 
         else:
-            # Multiple movies found - show selection menu
+            # Multiple movies found
             context.user_data['search_results'] = movies_found
-            context.user_data['search_query'] = user_message
+            context.user_data['search_query'] = search_query # Use the cleaner search query
 
-            selection_text = f"🎬 **Found {len(movies_found)} movies matching '{user_message}'**\n\nPlease select the movie you want:"
+            selection_text = f"🎬 **Found {len(movies_found)} movies matching '{search_query}'**\n\nPlease select the movie you want:"
             keyboard = create_movie_selection_keyboard(movies_found, page=0)
 
-            await update.message.reply_text(
+            # In groups, sending replying to the specific user message is better
+            msg = await update.message.reply_text(
                 selection_text,
                 reply_markup=keyboard,
                 parse_mode='Markdown'
             )
+            # Optional: Auto-delete selection menu in groups after 2 mins to keep chat clean?
+            # asyncio.create_task(delete_messages_after_delay(context, update.effective_chat.id, [msg.message_id], 120))
 
-        await update.message.reply_text("Ab Aap Aage kya karana chaahenge?", reply_markup=get_main_keyboard())
+        # ग्रुप में "Ab aap aage kya..." बार-बार भेजना सही नहीं है, इसे हटा दिया गया है।
+        if chat_type == 'private':
+            await update.message.reply_text("Ab Aap Aage kya karana chaahenge?", reply_markup=get_main_keyboard())
+            
         return MAIN_MENU
 
     except Exception as e:
         logger.error(f"Error in search movies: {e}")
-        await update.message.reply_text("Sorry, something went wrong. Please try again.")
+        # ग्रुप में एरर मैसेज स्पैम न करें
+        if update.message.chat.type == 'private':
+            await update.message.reply_text("Sorry, something went wrong. Please try again.")
         return MAIN_MENU
-
 # ==================== REQUEST MOVIE (updated) ====================
 async def request_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle movie requests with duplicate detection, fuzzy matching and cooldowns."""
