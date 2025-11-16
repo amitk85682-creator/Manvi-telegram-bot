@@ -1071,48 +1071,8 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
 # ==================== TELEGRAM BOT HANDLERS ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start command handler, now with deep linking and robust messaging."""
-    chat_id = update.effective_chat.id
+    """Start command handler"""
     try:
-        # --- DEEP LINKING LOGIC FOR GETTING MOVIES ---
-        if context.args and len(context.args) > 0:
-            payload = context.args[0]
-            if payload.startswith("getmovie_"):
-                try:
-                    movie_id = int(payload.split('_')[1])
-                    
-                    # Fetch movie details from the database
-                    conn = get_db_connection()
-                    if not conn:
-                        await context.bot.send_message(chat_id=chat_id, text="Sorry, I couldn't connect to the database to get your movie.")
-                        return MAIN_MENU
-                        
-                    cur = conn.cursor()
-                    cur.execute("SELECT id, title, url, file_id FROM movies WHERE id = %s", (movie_id,))
-                    movie = cur.fetchone()
-                    cur.close()
-                    conn.close()
-
-                    if movie:
-                        movie_id, title, url, file_id = movie
-                        # Use the existing function to send the movie to the user in this private chat
-                        await send_movie_to_user(update, context, movie_id, title, url, file_id)
-                    else:
-                        await context.bot.send_message(chat_id=chat_id, text="Sorry, I couldn't find the movie associated with that link. It might have been removed.")
-                    
-                    # After handling the deep link, show the main menu
-                    await context.bot.send_message(chat_id=chat_id, text="Here is your movie! What would you like to do next?", reply_markup=get_main_keyboard())
-                    return MAIN_MENU
-
-                except (ValueError, IndexError) as e:
-                    logger.error(f"Error processing deep link payload '{payload}': {e}")
-                    # Fall through to the normal welcome message if payload is invalid
-                except Exception as e:
-                    logger.error(f"A general error occurred processing deep link for movie_id: {e}")
-                    await context.bot.send_message(chat_id=chat_id, text="An error occurred while fetching your movie. Please try searching again.")
-                    # Fall through to the normal welcome message
-
-        # --- ORIGINAL WELCOME MESSAGE (if no valid deep link) ---
         welcome_text = """
 📨 Sᴇɴᴅ Mᴏᴠɪᴇ Oʀ Sᴇʀɪᴇs Nᴀᴍᴇ ᴀɴᴅ Yᴇᴀʀ Aꜱ Pᴇʀ Gᴏᴏɢʟᴇ Sᴘᴇʟʟɪɴɢ..!! 👍
 
@@ -1128,17 +1088,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 ⚠️ ᴅᴏɴ'ᴛ ᴀᴅᴅ ᴇᴍᴏᴊɪꜱ ᴀɴᴅ ꜱʏᴍʙᴏʟꜱ ɪɴ ᴍᴏᴠɪᴇ ɴᴀᴍᴇ, ᴜꜱᴇ ʟᴇᴛᴛᴇʀꜱ ᴏɴʟʏ..!! ❌
 """
-        await context.bot.send_message(chat_id=chat_id, text=welcome_text, reply_markup=get_main_keyboard())
+        await update.message.reply_text(welcome_text, reply_markup=get_main_keyboard())
         return MAIN_MENU
     except Exception as e:
         logger.error(f"Error in start command: {e}")
-        # Send a generic error message if something unexpected happens
-        try:
-            await context.bot.send_message(chat_id=chat_id, text="Oops! Something went wrong. Please try starting me again.", reply_markup=get_main_keyboard())
-        except Exception as e2:
-            logger.error(f"Failed to send error message in start handler: {e2}")
-        return MAIN_MENU
-
 
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle main menu options"""
@@ -1205,54 +1158,80 @@ Just use the buttons below to navigate!
         return MAIN_MENU
 
 async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle movie search with different behavior for private chats and groups."""
+    """Handle movie search with multiple results support"""
     try:
         user_message = update.message.text.strip()
         chat_type = update.message.chat.type
-        bot_username = (await context.bot.get_me()).username
-
+        
         # Rate limiting check
         if not await check_rate_limit(update.effective_user.id):
+            # ग्रुप में रेट लिमिट मैसेज न भेजें तो बेहतर है (spam कम करने के लिए)
             if chat_type == 'private':
                 await update.message.reply_text("⚠️ Please wait a moment before searching again.")
             return SEARCHING
 
-        search_query = user_message
+        search_query = user_message # Default
 
-        # AI-based intent filter for groups
+        # ==================================================================
+        # 🧠 GEMINI INTELLIGENCE FILTER (सिर्फ ग्रुप्स के लिए)
+        # ==================================================================
         if chat_type in ['group', 'supergroup']:
+            # 1. अगर मैसेज बहुत छोटा है (जैसे "Hi", "Ok"), तो इग्नोर करें
             if len(user_message) < 2:
                 return MAIN_MENU
+
+            # 2. Gemini से पूछें: क्या यह मूवी रिक्वेस्ट है?
             intent = await analyze_intent(user_message)
+            
+            # अगर Gemini कहता है "नहीं, यह मूवी नहीं है", तो बॉट चुप रहेगा
             if not intent.get("is_request"):
-                return MAIN_MENU
+                return MAIN_MENU # Stop here, don't reply anything
+            
+            # अगर मूवी है, तो Gemini द्वारा साफ़ किया गया नाम लें
             if intent.get("content_title"):
                 search_query = intent["content_title"]
+        
         else:
-            processed_query = preprocess_query(user_message)
+            # Private Chat में हम सीधे प्री-प्रोसेसिंग का उपयोग कर सकते हैं
+            processed_query = preprocess_query(user_message) 
             search_query = processed_query if processed_query else user_message
+        # ==================================================================
 
+        # Search for MULTIPLE movies in database
         movies_found = get_movies_from_db(search_query, limit=10)
 
-        # --- MOVIE NOT FOUND ---
         if not movies_found:
+            # ग्रुप में अगर मूवी न मिले, तो क्या हमें "Sorry" बोलना चाहिए?
+            # अगर हम नहीं बोलते हैं, तो यूजर सोचेगा बॉट खराब है।
+            # इसलिए हम बोलते हैं, लेकिन वो Auto-Delete हो जाएगा।
+            
             user = update.effective_user
             store_user_request(
-                user.id, user.username, user.first_name, user_message,
-                update.effective_chat.id if chat_type != "private" else None,
+                user.id,
+                user.username,
+                user.first_name,
+                user_message,
+                update.effective_chat.id if update.effective_chat.type != "private" else None,
                 update.message.message_id
             )
+
             messages_to_delete = []
+
+            # --- 1. Random GIF/Animation भेजना ---
             if SEARCH_ERROR_GIFS:
                 random_gif = random.choice(SEARCH_ERROR_GIFS)
                 try:
                     gif_msg = await context.bot.send_animation(
-                        chat_id=update.effective_chat.id, animation=random_gif,
-                        caption=f"🎬 **Result for:** `{search_query}`\n🔍 Not Found!", parse_mode='Markdown'
+                        chat_id=update.effective_chat.id,
+                        animation=random_gif,
+                        caption=f"🎬 **Result for:** `{search_query}`\n🔍 Not Found!", 
+                        parse_mode='Markdown'
                     )
                     messages_to_delete.append(gif_msg.message_id)
                 except Exception as e:
                     logger.error(f"Failed to send random animation: {e}")
+
+            # --- 2. Request बटन भेजना ---
             request_btn_msg = await update.message.reply_text(
                 f"😔 Sorry, '{search_query}' is not in my collection right now. Would you like to request it?",
                 reply_markup=InlineKeyboardMarkup([[
@@ -1260,52 +1239,50 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ]])
             )
             messages_to_delete.append(request_btn_msg.message_id)
-            error_msg = "⚠️ **Search Tips:**\nSpelling Google से कॉपी करें। \nएक्स्ट्रा इमोजी न लगाएं।"
+
+            # --- 3. Search Tip (Optional in groups to reduce spam) ---
+            # ग्रुप में टिप्स भेजना कभी-कभी ज्यादा हो सकता है, आप इसे हटा भी सकते हैं
+            error_msg = """
+⚠️ **Search Tips:**
+Spelling Google से कॉपी करें। 
+एक्स्ट्रा इमोजी न लगाएं।
+"""
             tip_msg = await update.message.reply_text(error_msg, parse_mode='Markdown')
             messages_to_delete.append(tip_msg.message_id)
-            if messages_to_delete:
-                asyncio.create_task(delete_messages_after_delay(context, update.effective_chat.id, messages_to_delete, 60))
 
-        # --- SINGLE MOVIE FOUND ---
+            # --- 4. Auto-Delete Task ---
+            if messages_to_delete:
+                asyncio.create_task(
+                    delete_messages_after_delay(
+                        context,
+                        update.effective_chat.id,
+                        messages_to_delete,
+                        60 # 60 seconds delay
+                    )
+                )
+
         elif len(movies_found) == 1:
             movie_id, title, url, file_id = movies_found[0]
-            if chat_type in ['group', 'supergroup']:
-                deep_link_url = f"https://t.me/{bot_username}?start=getmovie_{movie_id}"
-                keyboard = [[InlineKeyboardButton(f"🎬 Get '{title}' in PM", url=deep_link_url)]]
-                await update.message.reply_text(
-                    f"✅ Found it! Click the button below to get **{title}** in a private message.",
-                    reply_markup=InlineKeyboardMarkup(keyboard),
-                    parse_mode='Markdown'
-                )
-            else: # Private chat
-                await send_movie_to_user(update, context, movie_id, title, url, file_id)
+            await send_movie_to_user(update, context, movie_id, title, url, file_id)
 
-        # --- MULTIPLE MOVIES FOUND ---
         else:
-            if chat_type in ['group', 'supergroup']:
-                keyboard = []
-                response_text = f"🎬 **Found {len(movies_found)} movies matching '{search_query}'**\n\nClick a button to get the movie in a private message:"
-                for movie in movies_found:
-                    movie_id, title, _, _ = movie
-                    deep_link_url = f"https://t.me/{bot_username}?start=getmovie_{movie_id}"
-                    button_text = title if len(title) <= 40 else title[:37] + "..."
-                    keyboard.append([InlineKeyboardButton(f"▶️ {button_text}", url=deep_link_url)])
-                await update.message.reply_text(
-                    response_text,
-                    reply_markup=InlineKeyboardMarkup(keyboard),
-                    parse_mode='Markdown'
-                )
-            else: # Private chat
-                context.user_data['search_results'] = movies_found
-                context.user_data['search_query'] = search_query
-                selection_text = f"🎬 **Found {len(movies_found)} movies matching '{search_query}'**\n\nPlease select the movie you want:"
-                keyboard = create_movie_selection_keyboard(movies_found, page=0)
-                await update.message.reply_text(
-                    selection_text,
-                    reply_markup=keyboard,
-                    parse_mode='Markdown'
-                )
+            # Multiple movies found
+            context.user_data['search_results'] = movies_found
+            context.user_data['search_query'] = search_query # Use the cleaner search query
 
+            selection_text = f"🎬 **Found {len(movies_found)} movies matching '{search_query}'**\n\nPlease select the movie you want:"
+            keyboard = create_movie_selection_keyboard(movies_found, page=0)
+
+            # In groups, sending replying to the specific user message is better
+            msg = await update.message.reply_text(
+                selection_text,
+                reply_markup=keyboard,
+                parse_mode='Markdown'
+            )
+            # Optional: Auto-delete selection menu in groups after 2 mins to keep chat clean?
+            # asyncio.create_task(delete_messages_after_delay(context, update.effective_chat.id, [msg.message_id], 120))
+
+        # ग्रुप में "Ab aap aage kya..." बार-बार भेजना सही नहीं है, इसे हटा दिया गया है।
         if chat_type == 'private':
             await update.message.reply_text("Ab Aap Aage kya karana chaahenge?", reply_markup=get_main_keyboard())
             
@@ -1313,6 +1290,7 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         logger.error(f"Error in search movies: {e}")
+        # ग्रुप में एरर मैसेज स्पैम न करें
         if update.message.chat.type == 'private':
             await update.message.reply_text("Sorry, something went wrong. Please try again.")
         return MAIN_MENU
