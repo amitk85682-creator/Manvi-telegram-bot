@@ -1071,7 +1071,8 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
 # ==================== TELEGRAM BOT HANDLERS ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start command handler, now with deep linking support."""
+    """Start command handler, now with deep linking and robust messaging."""
+    chat_id = update.effective_chat.id
     try:
         # --- DEEP LINKING LOGIC FOR GETTING MOVIES ---
         if context.args and len(context.args) > 0:
@@ -1083,7 +1084,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     # Fetch movie details from the database
                     conn = get_db_connection()
                     if not conn:
-                        await update.message.reply_text("Sorry, I couldn't connect to the database to get your movie.")
+                        await context.bot.send_message(chat_id=chat_id, text="Sorry, I couldn't connect to the database to get your movie.")
                         return MAIN_MENU
                         
                     cur = conn.cursor()
@@ -1097,10 +1098,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         # Use the existing function to send the movie to the user in this private chat
                         await send_movie_to_user(update, context, movie_id, title, url, file_id)
                     else:
-                        await update.message.reply_text("Sorry, I couldn't find the movie associated with that link. It might have been removed.")
+                        await context.bot.send_message(chat_id=chat_id, text="Sorry, I couldn't find the movie associated with that link. It might have been removed.")
                     
                     # After handling the deep link, show the main menu
-                    await update.message.reply_text("Here is your movie! What would you like to do next?", reply_markup=get_main_keyboard())
+                    await context.bot.send_message(chat_id=chat_id, text="Here is your movie! What would you like to do next?", reply_markup=get_main_keyboard())
                     return MAIN_MENU
 
                 except (ValueError, IndexError) as e:
@@ -1108,7 +1109,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     # Fall through to the normal welcome message if payload is invalid
                 except Exception as e:
                     logger.error(f"A general error occurred processing deep link for movie_id: {e}")
-                    await update.message.reply_text("An error occurred while fetching your movie. Please try searching again.")
+                    await context.bot.send_message(chat_id=chat_id, text="An error occurred while fetching your movie. Please try searching again.")
                     # Fall through to the normal welcome message
 
         # --- ORIGINAL WELCOME MESSAGE (if no valid deep link) ---
@@ -1127,10 +1128,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 ⚠️ ᴅᴏɴ'ᴛ ᴀᴅᴅ ᴇᴍᴏᴊɪꜱ ᴀɴᴅ ꜱʏᴍʙᴏʟꜱ ɪɴ ᴍᴏᴠɪᴇ ɴᴀᴍᴇ, ᴜꜱᴇ ʟᴇᴛᴛᴇʀꜱ ᴏɴʟʏ..!! ❌
 """
-        await update.message.reply_text(welcome_text, reply_markup=get_main_keyboard())
+        await context.bot.send_message(chat_id=chat_id, text=welcome_text, reply_markup=get_main_keyboard())
         return MAIN_MENU
     except Exception as e:
         logger.error(f"Error in start command: {e}")
+        # Send a generic error message if something unexpected happens
+        try:
+            await context.bot.send_message(chat_id=chat_id, text="Oops! Something went wrong. Please try starting me again.", reply_markup=get_main_keyboard())
+        except Exception as e2:
+            logger.error(f"Failed to send error message in start handler: {e2}")
+        return MAIN_MENU
 
 
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
