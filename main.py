@@ -1050,17 +1050,33 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return REQUESTING
 
         elif query == '📊 My Stats':
-            user_id = update.effective_user.id
-            conn = None
-            try:
-                conn = get_db_connection()
-                if conn:
-                    cur = conn.cursor()
-                    cur.execute("SELECT COUNT(*) FROM user_requests WHERE user_id = %s", (user_id,))
-request_count = cur.fetchone()  #  add करें
+    user_id = update.effective_user.id
+    conn = None
 
-cur.execute("SELECT COUNT(*) FROM user_requests WHERE user_id = %s AND notified = TRUE", (user_id,))
-fulfilled_count = cur.fetchone()  #  add करें
+    try:
+        conn = get_db_connection()
+        if conn:
+            cur = conn.cursor()
+
+            # Total requests
+            cur.execute("SELECT COUNT(*) FROM user_requests WHERE user_id = %s", (user_id,))
+            request_count = cur.fetchone()
+
+            # Fulfilled requests
+            cur.execute(
+                "SELECT COUNT(*) FROM user_requests WHERE user_id = %s AND notified = TRUE",
+                (user_id,)
+            )
+            fulfilled_count = cur.fetchone()
+
+    except Exception as e:
+        logger.error(f"DB Error in My Stats: {e}")
+        request_count = (0,)
+        fulfilled_count = (0,)
+
+    finally:
+        if conn:
+            conn.close()
 
 stats_text = f"""
 📊 Your Stats:
