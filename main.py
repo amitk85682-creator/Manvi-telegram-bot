@@ -2694,11 +2694,17 @@ async def list_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def get_bot_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Get comprehensive bot statistics"""
+    
+    # 1. Admin Check
     if update.effective_user.id != ADMIN_USER_ID:
         await update.message.reply_text("⛔ Admin only command.")
         return
 
+    conn = None # Initialize conn to handle cleanup in finally block
+    cur = None  # Initialize cur to handle cleanup in finally block
+
     try:
+        # 2. Database Connection
         conn = get_db_connection()
         if not conn:
             await update.message.reply_text("❌ Database connection failed.")
@@ -2706,25 +2712,27 @@ async def get_bot_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         cur = conn.cursor()
 
+        # 3. SQL Queries (Fetching Data)
+        
         # Total movies
         cur.execute("SELECT COUNT(*) FROM movies")
-        total_movies = cur.fetchone()
-
+        total_movies = cur.fetchone()[0] # Fetch the single count value
+        
         # Total unique users
         cur.execute("SELECT COUNT(DISTINCT user_id) FROM user_requests")
-        total_users = cur.fetchone()
+        total_users = cur.fetchone()[0] # Fetch the single count value
 
         # Total requests
         cur.execute("SELECT COUNT(*) FROM user_requests")
-        total_requests = cur.fetchone()
+        total_requests = cur.fetchone()[0] # Fetch the single count value
 
         # Fulfilled requests
         cur.execute("SELECT COUNT(*) FROM user_requests WHERE notified = TRUE")
-        fulfilled = cur.fetchone()
+        fulfilled = cur.fetchone()[0] # Fetch the single count value
 
         # Today's requests
         cur.execute("SELECT COUNT(*) FROM user_requests WHERE DATE(requested_at) = CURRENT_DATE")
-        today_requests = cur.fetchone()
+        today_requests = cur.fetchone()[0] # Fetch the single count value
 
         # Top users
         cur.execute("""
@@ -2736,48 +2744,49 @@ async def get_bot_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """)
         top_users = cur.fetchall()
 
-        fulfillment_rate = (fulfilled[0] / total_requests[0] * 100) if total_requests[0] > 0 else 0
+        # 4. Calculation
+        fulfillment_rate = (fulfilled / total_requests * 100) if total_requests > 0 else 0
 
-        stats_text = f"⭐ Bot Stats Ready!"
+        # 5. Build the Statistics Text (CORRECT INDENTATION)
+        stats_text = f"""
+📊 **Bot Statistics**
 
-        await update.message.reply_text(stats_text)
+**Database:**
+• Movies: {total_movies}
+• Users: {total_users}
+• Total Requests: {total_requests}
+• Fulfilled: {fulfilled}
+• Pending: {total_requests - fulfilled}
 
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error: {e}")
-
-stats_text = f"""
-📊 *Bot Statistics*
-
-*Database:*
-• Movies: {total_movies[0]}
-• Users: {total_users[0]}
-• Total Requests: {total_requests[0]}
-• Fulfilled: {fulfilled[0]}
-• Pending: {total_requests[0] - fulfilled[0]}
-
-*Activity:*
-• Today's Requests: {today_requests[0]}
+**Activity:**
+• Today's Requests: {today_requests}
 • Fulfillment Rate: {fulfillment_rate:.1f}%
 
-*Top Requesters:*
+**Top Requesters:**
 """
-
-        # Add top users
+        # Append Top Users
         if top_users:
             for name, username, count in top_users:
-                username_str = f"@{username}" if username else "N/A"
+                # Escape Markdown characters in name/username if necessary, but keep it simple here.
+                username_str = f"`@{username}`" if username else "N/A"
                 stats_text += f"• {name} ({username_str}): {count} requests\n"
         else:
             stats_text += "No user data available."
-
-        await update.message.reply_text(stats_text, parse_mode='Markdown')
-
-        cur.close()
-        conn.close()
-
+            
+        # 6. Send the Message
+        await update.message.reply_text(stats_text, parse_mode=ParseMode.MARKDOWN)
+        
     except Exception as e:
+        # 7. Error Handling
         logger.error(f"Error in get_bot_stats: {e}")
-        await update.message.reply_text(f"❌ Error: {e}")
+        await update.message.reply_text(f"❌ Error while fetching stats: {e}")
+        
+    finally:
+        # 8. Connection Cleanup (ensures connection closes even if an error occurs)
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
 
 async def admin_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show admin commands help"""
