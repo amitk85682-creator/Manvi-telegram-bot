@@ -1057,12 +1057,22 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if conn:
             cur = conn.cursor()
 
-            cur.execute("SELECT COUNT(*) FROM user_requests WHERE user_id = %s", (user_id,))
+            # Total Requests
+            cur.execute(
+                "SELECT COUNT(*) FROM user_requests WHERE user_id = %s",
+                (user_id,)
+            )
             request_count = cur.fetchone()
 
-            cur.execute("SELECT COUNT(*) FROM user_requests WHERE user_id = %s AND notified = TRUE", (user_id,))
+            # Fulfilled Requests
+            cur.execute(
+                "SELECT COUNT(*) FROM user_requests WHERE user_id = %s AND notified = TRUE",
+                (user_id,)
+            )
             fulfilled_count = cur.fetchone()
 
+    except Exception as e:
+        print(f"Error: {e}")
 stats_text = f"""
 📊 Your Stats:
 - Total Requests: {request_count}
