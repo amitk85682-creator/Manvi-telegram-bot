@@ -10,7 +10,7 @@ import os
 import threading
 import asyncio
 import logging
-import random # FIX 1: Added import random
+import random
 import json
 import requests
 import signal
@@ -48,7 +48,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ==================== CONVERSATION STATES ====================
-MAIN_MENU, SEARCHING, REQUESTING = range(3)
+MAIN_MENU, SEARCHING, REQUESTING, REQUESTING_FROM_BUTTON = range(4)
 
 # ==================== CHARACTER PROMPT ====================
 CHARACTER_PROMPT = """
@@ -82,15 +82,17 @@ SEARCH_ERROR_GIFS = [
     'CgACAgQAAxkBAAECz0hpEaLaG0MX1lzGmAInHpD-S-a-kwACFQMAAn5FbFDL4qyRIWthFDYE',
     'CgACAgQAAxkBAAECz0xpEaPKTpy2yI1_nsG8CY40pu0o7gACrwYAAkqhRFKxZzY6q9KWWzYE'
 ]
-# ----------------------------------------------
 
 # Rate limiting dictionary
-user_last_request = defaultdict(lambda: datetime.min) # FIX 2: Removed duplicate definition
+user_last_request = defaultdict(lambda: datetime.min)
 
 # ===== New / Configurable rate-limiting and fuzzy settings =====
-REQUEST_COOLDOWN_MINUTES = int(os.environ.get('REQUEST_COOLDOWN_MINUTES', '10'))  # per-user cooldown for same/similar movie
-SIMILARITY_THRESHOLD = int(os.environ.get('SIMILARITY_THRESHOLD', '80'))        # fuzzy similarity % to consider titles "same"
-MAX_REQUESTS_PER_MINUTE = int(os.environ.get('MAX_REQUESTS_PER_MINUTE', '10'))  # burst limit per user
+REQUEST_COOLDOWN_MINUTES = int(os.environ.get('REQUEST_COOLDOWN_MINUTES', '10'))
+SIMILARITY_THRESHOLD = int(os.environ.get('SIMILARITY_THRESHOLD', '80'))
+MAX_REQUESTS_PER_MINUTE = int(os.environ.get('MAX_REQUESTS_PER_MINUTE', '10'))
+
+# Auto-delete tracking
+messages_to_auto_delete = defaultdict(list)
 
 # Validate required environment variables
 if not TELEGRAM_BOT_TOKEN:
@@ -166,12 +168,11 @@ def normalize_url(url):
     except:
         return url
 
-# ===== Helper functions for matching and duplicate checks =====
 def _normalize_title_for_match(title: str) -> str:
     """Normalize title for fuzzy matching (lowercase, remove extra spaces and punctuation)."""
     if not title:
         return ""
-    t = re.sub(r'[^\w\s]', ' ', title)  # remove punctuation
+    t = re.sub(r'[^\w\s]', ' ', title)
     t = re.sub(r'\s+', ' ', t).strip()
     return t.lower()
 
@@ -186,7 +187,6 @@ def get_last_similar_request_for_user(user_id: int, title: str, minutes_window: 
 
     try:
         cur = conn.cursor()
-        # Get recent requests by this user (limit to last 200 to keep quick)
         cur.execute("""
             SELECT movie_title, requested_at
             FROM user_requests
@@ -208,18 +208,15 @@ def get_last_similar_request_for_user(user_id: int, title: str, minutes_window: 
         for stored_title, requested_at in rows:
             if not stored_title or not requested_at:
                 continue
-            # Only consider requests inside the time window
             try:
                 if isinstance(requested_at, datetime):
                     requested_time = requested_at
                 else:
-                    # attempt parse if needed (fallback)
                     requested_time = datetime.strptime(str(requested_at), '%Y-%m-%d %H:%M:%S')
             except Exception:
-                requested_time = requested_at  # if something odd, still try to compare
+                requested_time = requested_at
 
             if requested_time < cutoff:
-                # since rows are ordered by requested_at DESC, once we hit older than cutoff we can break
                 break
 
             norm_stored = _normalize_title_for_match(stored_title)
@@ -249,7 +246,7 @@ def user_burst_count(user_id: int, window_seconds: int = 60):
         cur = conn.cursor()
         since = datetime.now() - timedelta(seconds=window_seconds)
         cur.execute("SELECT COUNT(*) FROM user_requests WHERE user_id = %s AND requested_at >= %s", (user_id, since))
-        cnt = cur.fetchone()[0]
+        cnt = cur.fetchone()
         cur.close()
         conn.close()
         return cnt
@@ -261,6 +258,23 @@ def user_burst_count(user_id: int, window_seconds: int = 60):
             pass
         return 0
 
+async def delete_messages_after_delay(context, chat_id, message_ids, delay=60):
+    """Delete messages after specified delay"""
+    try:
+        await asyncio.sleep(delay)
+        for msg_id in message_ids:
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
+                logger.info(f"✅ Deleted message {msg_id} from chat {chat_id}")
+            except Exception as e:
+                logger.error(f"Failed to delete message {msg_id}: {e}")
+    except Exception as e:
+        logger.error(f"Error in delete_messages_after_delay: {e}")
+
+def track_message_for_deletion(chat_id, message_id, delay=60):
+    """Track message for auto-deletion"""
+    messages_to_auto_delete[chat_id].append((message_id, delay))
+
 # ==================== DATABASE FUNCTIONS ====================
 def setup_database():
     """Setup database tables and indexes"""
@@ -268,11 +282,9 @@ def setup_database():
         conn_str = FIXED_DATABASE_URL or DATABASE_URL
         conn = psycopg2.connect(conn_str)
         cur = conn.cursor()
-        # ...
-        # Enable pg_trgm extension
+        
         cur.execute('CREATE EXTENSION IF NOT EXISTS pg_trgm;')
 
-        # Create movies table
         cur.execute('''
             CREATE TABLE IF NOT EXISTS movies (
                 id SERIAL PRIMARY KEY,
@@ -282,10 +294,8 @@ def setup_database():
             )
         ''')
 
-        # Create sync_info table
         cur.execute('CREATE TABLE IF NOT EXISTS sync_info (id SERIAL PRIMARY KEY, last_sync TIMESTAMP DEFAULT CURRENT_TIMESTAMP);')
 
-        # Create user_requests table
         cur.execute('''
             CREATE TABLE IF NOT EXISTS user_requests (
                 id SERIAL PRIMARY KEY,
@@ -300,7 +310,6 @@ def setup_database():
             )
         ''')
 
-        # Create movie_aliases table
         cur.execute('''
             CREATE TABLE IF NOT EXISTS movie_aliases (
                 id SERIAL PRIMARY KEY,
@@ -310,7 +319,6 @@ def setup_database():
             )
         ''')
 
-        # Add unique constraint
         cur.execute('''
             DO $$ BEGIN
             IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'user_requests_unique_constraint') THEN
@@ -319,7 +327,6 @@ def setup_database():
             END $$;
         ''')
 
-        # Add missing columns if they don't exist
         try:
             cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS file_id TEXT;")
         except Exception as e:
@@ -330,7 +337,6 @@ def setup_database():
         except Exception as e:
             logger.info("message_id column already exists or couldn't be added")
 
-        # Create indexes
         cur.execute('CREATE INDEX IF NOT EXISTS idx_movies_title ON movies (title);')
         cur.execute('CREATE INDEX IF NOT EXISTS idx_movies_title_trgm ON movies USING gin (title gin_trgm_ops);')
         cur.execute('CREATE INDEX IF NOT EXISTS idx_user_requests_movie_title ON user_requests (movie_title);')
@@ -373,29 +379,25 @@ def update_movies_in_db():
 
         cur = conn.cursor()
 
-        # Get last sync time
         cur.execute("SELECT last_sync FROM sync_info ORDER BY id DESC LIMIT 1;")
         last_sync_result = cur.fetchone()
-        last_sync_time = last_sync_result[0] if last_sync_result else None
+        last_sync_time = last_sync_result if last_sync_result else None
 
         cur.execute("SELECT title FROM movies;")
-        existing_movies = {row[0] for row in cur.fetchall()}
+        existing_movies = {row for row in cur.fetchall()}
 
-        # Only proceed if Blogger API keys are available
         if not BLOGGER_API_KEY or not BLOG_ID:
             return "Blogger API keys not configured"
 
         service = build('blogger', 'v3', developerKey=BLOGGER_API_KEY)
         all_items = []
 
-        # Fetch all posts
         posts_request = service.posts().list(blogId=BLOG_ID, maxResults=500)
         while posts_request is not None:
             posts_response = posts_request.execute()
             all_items.extend(posts_response.get('items', []))
             posts_request = service.posts().list_next(posts_request, posts_response)
 
-        # Fetch all pages
         pages_request = service.pages().list(blogId=BLOG_ID)
         pages_response = pages_request.execute()
         all_items.extend(pages_response.get('items', []))
@@ -420,10 +422,9 @@ def update_movies_in_db():
                     unique_titles.add(title.strip())
                 except psycopg2.Error as e:
                     logger.error(f"Error inserting movie {title}: {e}")
-                    conn.rollback() # Rollback transaction on error
+                    conn.rollback()
                     continue
 
-        # Update sync time
         cur.execute("INSERT INTO sync_info (last_sync) VALUES (CURRENT_TIMESTAMP);")
 
         conn.commit()
@@ -451,7 +452,6 @@ def get_movies_from_db(user_query, limit=10):
 
         logger.info(f"Searching for: '{user_query}'")
 
-        # First try exact matches using ILIKE
         cur.execute(
             "SELECT id, title, url, file_id FROM movies WHERE LOWER(title) LIKE LOWER(%s) ORDER BY title LIMIT %s",
             (f'%{user_query}%', limit)
@@ -464,7 +464,6 @@ def get_movies_from_db(user_query, limit=10):
             conn.close()
             return exact_matches
 
-        # Then try alias matches
         cur.execute("""
             SELECT DISTINCT m.id, m.title, m.url, m.file_id
             FROM movies m
@@ -481,7 +480,6 @@ def get_movies_from_db(user_query, limit=10):
             conn.close()
             return alias_matches
 
-        # Finally fuzzy matching
         cur.execute("SELECT id, title, url, file_id FROM movies")
         all_movies = cur.fetchall()
 
@@ -490,14 +488,11 @@ def get_movies_from_db(user_query, limit=10):
             conn.close()
             return []
 
-        # Create dictionary for fuzzy matching
-        movie_titles = [movie[1] for movie in all_movies]
-        movie_dict = {movie[1]: movie for movie in all_movies}
+        movie_titles = [movie for movie in all_movies]
+        movie_dict = {movie: movie for movie in all_movies}
 
-        # Use fuzzy matching
         matches = process.extract(user_query, movie_titles, scorer=fuzz.token_sort_ratio, limit=limit)
 
-        # Filter matches with score >= 65
         filtered_movies = [movie_dict[title] for title, score, index in matches if score >= 65]
 
         logger.info(f"Found {len(filtered_movies)} fuzzy matches")
@@ -516,7 +511,6 @@ def get_movies_from_db(user_query, limit=10):
             except:
                 pass
 
-# ==================== STORE USER REQUEST (fixed) ====================
 def store_user_request(user_id, username, first_name, movie_title, group_id=None, message_id=None):
     """Store user request in database. Uses ON CONFLICT DO UPDATE to refresh timestamp for exact duplicates."""
     try:
@@ -587,7 +581,7 @@ async def analyze_intent(message_text):
         logger.error(f"Error in AI intent analysis: {e}")
         return {"is_request": True, "content_title": message_text}
 
-# ==================== NOTIFICATION FUNCTIONS (updated with caption support) ====================
+# ==================== NOTIFICATION FUNCTIONS ====================
 async def send_admin_notification(context: ContextTypes.DEFAULT_TYPE, user, movie_title, group_info=None):
     """Send notification to admin channel about a new request"""
     if not ADMIN_CHANNEL_ID:
@@ -610,29 +604,15 @@ async def send_admin_notification(context: ContextTypes.DEFAULT_TYPE, user, movi
 Time: {datetime.now().strftime('%Y-%m-%d %I:%M %p')}
         """
 
-        # FIX: Send notification with inline keyboard
         await context.bot.send_message(
             chat_id=ADMIN_CHANNEL_ID,
             text=message,
-            reply_markup=get_admin_request_keyboard(user.id, movie_title), # Pass user ID and title
+            reply_markup=get_admin_request_keyboard(user.id, movie_title),
             parse_mode='Markdown'
         )
 
     except Exception as e:
         logger.error(f"Error sending admin notification: {e}")
-
-async def delete_messages_after_delay(context, chat_id, message_ids, delay=60):
-    """Delete messages after specified delay"""
-    try:
-        await asyncio.sleep(delay)
-        for msg_id in message_ids:
-            try:
-                await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
-                logger.info(f"✅ Deleted message {msg_id} from chat {chat_id}")
-            except Exception as e:
-                logger.error(f"Failed to delete message {msg_id}: {e}")
-    except Exception as e:
-        logger.error(f"Error in delete_messages_after_delay: {e}")
 
 async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title, movie_url_or_file_id):
     """Notify users who requested a movie — add caption when sending media."""
@@ -642,12 +622,11 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
     notified_count = 0
 
     caption_text = (
-    f"🎬 <b>{movie_title}</b>\n\n"
-    "🔗 <b>JOIN »</b> FilmfyBox (http://t.me/filmfybox)\n\n"
-    "🔹 <b>Please drop the movie name, and I’ll find it for you as soon as possible. 🎬✨👇</b>\n"
-    "🔹 <b>FlimfyBox Chat (https://t.me/Filmfybox002)</b>"
-)
-    # Keyboard for joining the channel
+        f"🎬 <b>{movie_title}</b>\n\n"
+        "🔗 <b>JOIN »</b> FilmfyBox (http://t.me/filmfybox)\n\n"
+        "🔹 <b>Please drop the movie name, and I'll find it for you as soon as possible. 🎬✨👇</b>\n"
+        "🔹 <b>FlimfyBox Chat (https://t.me/Filmfybox002)</b>"
+    )
     join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url="http://t.me/filmfybox")]])
 
     try:
@@ -664,7 +643,6 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
 
         for user_id, username, first_name in users_to_notify:
             try:
-                # First send a small text notifying them
                 await context.bot.send_message(
                     chat_id=user_id,
                     text=f"🎉 Hey {first_name or username}! Your requested movie '{movie_title}' is now available!"
@@ -678,7 +656,6 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
 
                 sent_msg = None
 
-                # Check if it's a Telegram file ID
                 if isinstance(movie_url_or_file_id, str) and any(movie_url_or_file_id.startswith(prefix) for prefix in ["BQAC", "BAAC", "CAAC", "AQAC"]):
                     sent_msg = await context.bot.send_document(
                         chat_id=user_id,
@@ -687,7 +664,6 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
                         parse_mode='HTML',
                         reply_markup=join_keyboard
                     )
-                # Check if it's a Telegram channel link
                 elif isinstance(movie_url_or_file_id, str) and movie_url_or_file_id.startswith("https://t.me/c/"):
                     parts = movie_url_or_file_id.split('/')
                     from_chat_id = int("-100" + parts[-2])
@@ -700,7 +676,6 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
                         parse_mode='HTML',
                         reply_markup=join_keyboard
                     )
-                # Check if it's a regular HTTP URL
                 elif isinstance(movie_url_or_file_id, str) and movie_url_or_file_id.startswith("http"):
                     await context.bot.send_message(
                         chat_id=user_id,
@@ -708,7 +683,7 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
                         reply_markup=get_movie_options_keyboard(movie_title, movie_url_or_file_id),
                         parse_mode='HTML'
                     )
-                else: # Fallback for other cases, assuming it might be a file_id
+                else:
                     sent_msg = await context.bot.send_document(
                         chat_id=user_id,
                         document=movie_url_or_file_id,
@@ -717,7 +692,6 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
                         reply_markup=join_keyboard
                     )
 
-                # Auto-delete
                 if sent_msg:
                     asyncio.create_task(
                         delete_messages_after_delay(
@@ -734,7 +708,7 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
                 )
                 conn.commit()
                 notified_count += 1
-                await asyncio.sleep(0.1) # Avoid hitting rate limits
+                await asyncio.sleep(0.1)
 
             except telegram.error.Forbidden:
                 logger.error(f"User {user_id} blocked the bot")
@@ -771,7 +745,6 @@ async def notify_in_group(context: ContextTypes.DEFAULT_TYPE, movie_title):
         if not users_to_notify:
             return
 
-        # Group users by their group_id
         groups_to_notify = defaultdict(list)
         for user_id, username, first_name, group_id, message_id in users_to_notify:
             if group_id:
@@ -796,7 +769,6 @@ async def notify_in_group(context: ContextTypes.DEFAULT_TYPE, movie_title):
                     parse_mode='Markdown'
                 )
 
-                # Update notified status for all users in the group notification
                 for user_id in notified_users_ids:
                     cur.execute(
                         "UPDATE user_requests SET notified = TRUE WHERE user_id = %s AND movie_title ILIKE %s",
@@ -825,9 +797,6 @@ def get_main_keyboard():
 
 def get_admin_request_keyboard(user_id, movie_title):
     """Inline keyboard for admin actions on a user request."""
-    # Note: movie_title needs to be sanitized for callback data length (max 64 bytes)
-    # We use a short version of the title and the user ID to trace the request back.
-
     sanitized_title = movie_title[:30]
 
     keyboard = [
@@ -853,18 +822,14 @@ def create_movie_selection_keyboard(movies, page=0, movies_per_page=5):
 
     keyboard = []
 
-    # Add movie buttons
     for movie in current_movies:
         movie_id, title, url, file_id = movie
-        # Show title with truncation if too long
         button_text = title if len(title) <= 40 else title[:37] + "..."
-        # Use movie ID as callback data for uniqueness
         keyboard.append([InlineKeyboardButton(
             f"🎬 {button_text}",
             callback_data=f"movie_{movie_id}"
         )])
 
-    # Add navigation buttons if needed
     nav_buttons = []
     total_pages = (len(movies) + movies_per_page - 1) // movies_per_page
 
@@ -877,7 +842,6 @@ def create_movie_selection_keyboard(movies, page=0, movies_per_page=5):
     if nav_buttons:
         keyboard.append(nav_buttons)
 
-    # Add cancel button
     keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_selection")])
 
     return InlineKeyboardMarkup(keyboard)
@@ -912,27 +876,20 @@ def get_all_movie_qualities(movie_id):
         if conn:
             conn.close()
 
-
 def create_quality_selection_keyboard(movie_id, title, qualities):
     """Create inline keyboard with quality selection buttons."""
     keyboard = []
 
-    # Store movie info for later use (needed in callback)
-    # We store the title to ensure we can use it in the final send message even if quality selection takes time
-    # This stores the state in user_data
-
     for quality, url, file_id in qualities:
-        # Callback format: 'quality_<movie_id>_<quality>'
         callback_data = f"quality_{movie_id}_{quality}"
         button_text = f"🎬 {quality} ({'File' if file_id else 'Link'})"
         keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
 
-    # Add cancel button
     keyboard.append([InlineKeyboardButton("❌ Cancel Selection", callback_data="cancel_selection")])
 
     return InlineKeyboardMarkup(keyboard)
 
-# ==================== HELPER FUNCTION (FIXED FOR QUALITY CHOICE) ====================
+# ==================== HELPER FUNCTION ====================
 async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int, title: str, url: Optional[str] = None, file_id: Optional[str] = None):
     """
     Sends the movie file/link to the user with a warning and caption.
@@ -940,14 +897,9 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
     """
     chat_id = update.effective_chat.id
 
-    # ------------------- DATA FALLBACK REMOVED / CHECK -------------------
-    # This logic is now handled in button_callback where the user selects the quality.
-    # If the initial call (from search_movies single result) has no URL/File_ID,
-    # we need to check if multi-quality files exist and prompt the user.
     if not url and not file_id:
         qualities = get_all_movie_qualities(movie_id)
         if qualities:
-            # Re-engage the user for selection if files exist in multi-quality table
             context.user_data['selected_movie_data'] = {
                 'id': movie_id,
                 'title': title,
@@ -955,18 +907,16 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
             }
             selection_text = f"✅ We found **{title}** in multiple qualities.\n\n⬇️ **Please choose the file quality:**"
             keyboard = create_quality_selection_keyboard(movie_id, title, qualities)
-            await context.bot.send_message(
+            msg = await context.bot.send_message(
                 chat_id=chat_id,
                 text=selection_text,
                 reply_markup=keyboard,
                 parse_mode='Markdown'
             )
-            return # Exit after sending the selection prompt
-    # ----------------------------------------------------------------------
-
+            track_message_for_deletion(chat_id, msg.message_id, 300)
+            return
 
     try:
-        # Initial warning (auto-delete with media if media sent)
         warning_msg = await context.bot.send_message(
             chat_id=chat_id,
             text="⚠️ ❌👉This file automatically❗️deletes after 1 minute❗️so please forward it to another chat👈❌",
@@ -974,18 +924,15 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
         )
 
         sent_msg = None
-        name = title  # Use 'title' from the function arguments for the caption
+        name = title
         caption_text = (
             f"🎬 <b>{name}</b>\n\n"
             "🔗 <b>JOIN »</b> <a href='http://t.me/filmfybox'>FilmfyBox</a>\n\n"
-            "🔹 <b>Please drop the movie name, and I’ll find it for you as soon as possible. 🎬✨👇</b>\n"
+            "🔹 <b>Please drop the movie name, and I'll find it for you as soon as possible. 🎬✨👇</b>\n"
             "🔹 <b><a href='https://t.me/Filmfybox002'>FlimfyBox Chat</a></b>"
         )
-        # Keyboard for joining the channel
         join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url="http://t.me/filmfybox")]])
 
-
-        # 1) file_id -> caption attached under media
         if file_id:
             sent_msg = await context.bot.send_document(
                 chat_id=chat_id,
@@ -994,14 +941,11 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 parse_mode='HTML',
                 reply_markup=join_keyboard
             )
-
-        # 2) Private channel message link: t.me/c/<chat_id>/<msg_id>
         elif url and url.startswith("https://t.me/c/"):
             try:
                 parts = url.rstrip('/').split('/')
                 from_chat_id = int("-100" + parts[-2])
                 message_id = int(parts[-1])
-                # Attach caption directly via copy_message
                 sent_msg = await context.bot.copy_message(
                     chat_id=chat_id,
                     from_chat_id=from_chat_id,
@@ -1012,15 +956,12 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 )
             except Exception as e:
                 logger.error(f"Copy private link failed {url}: {e}")
-                # Fallback to sending a message with inline keyboard if copy fails
                 sent_msg = await context.bot.send_message(
                     chat_id=chat_id,
                     text=f"🎬 Found: {name}\n\n{caption_text}",
                     reply_markup=get_movie_options_keyboard(name, url),
                     parse_mode='HTML'
                 )
-
-        # 3) Public channel message link: https://t.me/Username/123
         elif url and url.startswith("https://t.me/") and "/c/" not in url:
             try:
                 parts = url.rstrip('/').split('/')
@@ -1037,15 +978,12 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 )
             except Exception as e:
                 logger.error(f"Copy public link failed {url}: {e}")
-                # Fallback to sending a message with inline keyboard if copy fails
                 sent_msg = await context.bot.send_message(
                     chat_id=chat_id,
                     text=f"🎬 Found: {name}\n\n{caption_text}",
                     reply_markup=get_movie_options_keyboard(name, url),
                     parse_mode='HTML'
                 )
-
-        # 4) Normal external link
         elif url and url.startswith("http"):
             sent_msg = await context.bot.send_message(
                 chat_id=chat_id,
@@ -1053,24 +991,20 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 reply_markup=get_movie_options_keyboard(name, url),
                 parse_mode='HTML'
             )
-
-        # 5) Nothing valid to send
         else:
             sent_msg = await context.bot.send_message(
                 chat_id=chat_id,
                 text=f"❌ Sorry, '{name}' found but no valid file or link is attached in the database."
             )
 
-        # Auto-delete for media + warning
         if sent_msg:
             message_ids_to_delete = [warning_msg.message_id, sent_msg.message_id]
-
             asyncio.create_task(
                 delete_messages_after_delay(
                     context,
                     chat_id,
                     message_ids_to_delete,
-                    60 # 60 seconds delay
+                    60
                 )
             )
 
@@ -1100,7 +1034,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 ⚠️ ᴅᴏɴ'ᴛ ᴀᴅᴅ ᴇᴍᴏᴊɪꜱ ᴀɴᴅ ꜱʏᴍʙᴏʟꜱ ɪɴ ᴍᴏᴠɪᴇ ɴᴀᴍᴇ, ᴜꜱᴇ ʟᴇᴛᴛᴇʀꜱ ᴏɴʟʏ..!! ❌
 """
-        await update.message.reply_text(welcome_text, reply_markup=get_main_keyboard())
+        msg = await update.message.reply_text(welcome_text, reply_markup=get_main_keyboard())
+        track_message_for_deletion(update.effective_chat.id, msg.message_id, 300)
         return MAIN_MENU
     except Exception as e:
         logger.error(f"Error in start command: {e}")
@@ -1111,11 +1046,13 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.message.text
 
         if query == '🔍 Search Movies':
-            await update.message.reply_text("Great! Tell me the name of the movie you want to search for.")
+            msg = await update.message.reply_text("Great! Tell me the name of the movie you want to search for.")
+            track_message_for_deletion(update.effective_chat.id, msg.message_id, 120)
             return SEARCHING
 
         elif query == '🙋 Request Movie':
-            await update.message.reply_text("Okay, you've chosen to request a new movie. Please tell me the name of the movie you want me to add.")
+            msg = await update.message.reply_text("Okay, you've chosen to request a new movie. Please tell me the name of the movie you want me to add.")
+            track_message_for_deletion(update.effective_chat.id, msg.message_id, 120)
             return REQUESTING
 
         elif query == '📊 My Stats':
@@ -1126,19 +1063,18 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if conn:
                     cur = conn.cursor()
                     cur.execute("SELECT COUNT(*) FROM user_requests WHERE user_id = %s", (user_id,))
-                    # FIX: Fetch the first element from the tuple
-                    request_count = cur.fetchone()[0]
+                    request_count = cur.fetchone()
 
                     cur.execute("SELECT COUNT(*) FROM user_requests WHERE user_id = %s AND notified = TRUE", (user_id,))
-                    # FIX: Fetch the first element from the tuple
-                    fulfilled_count = cur.fetchone()[0]
+                    fulfilled_count = cur.fetchone()
 
                     stats_text = f"""
 📊 Your Stats:
 - Total Requests: {request_count}
 - Fulfilled Requests: {fulfilled_count}
                     """
-                    await update.message.reply_text(stats_text)
+                    msg = await update.message.reply_text(stats_text)
+                    track_message_for_deletion(update.effective_chat.id, msg.message_id, 180)
                 else:
                     await update.message.reply_text("Sorry, database connection failed.")
             except Exception as e:
@@ -1159,10 +1095,10 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 Just use the buttons below to navigate!
             """
-            await update.message.reply_text(help_text)
+            msg = await update.message.reply_text(help_text)
+            track_message_for_deletion(update.effective_chat.id, msg.message_id, 180)
             return MAIN_MENU
         else:
-            # If the text is not a menu option, treat it as a search
             return await search_movies(update, context)
 
     except Exception as e:
@@ -1172,7 +1108,6 @@ Just use the buttons below to navigate!
 async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle movie search with multiple results support"""
     try:
-        # Rate limiting
         if not await check_rate_limit(update.effective_user.id):
             await update.message.reply_text("⚠️ Please wait a moment before searching again.")
             return SEARCHING
@@ -1181,11 +1116,9 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
         processed_query = preprocess_query(user_message) if user_message else user_message
         search_query = processed_query if processed_query else user_message
 
-        # Search for MULTIPLE movies in database
         movies_found = get_movies_from_db(search_query, limit=10)
 
         if not movies_found:
-            # Movie not found - store request
             user = update.effective_user
             store_user_request(
                 user.id,
@@ -1198,11 +1131,9 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             messages_to_delete = []
 
-            # --- 1. Random GIF/Animation भेजना ---
             if SEARCH_ERROR_GIFS:
                 random_gif = random.choice(SEARCH_ERROR_GIFS)
                 try:
-                    # FIX: send_animation used to avoid 'Forwarded from' tag
                     gif_msg = await context.bot.send_animation(
                         chat_id=update.effective_chat.id,
                         animation=random_gif,
@@ -1213,7 +1144,6 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception as e:
                     logger.error(f"Failed to send random animation: {e}")
 
-            # --- 2. Request बटन भेजना ---
             request_btn_msg = await update.message.reply_text(
                 f"😔 Sorry, '{user_message}' is not in my collection right now. Would you like to request it?",
                 reply_markup=InlineKeyboardMarkup([[
@@ -1222,8 +1152,6 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             messages_to_delete.append(request_btn_msg.message_id)
 
-
-            # --- 3. आकर्षक Search Tip मैसेज भेजना ---
             error_msg = """
 Mᴏᴠɪᴇ ᴋɪ sᴘᴇʟʟɪɴɢ Gᴏᴏɢʟᴇ ᴘᴀʀ sᴇᴀʀᴄʜ ᴋᴀʀᴋᴇ, ᴄᴏᴘʏ ᴋᴀʀᴇ, ᴜsᴋᴇ ʙᴀᴀᴅ ʏᴀʜᴀ́ ᴛʏᴘᴇ/PAST ᴋᴀʀᴇ́. ✔️
 
@@ -1240,43 +1168,39 @@ Bᴀs ᴍᴏᴠɪᴇ ᴋᴀ ɴᴀᴍᴇ + ʏᴇᴀʀ (ᴏʀ Sᴇʀɪᴇs Sᴇᴀ
 ❌ `Asur Season 3 Download`
 ---
 
-**Dᴏɴ’T ᴀᴅᴅ Eᴍᴏᴊɪs ᴀɴᴅ Sʏᴍʙᴏʟs ɪɴ Mᴏᴠɪᴇ Nᴀᴍᴇs!** ⚠️
+**Dᴏɴ'T ᴀᴅᴅ Eᴍᴏᴊɪs ᴀɴᴅ Sʏᴍʙᴏʟs ɪɴ Mᴏᴠɪᴇ Nᴀᴍᴇs!** ⚠️
 """
-            # Search Tips टेक्स्ट मैसेज
             tip_msg = await update.message.reply_text(error_msg, parse_mode='Markdown')
             messages_to_delete.append(tip_msg.message_id)
 
-            # --- 4. Auto-Delete Task शुरू करना (सभी मैसेज) ---
             if messages_to_delete:
                 asyncio.create_task(
                     delete_messages_after_delay(
                         context,
                         update.effective_chat.id,
                         messages_to_delete,
-                        60 # 60 seconds delay for deletion
+                        60
                     )
                 )
 
         elif len(movies_found) == 1:
-            movie_id, title, url, file_id = movies_found[0]
-            # When only one result, check for multi-quality files within send_movie_to_user
+            movie_id, title, url, file_id = movies_found
             await send_movie_to_user(update, context, movie_id, title, url, file_id)
 
         else:
-            # Multiple movies found - show selection menu
             context.user_data['search_results'] = movies_found
             context.user_data['search_query'] = user_message
 
             selection_text = f"🎬 **Found {len(movies_found)} movies matching '{user_message}'**\n\nPlease select the movie you want:"
             keyboard = create_movie_selection_keyboard(movies_found, page=0)
 
-            await update.message.reply_text(
+            msg = await update.message.reply_text(
                 selection_text,
                 reply_markup=keyboard,
                 parse_mode='Markdown'
             )
+            track_message_for_deletion(update.effective_chat.id, msg.message_id, 300)
 
-        await update.message.reply_text("Ab Aap Aage kya karana chaahenge?", reply_markup=get_main_keyboard())
         return MAIN_MENU
 
     except Exception as e:
@@ -1284,7 +1208,6 @@ Bᴀs ᴍᴏᴠɪᴇ ᴋᴀ ɴᴀᴍᴇ + ʏᴇᴀʀ (ᴏʀ Sᴇʀɪᴇs Sᴇᴀ
         await update.message.reply_text("Sorry, something went wrong. Please try again.")
         return MAIN_MENU
 
-# ==================== REQUEST MOVIE (updated) ====================
 async def request_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle movie requests with duplicate detection, fuzzy matching and cooldowns."""
     try:
@@ -1292,27 +1215,26 @@ async def request_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
 
         if not user_message:
-            await update.message.reply_text(" कृपया मूवी का नाम भेजें।")
+            await update.message.reply_text("कृपया मूवी का नाम भेजें।")
             return REQUESTING
 
-        # 1) Quick burst protection (many different requests in short time)
         burst = user_burst_count(user.id, window_seconds=60)
         if burst >= MAX_REQUESTS_PER_MINUTE:
-            await update.message.reply_text(
+            msg = await update.message.reply_text(
                 "🛑 तुम बहुत जल्दी-जल्दी requests भेज रहे हो। कुछ देर रोकें (कुछ मिनट) और फिर कोशिश करें।\n"
                 "बार‑बार भेजने से फ़ायदा नहीं होगा।"
             )
+            track_message_for_deletion(update.effective_chat.id, msg.message_id, 120)
             return REQUESTING
 
-        # 2) Analyze intent (existing AI helper) — fallback to plain text if API unavailable
         intent = await analyze_intent(user_message)
         if not intent["is_request"]:
-            await update.message.reply_text("यह एक मूवी/सीरीज़ का नाम नहीं लग रहा है। कृपया सही नाम भेजें।")
+            msg = await update.message.reply_text("यह एक मूवी/सीरीज़ का नाम नहीं लग रहा है। कृपया सही नाम भेजें।")
+            track_message_for_deletion(update.effective_chat.id, msg.message_id, 120)
             return REQUESTING
 
         movie_title = intent["content_title"] or user_message
 
-        # 3) Check if the same user already requested a VERY SIMILAR title recently
         similar = get_last_similar_request_for_user(user.id, movie_title, minutes_window=REQUEST_COOLDOWN_MINUTES)
         if similar:
             last_time = similar.get("requested_at")
@@ -1320,18 +1242,16 @@ async def request_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
             minutes_passed = int(elapsed.total_seconds() / 60)
             minutes_left = max(0, REQUEST_COOLDOWN_MINUTES - minutes_passed)
             if minutes_left > 0:
-                # Send strict message preventing duplicate requests
                 strict_text = (
                     "🛑 Ruk jao! Aapne ye request abhi bheji thi.\n\n"
                     "Baar‑baar request karne se movie jaldi nahi aayegi.\n\n"
                     f"Similar previous request: \"{similar.get('stored_title')}\" ({similar.get('score')}% match)\n"
                     f"Kripya {minutes_left} minute baad dobara koshish karein. 🙏"
                 )
-                await update.message.reply_text(strict_text)
+                msg = await update.message.reply_text(strict_text)
+                track_message_for_deletion(update.effective_chat.id, msg.message_id, 120)
                 return REQUESTING
-            # else: cooldown expired -> allow storing new request (maybe user still wants)
 
-        # 4) If no recent similar, store request and notify admin
         stored = store_user_request(
             user.id,
             user.username,
@@ -1345,15 +1265,14 @@ async def request_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Sorry, आपका request store नहीं हो पाया। बाद में कोशिश करें।")
             return REQUESTING
 
-        # Send admin notification
         group_info = update.effective_chat.title if update.effective_chat.type != "private" else None
         await send_admin_notification(context, user, movie_title, group_info)
 
-        # Thank the user
-        await update.message.reply_text(
+        msg = await update.message.reply_text(
             f"✅ Got it! Your request for '{movie_title}' has been sent. I'll let you know when it's available.",
             reply_markup=get_main_keyboard()
         )
+        track_message_for_deletion(update.effective_chat.id, msg.message_id, 180)
 
         return MAIN_MENU
 
@@ -1362,17 +1281,83 @@ async def request_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Sorry, an error occurred while processing your request.")
         return REQUESTING
 
+async def request_movie_from_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle movie request after user sends movie name following button click"""
+    try:
+        user_message = (update.message.text or "").strip()
+        user = update.effective_user
+
+        if not user_message:
+            await update.message.reply_text("कृपया मूवी का नाम भेजें।")
+            return REQUESTING_FROM_BUTTON
+
+        burst = user_burst_count(user.id, window_seconds=60)
+        if burst >= MAX_REQUESTS_PER_MINUTE:
+            msg = await update.message.reply_text(
+                "🛑 तुम बहुत जल्दी-जल्दी requests भेज रहे हो। कुछ देर रोकें (कुछ मिनट) और फिर कोशिश करें।"
+            )
+            track_message_for_deletion(update.effective_chat.id, msg.message_id, 120)
+            return REQUESTING_FROM_BUTTON
+
+        movie_title = user_message
+
+        similar = get_last_similar_request_for_user(user.id, movie_title, minutes_window=REQUEST_COOLDOWN_MINUTES)
+        if similar:
+            last_time = similar.get("requested_at")
+            elapsed = datetime.now() - last_time
+            minutes_passed = int(elapsed.total_seconds() / 60)
+            minutes_left = max(0, REQUEST_COOLDOWN_MINUTES - minutes_passed)
+            if minutes_left > 0:
+                strict_text = (
+                    "🛑 Ruk jao! Aapne ye request abhi bheji thi.\n\n"
+                    "Baar‑baar request karne se movie jaldi nahi aayegi.\n\n"
+                    f"Similar previous request: \"{similar.get('stored_title')}\" ({similar.get('score')}% match)\n"
+                    f"Kripya {minutes_left} minute baad dobara koshish karein. 🙏"
+                )
+                msg = await update.message.reply_text(strict_text)
+                track_message_for_deletion(update.effective_chat.id, msg.message_id, 120)
+                return REQUESTING_FROM_BUTTON
+
+        stored = store_user_request(
+            user.id,
+            user.username,
+            user.first_name,
+            movie_title,
+            update.effective_chat.id if update.effective_chat.type != "private" else None,
+            update.message.message_id
+        )
+        
+        if not stored:
+            logger.error("Failed to store user request in DB.")
+            await update.message.reply_text("Sorry, आपका request store नहीं हो पाया। बाद में कोशिश करें।")
+            return REQUESTING_FROM_BUTTON
+
+        group_info = update.effective_chat.title if update.effective_chat.type != "private" else None
+        await send_admin_notification(context, user, movie_title, group_info)
+
+        msg = await update.message.reply_text(
+            f"✅ Perfect! आपका request '{movie_title}' के लिए सफलतापूर्वक भेज दिया गया है।\n\n"
+            f"जैसे ही यह उपलब्ध होगा, मैं आपको तुरंत सूचित कर दूँगा! 🎬",
+            reply_markup=get_main_keyboard()
+        )
+        track_message_for_deletion(update.effective_chat.id, msg.message_id, 180)
+
+        return MAIN_MENU
+
+    except Exception as e:
+        logger.error(f"Error in request_movie_from_button: {e}")
+        await update.message.reply_text("Sorry, an error occurred while processing your request.")
+        return REQUESTING_FROM_BUTTON
+
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle inline button callbacks - INCLUDING MOVIE SELECTION"""
+    """Handle inline button callbacks"""
     try:
         query = update.callback_query
         await query.answer()
 
-        # Handle movie selection (Now prompts for quality)
         if query.data.startswith("movie_"):
             movie_id = int(query.data.replace("movie_", ""))
 
-            # Get movie title
             conn = get_db_connection()
             cur = conn.cursor()
             cur.execute("SELECT id, title FROM movies WHERE id = %s", (movie_id,))
@@ -1386,14 +1371,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             movie_id, title = movie
 
-            # Fetch all available qualities from movie_files table
             qualities = get_all_movie_qualities(movie_id)
 
-            # If only one quality is found OR no qualities, still proceed to check for old links
             if not qualities:
-                # Fallback: Call send_movie_to_user with movie_id, hoping the main movie table has the link
-                await query.edit_message_text(f"✅ You selected: **{title}**\n\nSending movie (single quality)...", parse_mode='Markdown')
-                # Fetch base URL/File_ID from movies table for this ID
+                await query.edit_message_text(f"✅ You selected: **{title}**\n\nSending movie...", parse_mode='Markdown')
                 conn = get_db_connection()
                 cur = conn.cursor()
                 cur.execute("SELECT url, file_id FROM movies WHERE id = %s", (movie_id,))
@@ -1404,7 +1385,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await send_movie_to_user(update, context, movie_id, title, url, file_id)
                 return
 
-            # Store available qualities in user_data for the next callback step
             context.user_data['selected_movie_data'] = {
                 'id': movie_id,
                 'title': title,
@@ -1414,25 +1394,20 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             selection_text = f"✅ You selected: **{title}**\n\n⬇️ **Please choose the file quality:**"
             keyboard = create_quality_selection_keyboard(movie_id, title, qualities)
 
-            # Edit the original selection message to show quality options
             await query.edit_message_text(
                 selection_text,
                 reply_markup=keyboard,
                 parse_mode='Markdown'
             )
 
-        # --- NEW ADMIN HANDLERS ---
         elif query.data.startswith("admin_fulfill_"):
-            # Format: 'admin_fulfill_<user_id>_<movie_title>'
             parts = query.data.split('_', 2)
-            user_id = int(parts[1])
-            movie_title = parts[2]
+            user_id = int(parts)
+            movie_title = parts
 
-            # 1. Update the request status (SET notified=TRUE)
             conn = get_db_connection()
             if conn:
                 cur = conn.cursor()
-                # Find movie in movies table
                 cur.execute("SELECT id, url, file_id FROM movies WHERE title = %s LIMIT 1", (movie_title,))
                 movie_data = cur.fetchone()
 
@@ -1440,7 +1415,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     movie_id, url, file_id = movie_data
                     value_to_send = file_id if file_id else url
 
-                    # Notify the single user (optional: update ALL pending requests for this movie)
                     num_notified = await notify_users_for_movie(context, movie_title, value_to_send)
 
                     await query.edit_message_text(
@@ -1448,7 +1422,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         parse_mode='Markdown'
                     )
                 else:
-                    # Only delete request in user_requests table if fulfill is successful
                     await query.edit_message_text(f"❌ ERROR: Movie '{movie_title}' not found in the `movies` table. Please add it first.", parse_mode='Markdown')
 
                 cur.close()
@@ -1457,16 +1430,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text("❌ Database error during fulfillment.")
 
         elif query.data.startswith("admin_delete_"):
-            # Format: 'admin_delete_<user_id>_<movie_title>'
             parts = query.data.split('_', 2)
-            user_id = int(parts[1])
-            movie_title = parts[2]
+            user_id = int(parts)
+            movie_title = parts
 
-            # 1. Delete the specific user request from the database
             conn = get_db_connection()
             if conn:
                 cur = conn.cursor()
-                # Delete only the specific user's request for this exact title
                 cur.execute("DELETE FROM user_requests WHERE user_id = %s AND movie_title = %s", (user_id, movie_title))
                 conn.commit()
                 cur.close()
@@ -1475,19 +1445,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await query.edit_message_text("❌ Database error during deletion.")
 
-        # --- END NEW ADMIN HANDLERS ---
-        # --- NEW BLOCK FOR QUALITY SELECTION ---
         elif query.data.startswith("quality_"):
-            # Format: 'quality_<movie_id>_<quality>'
             parts = query.data.split('_')
-            movie_id = int(parts[1])
-            selected_quality = parts[2]
+            movie_id = int(parts)
+            selected_quality = parts
 
-            # Retrieve movie data from user_data
             movie_data = context.user_data.get('selected_movie_data')
 
             if not movie_data or movie_data.get('id') != movie_id:
-                # Try fetching data again if session expired (less reliable but fallback)
                 qualities = get_all_movie_qualities(movie_id)
                 movie_data = {'id': movie_id, 'title': 'Movie', 'qualities': qualities}
 
@@ -1495,24 +1460,20 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text("❌ Error: Could not retrieve movie data. Please search again.")
                 return
 
-            # Find the specific link/file_id for the chosen quality
             chosen_file = None
             for quality, url, file_id in movie_data['qualities']:
                 if quality == selected_quality:
-                    # Prefer file_id over URL for sending media
                     chosen_file = {'url': url, 'file_id': file_id}
                     break
 
             if not chosen_file:
-                 await query.edit_message_text("❌ Error fetching the file for that quality.")
-                 return
+                await query.edit_message_text("❌ Error fetching the file for that quality.")
+                return
 
             title = movie_data['title']
 
-            # Edit the quality selection message
             await query.edit_message_text(f"✅ Sending **{title}** in **{selected_quality}**...", parse_mode='Markdown')
 
-            # Send the movie using the specific file/url
             await send_movie_to_user(
                 update,
                 context,
@@ -1522,11 +1483,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chosen_file['file_id']
             )
 
-            # Clear user data once transaction is complete
             if 'selected_movie_data' in context.user_data:
                 del context.user_data['selected_movie_data']
 
-        # Handle page navigation (remains the same)
         elif query.data.startswith("page_"):
             page = int(query.data.replace("page_", ""))
 
@@ -1546,10 +1505,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode='Markdown'
             )
 
-        # Handle cancel selection
         elif query.data == "cancel_selection":
             await query.edit_message_text("❌ Selection cancelled.")
-            # Clear stored search results
             if 'search_results' in context.user_data:
                 del context.user_data['search_results']
             if 'search_query' in context.user_data:
@@ -1557,30 +1514,65 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if 'selected_movie_data' in context.user_data:
                 del context.user_data['selected_movie_data']
 
-        # Handle movie request confirmation
         elif query.data.startswith("request_"):
             movie_title = query.data.replace("request_", "")
-            user = update.effective_user
+            
+            # Send the detailed request instructions
+            request_instruction_text = """
+<b>🎬 Movie / Web-Series Request System</b>
 
-            store_user_request(
-                user.id,
-                user.username,
-                user.first_name,
-                movie_title,
-                update.effective_chat.id if update.effective_chat.type != "private" else None,
-                query.message.message_id
+ठीक है! अब आप अपनी पसंदीदा मूवी या वेब-सीरीज़ रिक्वेस्ट कर सकते हैं।
+रिक्वेस्ट भेजने से पहले एक छोटी-सी बात ध्यान रखें 👇
+
+<b>📌 क्यों सही नाम भेजना ज़रूरी है?</b>
+सिर्फ़ सही नाम भेजेंगे, तो मुझे उसे ढूँढने में आसानी होगी
+और जैसे ही वो उपलब्ध होगी, मैं आपको तुरंत सूचित कर दूँगा।
+
+<b>✔️ सही तरीका:</b>
+• KGF 2
+• Panchayat
+• Mirzapur
+• Animal
+
+<b>❌ गलत तरीके (इनसे बचें):</b>
+• KGF 2 movie in hindi download
+• मुझे पंचायत का नया सीज़न चाहिए
+• Animal full HD leaked
+
+━━━━━━━━━━━━━━
+
+<b>💫 अब बस अपनी मूवी या वेब-सीरीज़ का सिर्फ़ नाम भेजें!</b>
+<b>👉 (Name Only — No extra words, No details)</b>
+━━━━━━━━━━━━━━
+"""
+            
+            # Create attractive button
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "📽️ अपनी फिल्म/Web Series का नाम भेजें 🎬",
+                    callback_data="start_request_input"
+                )]
+            ])
+            
+            await query.edit_message_text(
+                text=request_instruction_text,
+                parse_mode='HTML',
+                reply_markup=keyboard
             )
 
-            if ADMIN_CHANNEL_ID:
-                await send_admin_notification(context, user, movie_title)
+        elif query.data == "start_request_input":
+            # When user clicks the button to start request
+            await query.edit_message_text(
+                "✅ बहुत बढ़िया! अब बस अपनी मूवी या वेब-सीरीज़ का <b>सिर्फ़ नाम</b> भेजें।\n\n"
+                "Example: <code>KGF 2</code> या <code>Mirzapur</code>",
+                parse_mode='HTML'
+            )
+            # Set conversation state to handle next message as movie request
+            return REQUESTING_FROM_BUTTON
 
-            await query.edit_message_text(f"✅ Got it! Your request for '{movie_title}' has been sent to the admin!")
-
-        # Handle download button
         elif query.data.startswith("download_"):
             movie_title = query.data.replace("download_", "")
 
-            # Search for the movie
             conn = get_db_connection()
             if not conn:
                 await query.answer("❌ Database connection failed.", show_alert=True)
@@ -1594,7 +1586,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if movie:
                 movie_id, title, url, file_id = movie
-                # Direct download button will check for qualities within send_movie_to_user
                 await send_movie_to_user(update, context, movie_id, title, url, file_id)
             else:
                 await query.answer("❌ Movie not found.", show_alert=True)
@@ -1608,7 +1599,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Cancel the current operation"""
-    await update.message.reply_text("Operation cancelled.", reply_markup=get_main_keyboard())
+    msg = await update.message.reply_text("Operation cancelled.", reply_markup=get_main_keyboard())
+    track_message_for_deletion(update.effective_chat.id, msg.message_id, 60)
     return MAIN_MENU
 
 # ==================== ADMIN COMMANDS ====================
@@ -1637,7 +1629,6 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         cur = conn.cursor()
 
-        # Check if it's a Telegram file ID
         if any(value.startswith(prefix) for prefix in ["BQAC", "BAAC", "CAAC", "AQAC"]):
             cur.execute(
                 "INSERT INTO movies (title, url, file_id) VALUES (%s, %s, %s) ON CONFLICT (title) DO UPDATE SET url = EXCLUDED.url, file_id = EXCLUDED.file_id",
@@ -1645,7 +1636,6 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             message = f"✅ '{title}' को file ID के साथ सफलतापूर्वक जोड़ दिया गया है।"
 
-        # Check if it's any kind of URL
         elif "http" in value or "." in value:
             normalized_url = value.strip()
 
@@ -1666,7 +1656,6 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.commit()
         await update.message.reply_text(message)
 
-        # --- IMPORTANT: Fetch the movie ID and details again after UPSET to use in notification ---
         cur.execute("SELECT id, title, url, file_id FROM movies WHERE title = %s", (title.strip(),))
         movie_found = cur.fetchone()
 
@@ -1674,12 +1663,11 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
             movie_id, title, url, file_id = movie_found
             value_to_send = file_id if file_id else url
 
-            # Notify users who requested this movie
             num_notified = await notify_users_for_movie(context, title, value_to_send)
             await notify_in_group(context, title)
             await update.message.reply_text(f"कुल {num_notified} users को notify किया गया है।")
         else:
-             await update.message.reply_text("Notification failed: Could not retrieve updated movie details.")
+            await update.message.reply_text("Notification failed: Could not retrieve updated movie details.")
 
     except Exception as e:
         logger.error(f"Error in add_movie command: {e}")
@@ -1737,7 +1725,7 @@ Movie3 file_id_here
                 cur = conn.cursor()
 
                 if any(url_or_id.startswith(prefix) for prefix in ["BQAC", "BAAC", "CAAC", "AQAC"]):
-                     cur.execute(
+                    cur.execute(
                         "INSERT INTO movies (title, url, file_id) VALUES (%s, %s, %s) ON CONFLICT (title) DO UPDATE SET url = EXCLUDED.url, file_id = EXCLUDED.file_id",
                         (title.strip(), "", url_or_id.strip())
                     )
@@ -1805,7 +1793,7 @@ async def add_alias(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❌ '{movie_title}' डेटाबेस में नहीं मिली। पहले मूवी को add करें।")
             return
 
-        movie_id = movie[0]
+        movie_id = movie
 
         cur.execute(
             "INSERT INTO movie_aliases (movie_id, alias) VALUES (%s, %s) ON CONFLICT (movie_id, alias) DO NOTHING",
@@ -1915,7 +1903,7 @@ Movie2: alias4, alias5
                 failed_count += len(aliases)
                 continue
 
-            movie_id = movie[0]
+            movie_id = movie
 
             for alias in aliases:
                 try:
@@ -1956,7 +1944,6 @@ async def notify_manually(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         movie_title = " ".join(context.args)
 
-        # Get movie from database
         conn = get_db_connection()
         if not conn:
             await update.message.reply_text("❌ Database connection failed.")
@@ -1991,7 +1978,7 @@ async def notify_user_by_username(update: Update, context: ContextTypes.DEFAULT_
             await update.message.reply_text("Usage: /notifyuser @username Your message here")
             return
 
-        target_username = context.args[0].replace('@', '')
+        target_username = context.args.replace('@', '')
         message_text = ' '.join(context.args[1:])
 
         conn = get_db_connection()
@@ -2014,12 +2001,10 @@ async def notify_user_by_username(update: Update, context: ContextTypes.DEFAULT_
 
         user_id, first_name = user
 
-        notification_text = f"📬 **Message from Admin**\n\n{message_text}"
-
+        # Send message without parse_mode to preserve user formatting
         await context.bot.send_message(
             chat_id=user_id,
-            text=notification_text,
-            parse_mode='Markdown'
+            text=message_text
         )
 
         await update.message.reply_text(f"✅ Message sent to `@{target_username}` ({first_name})", parse_mode='Markdown')
@@ -2068,14 +2053,12 @@ async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         success_count = 0
         failed_count = 0
 
-        broadcast_text = f"📢 **Broadcast Message**\n\n{message_text}"
-
         for user_id, first_name, username in all_users:
             try:
+                # Send message without parse_mode to preserve formatting
                 await context.bot.send_message(
                     chat_id=user_id,
-                    text=broadcast_text,
-                    parse_mode='Markdown'
+                    text=message_text
                 )
                 success_count += 1
                 await asyncio.sleep(0.05)
@@ -2084,7 +2067,6 @@ async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 failed_count += 1
                 logger.error(f"Failed broadcast to {user_id}: {e}")
-
 
         await status_msg.edit_text(
             f"📊 **Broadcast Complete**\n\n"
@@ -2114,8 +2096,8 @@ async def schedule_notification(update: Update, context: ContextTypes.DEFAULT_TY
             )
             return
 
-        delay_minutes = int(context.args[0])
-        target_username = context.args[1].replace('@', '')
+        delay_minutes = int(context.args)
+        target_username = context.args.replace('@', '')
         message_text = ' '.join(context.args[2:])
 
         conn = get_db_connection()
@@ -2141,11 +2123,9 @@ async def schedule_notification(update: Update, context: ContextTypes.DEFAULT_TY
         async def send_scheduled_notification():
             await asyncio.sleep(delay_minutes * 60)
             try:
-                notification_text = f"⏰ **Scheduled Message**\n\n{message_text}"
                 await context.bot.send_message(
                     chat_id=user_id,
-                    text=notification_text,
-                    parse_mode='Markdown'
+                    text=message_text
                 )
                 logger.info(f"Scheduled notification sent to {user_id}")
             except Exception as e:
@@ -2191,7 +2171,7 @@ async def notify_user_with_media(update: Update, context: ContextTypes.DEFAULT_T
             )
             return
 
-        target_username = context.args[0].replace('@', '')
+        target_username = context.args.replace('@', '')
         optional_message = ' '.join(context.args[1:]) if len(context.args) > 1 else None
 
         replied_message = update.message.reply_to_message
@@ -2216,19 +2196,18 @@ async def notify_user_with_media(update: Update, context: ContextTypes.DEFAULT_T
 
         user_id, first_name = user
 
-        notification_header = f"📬 **Message from Admin**\n"
+        notification_header = ""
         if optional_message:
-            notification_header += f"\n{optional_message}\n"
+            notification_header = optional_message
 
         warning_msg = await context.bot.send_message(
             chat_id=user_id,
-            text=notification_header + "\n⚠️ ❌👉This file automatically❗️deletes after 1 minute❗️so please forward it to another chat👈❌",
+            text="⚠️ ❌👉This file automatically❗️deletes after 1 minute❗️so please forward it to another chat👈❌",
             parse_mode='Markdown'
         )
 
         sent_msg = None
         media_type = "unknown"
-        # Keyboard for joining the channel
         join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url="http://t.me/filmfybox")]])
 
         if replied_message.document:
@@ -2236,7 +2215,7 @@ async def notify_user_with_media(update: Update, context: ContextTypes.DEFAULT_T
             sent_msg = await context.bot.send_document(
                 chat_id=user_id,
                 document=replied_message.document.file_id,
-                caption=optional_message if optional_message else None,
+                caption=notification_header if notification_header else None,
                 reply_markup=join_keyboard
             )
         elif replied_message.video:
@@ -2244,7 +2223,7 @@ async def notify_user_with_media(update: Update, context: ContextTypes.DEFAULT_T
             sent_msg = await context.bot.send_video(
                 chat_id=user_id,
                 video=replied_message.video.file_id,
-                caption=optional_message if optional_message else None,
+                caption=notification_header if notification_header else None,
                 reply_markup=join_keyboard
             )
         elif replied_message.audio:
@@ -2252,7 +2231,7 @@ async def notify_user_with_media(update: Update, context: ContextTypes.DEFAULT_T
             sent_msg = await context.bot.send_audio(
                 chat_id=user_id,
                 audio=replied_message.audio.file_id,
-                caption=optional_message if optional_message else None,
+                caption=notification_header if notification_header else None,
                 reply_markup=join_keyboard
             )
         elif replied_message.photo:
@@ -2261,7 +2240,7 @@ async def notify_user_with_media(update: Update, context: ContextTypes.DEFAULT_T
             sent_msg = await context.bot.send_photo(
                 chat_id=user_id,
                 photo=photo.file_id,
-                caption=optional_message if optional_message else None,
+                caption=notification_header if notification_header else None,
                 reply_markup=join_keyboard
             )
         elif replied_message.text:
@@ -2293,7 +2272,8 @@ async def notify_user_with_media(update: Update, context: ContextTypes.DEFAULT_T
         confirmation += f"To: `@{target_username}` ({first_name})\n"
         confirmation += f"Media Type: {media_type.capitalize()}"
 
-        await update.message.reply_text(confirmation, parse_mode='Markdown')
+        await update.message.reply_text(
+        confirmation, parse_mode='Markdown')
 
         cur.close()
         conn.close()
@@ -2343,15 +2323,11 @@ async def broadcast_with_media(update: Update, context: ContextTypes.DEFAULT_TYP
 
         for user_id, first_name, username in all_users:
             try:
-                header = "📢 **Broadcast from Admin**\n"
                 if optional_message:
-                    header += f"\n{optional_message}\n"
-
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=header,
-                    parse_mode='Markdown'
-                )
+                    await context.bot.send_message(
+                        chat_id=user_id,
+                        text=optional_message
+                    )
 
                 if replied_message.document:
                     await context.bot.send_document(
@@ -2470,7 +2446,6 @@ async def quick_notify(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         caption=caption,
                         reply_markup=join_keyboard
                     )
-                # Add other media types if needed
 
                 success_count += 1
 
@@ -2516,7 +2491,7 @@ async def forward_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        target_username = context.args[0].replace('@', '')
+        target_username = context.args.replace('@', '')
 
         conn = get_db_connection()
         if not conn:
@@ -2560,7 +2535,7 @@ async def get_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        target_username = context.args[0].replace('@', '')
+        target_username = context.args.replace('@', '')
 
         conn = get_db_connection()
         if not conn:
@@ -2645,9 +2620,8 @@ async def list_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         page = 1
-        # FIX: Check the first argument in the list
-        if context.args and context.args[0].isdigit():
-            page = int(context.args[0])
+        if context.args and context.args.isdigit():
+            page = int(context.args)
 
         per_page = 10
         offset = (page - 1) * per_page
@@ -2660,8 +2634,7 @@ async def list_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur = conn.cursor()
 
         cur.execute("SELECT COUNT(DISTINCT user_id) FROM user_requests")
-        # FIX: Fetch the first element from the tuple
-        total_users = cur.fetchone()[0]
+        total_users = cur.fetchone()
 
         cur.execute("""
             SELECT
@@ -2716,21 +2689,20 @@ async def get_bot_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         cur = conn.cursor()
 
-        # FIX: Fetch the first element [0] from the tuple for all COUNT queries
         cur.execute("SELECT COUNT(*) FROM movies")
-        total_movies = cur.fetchone()[0]
+        total_movies = cur.fetchone()
 
         cur.execute("SELECT COUNT(DISTINCT user_id) FROM user_requests")
-        total_users = cur.fetchone()[0]
+        total_users = cur.fetchone()
 
         cur.execute("SELECT COUNT(*) FROM user_requests")
-        total_requests = cur.fetchone()[0]
+        total_requests = cur.fetchone()
 
         cur.execute("SELECT COUNT(*) FROM user_requests WHERE notified = TRUE")
-        fulfilled = cur.fetchone()[0]
+        fulfilled = cur.fetchone()
 
         cur.execute("SELECT COUNT(*) FROM user_requests WHERE DATE(requested_at) = CURRENT_DATE")
-        today_requests = cur.fetchone()[0]
+        today_requests = cur.fetchone()
 
         cur.execute("""
             SELECT first_name, username, COUNT(*) as req_count
@@ -2845,22 +2817,17 @@ def trigger_update():
     result = update_movies_in_db()
     return result
 
-# main.py (Replace the existing run_flask function)
 def run_flask():
     port = int(os.environ.get('PORT', 8080))
-    # Use a proper secret for sessions (set FLASK_SECRET_KEY in env). Fallback to a random 24-byte key.
     flask_app.secret_key = os.environ.get('FLASK_SECRET_KEY', None) or os.urandom(24)
 
-    # Register admin blueprint if available. Do late import to avoid circular imports.
     try:
-        # import admin_views here to avoid circular import during startup
         from admin_views import admin as admin_blueprint
         flask_app.register_blueprint(admin_blueprint)
         logger.info("Admin blueprint registered successfully.")
     except Exception as e:
         logger.error(f"Failed to register admin blueprint: {e}")
 
-    # Run the Flask dev server (this is what you already used). For production use a WSGI server.
     flask_app.run(host='0.0.0.0', port=port)
 
 # ==================== MAIN BOT FUNCTION ====================
@@ -2886,6 +2853,7 @@ def main():
             MAIN_MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, main_menu)],
             SEARCHING: [MessageHandler(filters.TEXT & ~filters.COMMAND, search_movies)],
             REQUESTING: [MessageHandler(filters.TEXT & ~filters.COMMAND, request_movie)],
+            REQUESTING_FROM_BUTTON: [MessageHandler(filters.TEXT & ~filters.COMMAND, request_movie_from_button)],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
         per_message=False,
