@@ -76,7 +76,7 @@ ADMIN_USER_ID = int(os.environ.get('ADMIN_USER_ID', 0))
 GROUP_CHAT_ID = os.environ.get('GROUP_CHAT_ID')
 ADMIN_CHANNEL_ID = os.environ.get('ADMIN_CHANNEL_ID')
 
-# --- Random GIF IDs for Search Failure (Moved here for clarity) ---
+# --- Random GIF IDs for Search Failure ---
 SEARCH_ERROR_GIFS = [
     'CgACAgQAAxkBAAECz0ppEaLwgDbNfPPFl5lgtFjjmztKKgAC5wIAAmaoDVMH7bkdAqNVnDYE',
     'CgACAgQAAxkBAAECz0hpEaLaG0MX1lzGmAInHpD-S-a-kwACFQMAAn5FbFDL4qyRIWthFDYE',
@@ -86,7 +86,7 @@ SEARCH_ERROR_GIFS = [
 # Rate limiting dictionary
 user_last_request = defaultdict(lambda: datetime.min)
 
-# ===== New / Configurable rate-limiting and fuzzy settings =====
+# ===== Configurable rate-limiting and fuzzy settings =====
 REQUEST_COOLDOWN_MINUTES = int(os.environ.get('REQUEST_COOLDOWN_MINUTES', '10'))
 SIMILARITY_THRESHOLD = int(os.environ.get('SIMILARITY_THRESHOLD', '80'))
 MAX_REQUESTS_PER_MINUTE = int(os.environ.get('MAX_REQUESTS_PER_MINUTE', '10'))
@@ -169,7 +169,7 @@ def normalize_url(url):
         return url
 
 def _normalize_title_for_match(title: str) -> str:
-    """Normalize title for fuzzy matching (lowercase, remove extra spaces and punctuation)."""
+    """Normalize title for fuzzy matching"""
     if not title:
         return ""
     t = re.sub(r'[^\w\s]', ' ', title)
@@ -177,10 +177,7 @@ def _normalize_title_for_match(title: str) -> str:
     return t.lower()
 
 def get_last_similar_request_for_user(user_id: int, title: str, minutes_window: int = REQUEST_COOLDOWN_MINUTES):
-    """
-    Look up the user's most recent request that is sufficiently similar to `title`
-    AND within the specified minutes_window. Returns a dict with stored_title, requested_at, score or None.
-    """
+    """Look up the user's most recent request that is sufficiently similar to title"""
     conn = get_db_connection()
     if not conn:
         return None
@@ -238,7 +235,7 @@ def get_last_similar_request_for_user(user_id: int, title: str, minutes_window: 
         return None
 
 def user_burst_count(user_id: int, window_seconds: int = 60):
-    """Count how many requests this user made in the last window_seconds."""
+    """Count how many requests this user made in the last window_seconds"""
     conn = get_db_connection()
     if not conn:
         return 0
@@ -356,7 +353,7 @@ def get_db_connection():
     try:
         conn_str = FIXED_DATABASE_URL or DATABASE_URL
         if not conn_str:
-            logger.error("No database URL configured (FIXED_DATABASE_URL or DATABASE_URL).")
+            logger.error("No database URL configured")
             return None
         return psycopg2.connect(conn_str)
     except Exception as e:
@@ -512,7 +509,7 @@ def get_movies_from_db(user_query, limit=10):
                 pass
 
 def store_user_request(user_id, username, first_name, movie_title, group_id=None, message_id=None):
-    """Store user request in database. Uses ON CONFLICT DO UPDATE to refresh timestamp for exact duplicates."""
+    """Store user request in database"""
     try:
         conn = get_db_connection()
         if not conn:
@@ -615,7 +612,7 @@ Time: {datetime.now().strftime('%Y-%m-%d %I:%M %p')}
         logger.error(f"Error sending admin notification: {e}")
 
 async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title, movie_url_or_file_id):
-    """Notify users who requested a movie — add caption when sending media."""
+    """Notify users who requested a movie"""
     logger.info(f"Attempting to notify users for movie: {movie_title}")
     conn = None
     cur = None
@@ -796,7 +793,7 @@ def get_main_keyboard():
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
 
 def get_admin_request_keyboard(user_id, movie_title):
-    """Inline keyboard for admin actions on a user request."""
+    """Inline keyboard for admin actions on a user request"""
     sanitized_title = movie_title[:30]
 
     keyboard = [
@@ -847,7 +844,7 @@ def create_movie_selection_keyboard(movies, page=0, movies_per_page=5):
     return InlineKeyboardMarkup(keyboard)
 
 def get_all_movie_qualities(movie_id):
-    """Fetch all available qualities (URL/File ID) for a given movie ID."""
+    """Fetch all available qualities for a given movie ID"""
     conn = get_db_connection()
     if not conn:
         return []
@@ -877,7 +874,7 @@ def get_all_movie_qualities(movie_id):
             conn.close()
 
 def create_quality_selection_keyboard(movie_id, title, qualities):
-    """Create inline keyboard with quality selection buttons."""
+    """Create inline keyboard with quality selection buttons"""
     keyboard = []
 
     for quality, url, file_id in qualities:
@@ -891,10 +888,7 @@ def create_quality_selection_keyboard(movie_id, title, qualities):
 
 # ==================== HELPER FUNCTION ====================
 async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int, title: str, url: Optional[str] = None, file_id: Optional[str] = None):
-    """
-    Sends the movie file/link to the user with a warning and caption.
-    This function expects the specific URL/File ID to be passed as arguments.
-    """
+    """Sends the movie file/link to the user with a warning and caption"""
     chat_id = update.effective_chat.id
 
     if not url and not file_id:
@@ -1209,7 +1203,7 @@ Bᴀs ᴍᴏᴠɪᴇ ᴋᴀ ɴᴀᴍᴇ + ʏᴇᴀʀ (ᴏʀ Sᴇʀɪᴇs Sᴇᴀ
         return MAIN_MENU
 
 async def request_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle movie requests with duplicate detection, fuzzy matching and cooldowns."""
+    """Handle movie requests with duplicate detection, fuzzy matching and cooldowns"""
     try:
         user_message = (update.message.text or "").strip()
         user = update.effective_user
@@ -1291,57 +1285,23 @@ async def request_movie_from_button(update: Update, context: ContextTypes.DEFAUL
             await update.message.reply_text("कृपया मूवी का नाम भेजें।")
             return REQUESTING_FROM_BUTTON
 
-        burst = user_burst_count(user.id, window_seconds=60)
-        if burst >= MAX_REQUESTS_PER_MINUTE:
-            msg = await update.message.reply_text(
-                "🛑 तुम बहुत जल्दी-जल्दी requests भेज रहे हो। कुछ देर रोकें (कुछ मिनट) और फिर कोशिश करें।"
-            )
-            track_message_for_deletion(update.effective_chat.id, msg.message_id, 120)
-            return REQUESTING_FROM_BUTTON
-
-        movie_title = user_message
-
-        similar = get_last_similar_request_for_user(user.id, movie_title, minutes_window=REQUEST_COOLDOWN_MINUTES)
-        if similar:
-            last_time = similar.get("requested_at")
-            elapsed = datetime.now() - last_time
-            minutes_passed = int(elapsed.total_seconds() / 60)
-            minutes_left = max(0, REQUEST_COOLDOWN_MINUTES - minutes_passed)
-            if minutes_left > 0:
-                strict_text = (
-                    "🛑 Ruk jao! Aapne ye request abhi bheji thi.\n\n"
-                    "Baar‑baar request karne se movie jaldi nahi aayegi.\n\n"
-                    f"Similar previous request: \"{similar.get('stored_title')}\" ({similar.get('score')}% match)\n"
-                    f"Kripya {minutes_left} minute baad dobara koshish karein. 🙏"
-                )
-                msg = await update.message.reply_text(strict_text)
-                track_message_for_deletion(update.effective_chat.id, msg.message_id, 120)
-                return REQUESTING_FROM_BUTTON
-
-        stored = store_user_request(
-            user.id,
-            user.username,
-            user.first_name,
-            movie_title,
-            update.effective_chat.id if update.effective_chat.type != "private" else None,
-            update.message.message_id
-        )
+        # Store movie name in context for confirmation
+        context.user_data['pending_request'] = user_message
         
-        if not stored:
-            logger.error("Failed to store user request in DB.")
-            await update.message.reply_text("Sorry, आपका request store नहीं हो पाया। बाद में कोशिश करें।")
-            return REQUESTING_FROM_BUTTON
-
-        group_info = update.effective_chat.title if update.effective_chat.type != "private" else None
-        await send_admin_notification(context, user, movie_title, group_info)
-
+        # Show confirmation button
+        confirm_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📽️ Confirm 🎬", callback_data=f"confirm_request_{user_message[:40]}")]
+        ])
+        
         msg = await update.message.reply_text(
-            f"✅ Perfect! आपका request '{movie_title}' के लिए सफलतापूर्वक भेज दिया गया है।\n\n"
-            f"जैसे ही यह उपलब्ध होगा, मैं आपको तुरंत सूचित कर दूँगा! 🎬",
-            reply_markup=get_main_keyboard()
+            f"✅ आपने '<b>{user_message}</b>' को रिक्वेस्ट करना चाहते हैं?\n\n"
+            f"<b>💫 अब बस अपनी मूवी या वेब-सीरीज़ का मूल नाम भेजें और कन्फर्म बटन पर क्लिक करें!</b>\n\n"
+            f"कृपया कन्फर्म बटन पर क्लिक करें 👇",
+            reply_markup=confirm_keyboard,
+            parse_mode='HTML'
         )
         track_message_for_deletion(update.effective_chat.id, msg.message_id, 180)
-
+        
         return MAIN_MENU
 
     except Exception as e:
@@ -1401,7 +1361,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
         elif query.data.startswith("admin_fulfill_"):
-            parts = query.data.split('_', 2)
+            parts = query.data.split('_', 3)
             user_id = int(parts)
             movie_title = parts
 
@@ -1430,7 +1390,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text("❌ Database error during fulfillment.")
 
         elif query.data.startswith("admin_delete_"):
-            parts = query.data.split('_', 2)
+            parts = query.data.split('_', 3)
             user_id = int(parts)
             movie_title = parts
 
@@ -1472,7 +1432,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             title = movie_data['title']
 
-            await query.edit_message_text(f"✅ Sending **{title}** in **{selected_quality}**...", parse_mode='Markdown')
+            await query.edit_message_text(f"Sending **{title}**...", parse_mode='Markdown')
 
             await send_movie_to_user(
                 update,
@@ -1526,9 +1486,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 <b>📌 क्यों सही नाम भेजना ज़रूरी है?</b>
 सिर्फ़ सही नाम भेजेंगे, तो मुझे उसे ढूँढने में आसानी होगी
-और जैसे ही वो उपलब्ध होगी, मैं आपको तुरंत सूचित कर दूँगा।
+और जैसे ही वो उपलब्ध होगी, मैं आपको तुरंत सूचित कर दिया जायेगा।
 
-<b>✔️ सही तरीका:</b>
+<b>✔️ सही तरीका: गूगल से स्पेलिंग सर्च कर ले</b>
 • KGF 2
 • Panchayat
 • Mirzapur
@@ -1541,34 +1501,95 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 ━━━━━━━━━━━━━━
 
-<b>💫 अब बस अपनी मूवी या वेब-सीरीज़ का सिर्फ़ नाम भेजें!</b>
+<b>💫 अब बस अपनी मूवी या वेब-सीरीज़ का सिर्फ़ नाम भेजें और कन्फर्म बटन पर क्लिक करे!</b>
 <b>👉 (Name Only — No extra words, No details)</b>
 ━━━━━━━━━━━━━━
 """
             
-            # Create attractive button
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton(
-                    "📽️ अपनी फिल्म/Web Series का नाम भेजें 🎬",
-                    callback_data="start_request_input"
-                )]
-            ])
-            
             await query.edit_message_text(
                 text=request_instruction_text,
-                parse_mode='HTML',
-                reply_markup=keyboard
-            )
-
-        elif query.data == "start_request_input":
-            # When user clicks the button to start request
-            await query.edit_message_text(
-                "✅ बहुत बढ़िया! अब बस अपनी मूवी या वेब-सीरीज़ का <b>सिर्फ़ नाम</b> भेजें।\n\n"
-                "Example: <code>KGF 2</code> या <code>Mirzapur</code>",
                 parse_mode='HTML'
             )
-            # Set conversation state to handle next message as movie request
-            return REQUESTING_FROM_BUTTON
+            
+            # Set the conversation state to REQUESTING_FROM_BUTTON
+            context.user_data['awaiting_request'] = True
+
+        elif query.data.startswith("confirm_request_"):
+            # Extract movie title from user_data
+            movie_title = context.user_data.get('pending_request')
+            
+            if not movie_title:
+                await query.edit_message_text("❌ Error: Request data not found. Please try again.")
+                return
+            
+            user = query.from_user
+            
+            # Check burst limit
+            burst = user_burst_count(user.id, window_seconds=60)
+            if burst >= MAX_REQUESTS_PER_MINUTE:
+                await query.edit_message_text(
+                    "🛑 तुम बहुत जल्दी-जल्दी requests भेज रहे हो। कुछ देर रोकें (कुछ मिनट) और फिर कोशिश करें।"
+                )
+                return
+            
+            # Check for similar recent requests
+            similar = get_last_similar_request_for_user(user.id, movie_title, minutes_window=REQUEST_COOLDOWN_MINUTES)
+            if similar:
+                last_time = similar.get("requested_at")
+                elapsed = datetime.now() - last_time
+                minutes_passed = int(elapsed.total_seconds() / 60)
+                minutes_left = max(0, REQUEST_COOLDOWN_MINUTES - minutes_passed)
+                if minutes_left > 0:
+                    await query.edit_message_text(
+                        "🛑 Ruk jao! Aapne ye request abhi bheji thi.\n\n"
+                        "Baar‑baar request karne se movie jaldi nahi aayegi.\n\n"
+                        f"Similar previous request: \"{similar.get('stored_title')}\" ({similar.get('score')}% match)\n"
+                        f"Kripya {minutes_left} minute baad dobara koshish karein. 🙏"
+                    )
+                    return
+            
+            # Store the request
+            stored = store_user_request(
+                user.id,
+                user.username,
+                user.first_name,
+                movie_title,
+                query.message.chat.id if query.message.chat.type != "private" else None,
+                query.message.message_id
+            )
+            
+            if not stored:
+                logger.error("Failed to store user request in DB.")
+                await query.edit_message_text("Sorry, आपका request store नहीं हो पाया। बाद में कोशिश करें।")
+                return
+            
+            # Send admin notification
+            group_info = query.message.chat.title if query.message.chat.type != "private" else None
+            await send_admin_notification(context, user, movie_title, group_info)
+            
+            # Send confirmation message
+            confirmation_text = f"""
+✅ <b>Request Successfully Submitted!</b>
+
+🎬 Movie: <b>{movie_title}</b>
+
+📝 आपकी request सफलतापूर्वक दर्ज कर लि गई है!
+
+⏳ जैसे ही यह उपलब्ध होगी, मैं आपको तुरंत सूचित कर दिया जायेगा।
+
+धन्यवाद! 🙏
+"""
+            
+            await query.edit_message_text(
+                confirmation_text,
+                parse_mode='HTML'
+            )
+            
+            # Clear pending request from context
+            if 'pending_request' in context.user_data:
+                del context.user_data['pending_request']
+            if 'awaiting_request' in context.user_data:
+                del context.user_data['awaiting_request']
 
         elif query.data.startswith("download_"):
             movie_title = query.data.replace("download_", "")
@@ -1607,7 +1628,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin command to add a movie manually"""
     if update.effective_user.id != ADMIN_USER_ID:
-        await update.message.reply_text("Sorry, सिर्फ एडमिन ही इस कमांड का इस्तेमाल कर सकते हैं।")
+        await update.message.reply_text("Sorry Darling, सिर्फ एडमिन ही इस कमांड का इस्तेमाल कर सकते हैं।")
         return
 
     conn = None
@@ -1679,7 +1700,7 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def bulk_add_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Add multiple movies at once"""
     if update.effective_user.id != ADMIN_USER_ID:
-        await update.message.reply_text("Sorry, सिर्फ एडमिन ही इस कमांड का इस्तेमाल कर सकते हैं।")
+        await update.message.reply_text("Sorry Darling, सिर्फ एडमिन ही इस कमांड का इस्तेमाल कर सकते हैं।")
         return
 
     try:
@@ -1766,7 +1787,7 @@ Details:
 async def add_alias(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Add an alias for an existing movie"""
     if update.effective_user.id != ADMIN_USER_ID:
-        await update.message.reply_text("Sorry, सिर्फ एडमिन ही इस कमांड का इस्तेमाल कर सकते हैं।")
+        await update.message.reply_text("Sorry Darling, सिर्फ एडमिन ही इस कमांड का इस्तेमाल कर सकते हैं।")
         return
 
     conn = None
@@ -1856,7 +1877,7 @@ async def list_aliases(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def bulk_add_aliases(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Add multiple aliases at once"""
     if update.effective_user.id != ADMIN_USER_ID:
-        await update.message.reply_text("Sorry, सिर्फ एडमिन ही इस कमांड का इस्तेमाल कर सकते हैं।")
+        await update.message.reply_text("Sorry Darling, सिर्फ एडमिन ही इस कमांड का इस्तेमाल कर सकते हैं।")
         return
 
     conn = None
@@ -1934,7 +1955,7 @@ Failed: {failed_count}
 async def notify_manually(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Manually notify users about a movie"""
     if update.effective_user.id != ADMIN_USER_ID:
-        await update.message.reply_text("Sorry, सिर्फ एडमिन ही इस कमांड का इस्तेमाल कर सकते हैं।")
+        await update.message.reply_text("Sorry Darling, सिर्फ एडमिन ही इस कमांड का इस्तेमाल कर सकते हैं।")
         return
 
     try:
@@ -2001,7 +2022,6 @@ async def notify_user_by_username(update: Update, context: ContextTypes.DEFAULT_
 
         user_id, first_name = user
 
-        # Send message without parse_mode to preserve user formatting
         await context.bot.send_message(
             chat_id=user_id,
             text=message_text
@@ -2055,7 +2075,6 @@ async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         for user_id, first_name, username in all_users:
             try:
-                # Send message without parse_mode to preserve formatting
                 await context.bot.send_message(
                     chat_id=user_id,
                     text=message_text
@@ -2272,8 +2291,7 @@ async def notify_user_with_media(update: Update, context: ContextTypes.DEFAULT_T
         confirmation += f"To: `@{target_username}` ({first_name})\n"
         confirmation += f"Media Type: {media_type.capitalize()}"
 
-        await update.message.reply_text(
-        confirmation, parse_mode='Markdown')
+        await update.message.reply_text(confirmation, parse_mode='Markdown')
 
         cur.close()
         conn.close()
@@ -2846,11 +2864,19 @@ def main():
 
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).read_timeout(30).write_timeout(30).build()
 
+    # Custom handler for request flow
+    async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle text messages based on context"""
+        if context.user_data.get('awaiting_request'):
+            return await request_movie_from_button(update, context)
+        else:
+            return await main_menu(update, context)
+
     # Conversation handler for user interaction flow
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start)],
         states={
-            MAIN_MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, main_menu)],
+            MAIN_MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message)],
             SEARCHING: [MessageHandler(filters.TEXT & ~filters.COMMAND, search_movies)],
             REQUESTING: [MessageHandler(filters.TEXT & ~filters.COMMAND, request_movie)],
             REQUESTING_FROM_BUTTON: [MessageHandler(filters.TEXT & ~filters.COMMAND, request_movie_from_button)],
@@ -2860,7 +2886,7 @@ def main():
         per_chat=True,
     )
 
-    # Register callback handler FIRST to prioritize button clicks over text messages.
+    # Register callback handler FIRST
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(conv_handler)
 
