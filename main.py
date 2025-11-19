@@ -2746,33 +2746,34 @@ async def get_bot_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Error: {e}")
 
 stats_text = f"""
-📊 **Bot Statistics**
+📊 *Bot Statistics*
 
-**Database:**
+*Database:*
 • Movies: {total_movies[0]}
 • Users: {total_users[0]}
 • Total Requests: {total_requests[0]}
 • Fulfilled: {fulfilled[0]}
 • Pending: {total_requests[0] - fulfilled[0]}
 
-**Activity:**
+*Activity:*
 • Today's Requests: {today_requests[0]}
 • Fulfillment Rate: {fulfillment_rate:.1f}%
 
-**Top Requesters:**
+*Top Requesters:*
 """
 
-if top_users:
-    for name, username, count in top_users:
-        username_str = f"`@{username}`" if username else "N/A"
-        stats_text += f"• {name} ({username_str}): {count} requests\n"
-else:
-    stats_text += "No user data available."
+        # Add top users
+        if top_users:
+            for name, username, count in top_users:
+                username_str = f"@{username}" if username else "N/A"
+                stats_text += f"• {name} ({username_str}): {count} requests\n"
+        else:
+            stats_text += "No user data available."
 
-await update.message.reply_text(stats_text, parse_mode='Markdown')
+        await update.message.reply_text(stats_text, parse_mode='Markdown')
 
-cur.close()
-conn.close()
+        cur.close()
+        conn.close()
 
     except Exception as e:
         logger.error(f"Error in get_bot_stats: {e}")
