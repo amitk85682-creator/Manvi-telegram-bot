@@ -2745,6 +2745,8 @@ async def get_bot_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
 
+stats_text = f"""
+📊 **Bot Statistics**
 
 **Database:**
 • Movies: {total_movies}
