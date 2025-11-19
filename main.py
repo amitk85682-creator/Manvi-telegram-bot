@@ -2706,21 +2706,27 @@ async def get_bot_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         cur = conn.cursor()
 
+        # Total movies
         cur.execute("SELECT COUNT(*) FROM movies")
-total_movies = cur.fetchone()  #  add करें
+        total_movies = cur.fetchone()
 
-cur.execute("SELECT COUNT(DISTINCT user_id) FROM user_requests")
-total_users = cur.fetchone()  #  add करें
+        # Total unique users
+        cur.execute("SELECT COUNT(DISTINCT user_id) FROM user_requests")
+        total_users = cur.fetchone()
 
-cur.execute("SELECT COUNT(*) FROM user_requests")
-total_requests = cur.fetchone()  #  add करें
+        # Total requests
+        cur.execute("SELECT COUNT(*) FROM user_requests")
+        total_requests = cur.fetchone()
 
-cur.execute("SELECT COUNT(*) FROM user_requests WHERE notified = TRUE")
-fulfilled = cur.fetchone()  #  add करें
+        # Fulfilled requests
+        cur.execute("SELECT COUNT(*) FROM user_requests WHERE notified = TRUE")
+        fulfilled = cur.fetchone()
 
-cur.execute("SELECT COUNT(*) FROM user_requests WHERE DATE(requested_at) = CURRENT_DATE")
-today_requests = cur.fetchone()  #  add करें
+        # Today's requests
+        cur.execute("SELECT COUNT(*) FROM user_requests WHERE DATE(requested_at) = CURRENT_DATE")
+        today_requests = cur.fetchone()
 
+        # Top users
         cur.execute("""
             SELECT first_name, username, COUNT(*) as req_count
             FROM user_requests
@@ -2730,9 +2736,15 @@ today_requests = cur.fetchone()  #  add करें
         """)
         top_users = cur.fetchall()
 
-        fulfillment_rate = (fulfilled / total_requests * 100) if total_requests > 0 else 0
+        fulfillment_rate = (fulfilled[0] / total_requests[0] * 100) if total_requests[0] > 0 else 0
 
-        stats_text = f"""
+        stats_text = f"⭐ Bot Stats Ready!"
+
+        await update.message.reply_text(stats_text)
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {e}")
+
 📊 **Bot Statistics**
 
 **Database:**
