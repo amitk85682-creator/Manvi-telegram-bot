@@ -243,7 +243,7 @@ def user_burst_count(user_id: int, window_seconds: int = 60):
         cur = conn.cursor()
         since = datetime.now() - timedelta(seconds=window_seconds)
         cur.execute("SELECT COUNT(*) FROM user_requests WHERE user_id = %s AND requested_at >= %s", (user_id, since))
-        cnt = cur.fetchone()
+        cnt = cur.fetchone()  #  add करें
         cur.close()
         conn.close()
         return cnt
@@ -1057,16 +1057,16 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if conn:
                     cur = conn.cursor()
                     cur.execute("SELECT COUNT(*) FROM user_requests WHERE user_id = %s", (user_id,))
-                    request_count = cur.fetchone()
+request_count = cur.fetchone()  #  add करें
 
-                    cur.execute("SELECT COUNT(*) FROM user_requests WHERE user_id = %s AND notified = TRUE", (user_id,))
-                    fulfilled_count = cur.fetchone()
+cur.execute("SELECT COUNT(*) FROM user_requests WHERE user_id = %s AND notified = TRUE", (user_id,))
+fulfilled_count = cur.fetchone()  #  add करें
 
-                    stats_text = f"""
+stats_text = f"""
 📊 Your Stats:
 - Total Requests: {request_count}
 - Fulfilled Requests: {fulfilled_count}
-                    """
+"""
                     msg = await update.message.reply_text(stats_text)
                     track_message_for_deletion(update.effective_chat.id, msg.message_id, 180)
                 else:
@@ -1501,7 +1501,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 ━━━━━━━━━━━━━━
 
-<b>💫 अब बस अपनी मूवी या वेब-सीरीज़ का सिर्फ़ नाम भेजें और कन्फर्म बटन पर क्लिक करे!</b>
 <b>👉 (Name Only — No extra words, No details)</b>
 ━━━━━━━━━━━━━━
 """
@@ -2652,7 +2651,7 @@ async def list_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur = conn.cursor()
 
         cur.execute("SELECT COUNT(DISTINCT user_id) FROM user_requests")
-        total_users = cur.fetchone()
+        total_users = cur.fetchone()  #  add करें
 
         cur.execute("""
             SELECT
@@ -2708,19 +2707,19 @@ async def get_bot_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur = conn.cursor()
 
         cur.execute("SELECT COUNT(*) FROM movies")
-        total_movies = cur.fetchone()
+total_movies = cur.fetchone()  #  add करें
 
-        cur.execute("SELECT COUNT(DISTINCT user_id) FROM user_requests")
-        total_users = cur.fetchone()
+cur.execute("SELECT COUNT(DISTINCT user_id) FROM user_requests")
+total_users = cur.fetchone()  #  add करें
 
-        cur.execute("SELECT COUNT(*) FROM user_requests")
-        total_requests = cur.fetchone()
+cur.execute("SELECT COUNT(*) FROM user_requests")
+total_requests = cur.fetchone()  #  add करें
 
-        cur.execute("SELECT COUNT(*) FROM user_requests WHERE notified = TRUE")
-        fulfilled = cur.fetchone()
+cur.execute("SELECT COUNT(*) FROM user_requests WHERE notified = TRUE")
+fulfilled = cur.fetchone()  #  add करें
 
-        cur.execute("SELECT COUNT(*) FROM user_requests WHERE DATE(requested_at) = CURRENT_DATE")
-        today_requests = cur.fetchone()
+cur.execute("SELECT COUNT(*) FROM user_requests WHERE DATE(requested_at) = CURRENT_DATE")
+today_requests = cur.fetchone()  #  add करें
 
         cur.execute("""
             SELECT first_name, username, COUNT(*) as req_count
