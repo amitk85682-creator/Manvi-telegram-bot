@@ -2749,30 +2749,30 @@ stats_text = f"""
 📊 **Bot Statistics**
 
 **Database:**
-• Movies: {total_movies}
-• Users: {total_users}
-• Total Requests: {total_requests}
-• Fulfilled: {fulfilled}
-• Pending: {total_requests - fulfilled}
+• Movies: {total_movies[0]}
+• Users: {total_users[0]}
+• Total Requests: {total_requests[0]}
+• Fulfilled: {fulfilled[0]}
+• Pending: {total_requests[0] - fulfilled[0]}
 
 **Activity:**
-• Today's Requests: {today_requests}
+• Today's Requests: {today_requests[0]}
 • Fulfillment Rate: {fulfillment_rate:.1f}%
 
 **Top Requesters:**
 """
 
-        if top_users:
-            for name, username, count in top_users:
-                username_str = f"`@{username}`" if username else "N/A"
-                stats_text += f"• {name} ({username_str}): {count} requests\n"
-        else:
-            stats_text += "No user data available."
+if top_users:
+    for name, username, count in top_users:
+        username_str = f"`@{username}`" if username else "N/A"
+        stats_text += f"• {name} ({username_str}): {count} requests\n"
+else:
+    stats_text += "No user data available."
 
-        await update.message.reply_text(stats_text, parse_mode='Markdown')
+await update.message.reply_text(stats_text, parse_mode='Markdown')
 
-        cur.close()
-        conn.close()
+cur.close()
+conn.close()
 
     except Exception as e:
         logger.error(f"Error in get_bot_stats: {e}")
