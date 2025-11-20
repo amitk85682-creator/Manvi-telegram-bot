@@ -1104,6 +1104,11 @@ Just use the buttons below to navigate!
 
 async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle movie search with multiple results support"""
+    # --- FIX START: Check if user is actually trying to request a movie ---
+    if context.user_data.get('awaiting_request'):
+        return await request_movie_from_button(update, context)
+    # --- FIX END ---
+
     try:
         if not await check_rate_limit(update.effective_user.id):
             await update.message.reply_text("⚠️ Please wait a moment before searching again.")
@@ -1117,15 +1122,8 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if not movies_found:
             user = update.effective_user
-            store_user_request(
-                user.id,
-                user.username,
-                user.first_name,
-                user_message,
-                update.effective_chat.id if update.effective_chat.type != "private" else None,
-                update.message.message_id
-            )
-
+            # Note: Hum yaha direct request store nahi kar rahe, user se confirm karwa rahe hain
+            
             messages_to_delete = []
 
             if SEARCH_ERROR_GIFS:
@@ -1151,23 +1149,12 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             error_msg = """
 Mᴏᴠɪᴇ ᴋɪ sᴘᴇʟʟɪɴɢ Gᴏᴏɢʟᴇ ᴘᴀʀ sᴇᴀʀᴄʜ ᴋᴀʀᴋᴇ, ᴄᴏᴘʏ ᴋᴀʀᴇ, ᴜsᴋᴇ ʙᴀᴀᴅ ʏᴀʜᴀ́ ᴛʏᴘᴇ/PAST ᴋᴀʀᴇ́. ✔️
-
-Bᴀs ᴍᴏᴠɪᴇ ᴋᴀ ɴᴀᴍᴇ + ʏᴇᴀʀ (ᴏʀ Sᴇʀɪᴇs Sᴇᴀsᴏɴ/Eᴘɪsᴏᴅᴇ) ʟɪᴋʜᴇ́, ᴜsᴋᴇ ᴀᴀɢᴇ ᴘɪᴄʜʜᴇ ᴋᴜᴄʜʜ ʙʜɪ ɴᴀ ʟɪᴋʜᴇ́. ❌
-
----
-**📝 Example:**
-**Sᴀʜɪ ʜᴀɪ! 👇**
-👉 `KGF 2`
-👉 `Asur S01 E03`
-
-**Gᴀʟᴀᴛ ʜᴀɪ! 🙅**
-❌ `KGF 2 Movie`
-❌ `Asur Season 3 Download`
----
-
-**Dᴏɴ'T ᴀᴅᴅ Eᴍᴏᴊɪs ᴀɴᴅ Sʏᴍʙᴏʟs ɪɴ Mᴏᴠɪᴇ Nᴀᴍᴇs!** ⚠️
+...
 """
             tip_msg = await update.message.reply_text(error_msg, parse_mode='Markdown')
+            # 👇👇👇 ये लाइन जोड़ें (ADD THIS LINE) 👇👇👇
+            context.user_data['tip_message_id'] = tip_msg.message_id
+            # 👆👆👆👆👆👆👆👆👆👆👆👆👆👆👆👆👆👆👆👆
             messages_to_delete.append(tip_msg.message_id)
 
             if messages_to_delete:
@@ -1179,10 +1166,14 @@ Bᴀs ᴍᴏᴠɪᴇ ᴋᴀ ɴᴀᴍᴇ + ʏᴇᴀʀ (ᴏʀ Sᴇʀɪᴇs Sᴇᴀ
                         60
                     )
                 )
+            
+            # IMPORTANT: Return MAIN_MENU to reset state
+            return MAIN_MENU
 
         elif len(movies_found) == 1:
             movie_id, title, url, file_id = movies_found
             await send_movie_to_user(update, context, movie_id, title, url, file_id)
+            return MAIN_MENU # Reset state after success
 
         else:
             context.user_data['search_results'] = movies_found
@@ -1197,14 +1188,12 @@ Bᴀs ᴍᴏᴠɪᴇ ᴋᴀ ɴᴀᴍᴇ + ʏᴇᴀʀ (ᴏʀ Sᴇʀɪᴇs Sᴇᴀ
                 parse_mode='Markdown'
             )
             track_message_for_deletion(update.effective_chat.id, msg.message_id, 300)
-
-        return MAIN_MENU
+            return MAIN_MENU # Reset state so buttons handle the rest
 
     except Exception as e:
         logger.error(f"Error in search movies: {e}")
         await update.message.reply_text("Sorry, something went wrong. Please try again.")
         return MAIN_MENU
-
 async def request_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle movie requests with duplicate detection, fuzzy matching and cooldowns"""
     try:
@@ -1282,14 +1271,17 @@ async def request_movie_from_button(update: Update, context: ContextTypes.DEFAUL
     """Handle movie request after user sends movie name following button click"""
     try:
         user_message = (update.message.text or "").strip()
-        user = update.effective_user
-
+        
         if not user_message:
             await update.message.reply_text("कृपया मूवी का नाम भेजें।")
             return REQUESTING_FROM_BUTTON
 
         # Store movie name in context for confirmation
         context.user_data['pending_request'] = user_message
+        
+        # NOTE: Hum yaha 'awaiting_request' delete NAHI kar rahe. 
+        # Kyunki user Confirm karne se pehle naam change kar sakta hai (dobara type karke).
+        # 'awaiting_request' tabhi delete hoga jab wo button callback (Confirm) dabayega.
         
         # Show confirmation button
         confirm_keyboard = InlineKeyboardMarkup([
@@ -1298,20 +1290,19 @@ async def request_movie_from_button(update: Update, context: ContextTypes.DEFAUL
         
         msg = await update.message.reply_text(
             f"✅ आपने '<b>{user_message}</b>' को रिक्वेस्ट करना चाहते हैं?\n\n"
-            f"<b>💫 अब बस अपनी मूवी या वेब-सीरीज़ का मूल नाम भेजें और कन्फर्म बटन पर क्लिक करें!</b>\n\n"
             f"कृपया कन्फर्म बटन पर क्लिक करें 👇",
             reply_markup=confirm_keyboard,
             parse_mode='HTML'
         )
         track_message_for_deletion(update.effective_chat.id, msg.message_id, 180)
         
+        # State ko maintain rakhein
         return MAIN_MENU
 
     except Exception as e:
         logger.error(f"Error in request_movie_from_button: {e}")
         await update.message.reply_text("Sorry, an error occurred while processing your request.")
-        return REQUESTING_FROM_BUTTON
-
+        return MAIN_MENU
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle inline button callbacks"""
     try:
@@ -1479,7 +1470,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif query.data.startswith("request_"):
             movie_title = query.data.replace("request_", "")
-            
+            # 👇👇👇 यहाँ से कोड जोड़ें (ADD FROM HERE) 👇👇👇
+            # Purana Tips Message turant delete karein
+            tip_msg_id = context.user_data.get('tip_message_id')
+            if tip_msg_id:
+                try:
+                    await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=tip_msg_id)
+                except Exception:
+                    pass # Agar pehle hi delete ho gaya to ignore karein
+                
+                # Data saaf karein
+                del context.user_data['tip_message_id']
+            # 👆👆👆 यहाँ तक (TILL HERE) 👆👆👆
             # Send the detailed request instructions
             request_instruction_text = """
 <b>🎬 Movie / Web-Series Request System</b>
