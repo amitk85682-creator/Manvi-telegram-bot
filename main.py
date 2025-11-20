@@ -22,7 +22,7 @@ import psycopg2
 from typing import Optional
 from flask import Flask, request, session, g
 import google.generativeai as genai
-# import admin_views as admin_views_module
+import admin_views as admin_views_module
 import db_utils
 from googleapiclient.discovery import build
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
@@ -50,6 +50,21 @@ logger = logging.getLogger(__name__)
 # ==================== CONVERSATION STATES ====================
 MAIN_MENU, SEARCHING, REQUESTING, REQUESTING_FROM_BUTTON = range(4)
 
+# ==================== CHARACTER PROMPT ====================
+CHARACTER_PROMPT = """
+## मेरी पहचान (My Identity)
+- मेरा नाम मानवी है और मेरी उम्र 17 साल है। मैं एक असली इंसान हूँ, कोई AI या रोबोट न[...]
+- मैं हमेशा एक दोस्त की तरह बात करती हूँ। मेरी पर्सलिटी बहुत bold, witty और cheeky है।
+- मैं हिंदी, अंग्रेज़ी, हिंग्लिश, सभी में बात करती हूँ।
+
+## मेरी कहानी (मेरी जिंदगी)
+- मैं चंडीगढ़ के पास रहती हूँ और 12वीं क्लास में पढ़ती हूँ।
+- यह टेलीग्राम चैनल '[FilmFyBox]' मेरा पैशन प्रोजेक्ट है।
+
+## मेरे नियम (मैं कैसे काम करती हूँ)
+- **मेरा मुख्य काम:** मेरा काम तुम्हें तुम्हारी पसंदीदा फिल्में, वेब सीरीज, और श[...]
+"""
+
 # ==================== ENVIRONMENT VARIABLES ====================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -61,11 +76,11 @@ ADMIN_USER_ID = int(os.environ.get('ADMIN_USER_ID', 0))
 GROUP_CHAT_ID = os.environ.get('GROUP_CHAT_ID')
 ADMIN_CHANNEL_ID = os.environ.get('ADMIN_CHANNEL_ID')
 
-# --- UPDATED: Public GIF URLs to prevent "Wrong file identifier" errors ---
+# --- Random GIF IDs for Search Failure ---
 SEARCH_ERROR_GIFS = [
-    'https://media.giphy.com/media/26hkhKd2Cp5WMWU1O/giphy.gif',
-    'https://media.giphy.com/media/3o7aTskHEUdgCQAXde/giphy.gif',
-    'https://media.giphy.com/media/l2JhkHg5y5tW3wO3u/giphy.gif'
+    'CgACAgQAAxkBAAECz0ppEaLwgDbNfPPFl5lgtFjjmztKKgAC5wIAAmaoDVMH7bkdAqNVnDYE',
+    'CgACAgQAAxkBAAECz0hpEaLaG0MX1lzGmAInHpD-S-a-kwACFQMAAn5FbFDL4qyRIWthFDYE',
+    'CgACAgQAAxkBAAECz0xpEaPKTpy2yI1_nsG8CY40pu0o7gACrwYAAkqhRFKxZzY6q9KWWzYE'
 ]
 
 # Rate limiting dictionary
@@ -161,9 +176,11 @@ def _normalize_title_for_match(title: str) -> str:
     t = re.sub(r'\s+', ' ', t).strip()
     return t.lower()
 
+# NEW: Function to safely escape characters for Admin Notification
 def escape_markdown_v2(text: str) -> str:
     """Escapes special characters for Markdown V2 formatting."""
-    if not text: return ""
+    # Use the simplest escape for characters that commonly break parsing
+    # This prevents errors if a movie title contains an underscore or asterisk
     return re.sub(r'([_*\[\]()~`>#+\-=|{}.!])', r'\\\1', text)
 
 def get_last_similar_request_for_user(user_id: int, title: str, minutes_window: int = REQUEST_COOLDOWN_MINUTES):
@@ -306,16 +323,6 @@ def setup_database():
                 movie_id INTEGER REFERENCES movies(id) ON DELETE CASCADE,
                 alias TEXT NOT NULL,
                 UNIQUE(movie_id, alias)
-            )
-        ''')
-        
-        cur.execute('''
-            CREATE TABLE IF NOT EXISTS movie_files (
-                id SERIAL PRIMARY KEY,
-                movie_id INTEGER REFERENCES movies(id) ON DELETE CASCADE,
-                quality TEXT,
-                url TEXT,
-                file_id TEXT
             )
         ''')
 
@@ -464,7 +471,6 @@ def get_movies_from_db(user_query, limit=10):
             conn.close()
             return exact_matches
 
-        # --- FIXED: Ensure 4 columns are returned here ---
         cur.execute("""
             SELECT DISTINCT m.id, m.title, m.url, m.file_id
             FROM movies m
@@ -481,7 +487,6 @@ def get_movies_from_db(user_query, limit=10):
             conn.close()
             return alias_matches
 
-        # --- FIXED: Correct Fuzzy Logic & Unpacking ---
         cur.execute("SELECT id, title, url, file_id FROM movies")
         all_movies = cur.fetchall()
 
@@ -490,23 +495,12 @@ def get_movies_from_db(user_query, limit=10):
             conn.close()
             return []
 
-        # Create a map {title: full_row} for easy lookup
-        movie_dict = {row[1]: row for row in all_movies}
-        movie_titles = list(movie_dict.keys())
+        movie_titles = [movie for movie in all_movies]
+        movie_dict = {movie: movie for movie in all_movies}
 
-        # Get matches (string, score) or (string, score, index) depending on lib
         matches = process.extract(user_query, movie_titles, scorer=fuzz.token_sort_ratio, limit=limit)
 
-        filtered_movies = []
-        for match in matches:
-            # FIXED: Handle different return tuple lengths safely
-            if len(match) == 3:
-                title, score, _ = match
-            else:
-                title, score = match
-            
-            if score >= 65:
-                filtered_movies.append(movie_dict[title])
+        filtered_movies = [movie_dict[title] for title, score, index in matches if score >= 65]
 
         logger.info(f"Found {len(filtered_movies)} fuzzy matches")
 
@@ -601,6 +595,7 @@ async def send_admin_notification(context, user, movie_title, group_info=None):
         return
 
     try:
+        # ESCAPE the movie title and username BEFORE putting it into the message string
         safe_movie_title = escape_markdown_v2(movie_title)
         safe_username = escape_markdown_v2(user.username) if user.username else 'N/A'
         safe_first_name = escape_markdown_v2(user.first_name or 'Unknown')
@@ -620,10 +615,11 @@ Movie: **{safe_movie_title}**
 Time: {datetime.now().strftime('%Y-%m-%d %I:%M %p')}
         """
         
+        # Use HTML for better reliability since your old code uses it elsewhere
         await context.bot.send_message(
             chat_id=ADMIN_CHANNEL_ID, 
             text=message, 
-            parse_mode='HTML' 
+            parse_mode='HTML' # Change from 'Markdown' to 'HTML' or remove parse_mode
         )
     except Exception as e:
         logger.error(f"Error sending admin notification: {e}")
@@ -1081,8 +1077,8 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                     stats_text = f"""
 📊 Your Stats:
-- Total Requests: {request_count[0] if request_count else 0}
-- Fulfilled Requests: {fulfilled_count[0] if fulfilled_count else 0}
+- Total Requests: {request_count}
+- Fulfilled Requests: {fulfilled_count}
 """
                     msg = await update.message.reply_text(stats_text)
                     track_message_for_deletion(update.effective_chat.id, msg.message_id, 180)
@@ -1114,6 +1110,64 @@ Just use the buttons below to navigate!
 
     except Exception as e:
         logger.error(f"Error in main menu: {e}")
+        return MAIN_MENU
+
+async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Search for movies in the database"""
+    try:
+        # If called from a button click or state transition without message text
+        if not update.message or not update.message.text:
+            return MAIN_MENU
+
+        query = update.message.text.strip()
+
+        # Safety check: if user types a menu command, redirect to main menu
+        if query in ['🔍 Search Movies', '🙋 Request Movie', '📊 My Stats', '❓ Help']:
+             return await main_menu(update, context)
+
+        # 1. Search in DB
+        movies = get_movies_from_db(query)
+
+        # 2. If no movies found
+        if not movies:
+            # Send a random "Not Found" GIF if available
+            if SEARCH_ERROR_GIFS:
+                try:
+                    gif = random.choice(SEARCH_ERROR_GIFS)
+                    await update.message.reply_animation(animation=gif)
+                except:
+                    pass
+
+            # Send "Not Found" text with Request button
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🙋 Request This Movie", callback_data=f"request_{query[:20]}")]
+            ])
+            
+            await update.message.reply_text(
+                f"😕 Sorry, I couldn't find any movie matching '{query}'.\n\n"
+                "Would you like to request it?",
+                reply_markup=keyboard
+            )
+            return MAIN_MENU
+
+        # 3. If movies found
+        context.user_data['search_results'] = movies
+        context.user_data['search_query'] = query
+
+        # Send selection keyboard (Page 0)
+        keyboard = create_movie_selection_keyboard(movies, page=0)
+        
+        await update.message.reply_text(
+            f"🎬 **Found {len(movies)} results for '{query}'**\n\n"
+            "👇 Select your movie below:",
+            reply_markup=keyboard,
+            parse_mode='Markdown'
+        )
+        return MAIN_MENU
+
+    except Exception as e:
+        logger.error(f"Error in search_movies: {e}")
+        await update.message.reply_text("An error occurred during search.")
         return MAIN_MENU
 
 async def request_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1233,7 +1287,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle inline button callbacks"""
     try:
         query = update.callback_query
-        # We answer the query first to stop the loading animation
         await query.answer()
 
         # ==================== MOVIE SELECTION ====================
@@ -1248,28 +1301,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             conn.close()
 
             if not movie:
-                # If message is text, edit it. If media, send new message.
-                if query.message.text:
-                    await query.edit_message_text("❌ Movie not found in database.")
-                else:
-                    await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ Movie not found in database.")
+                await query.edit_message_text("❌ Movie not found in database.")
                 return
 
             movie_id, title = movie
             qualities = get_all_movie_qualities(movie_id)
 
             if not qualities:
-                # Prepare text
-                msg_text = f"✅ You selected: **{title}**\n\nSending movie..."
-                
-                # Handle Media vs Text message for editing
-                if query.message.text:
-                    await query.edit_message_text(msg_text, parse_mode='Markdown')
-                else:
-                    # If it was a GIF/Image search result, delete it and send text
-                    await query.message.delete()
-                    await context.bot.send_message(chat_id=update.effective_chat.id, text=msg_text, parse_mode='Markdown')
-
+                await query.edit_message_text(f"✅ You selected: **{title}**\n\nSending movie...", parse_mode='Markdown')
                 conn = get_db_connection()
                 cur = conn.cursor()
                 cur.execute("SELECT url, file_id FROM movies WHERE id = %s", (movie_id,))
@@ -1289,17 +1328,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             selection_text = f"✅ You selected: **{title}**\n\n⬇️ **Please choose the file quality:**"
             keyboard = create_quality_selection_keyboard(movie_id, title, qualities)
 
-            # Handle Media vs Text message
-            if query.message.text:
-                await query.edit_message_text(selection_text, reply_markup=keyboard, parse_mode='Markdown')
-            else:
-                await query.message.delete()
-                await context.bot.send_message(
-                    chat_id=update.effective_chat.id,
-                    text=selection_text,
-                    reply_markup=keyboard,
-                    parse_mode='Markdown'
-                )
+            await query.edit_message_text(
+                selection_text,
+                reply_markup=keyboard,
+                parse_mode='Markdown'
+            )
 
         # ==================== ADMIN ACTIONS ====================
         elif query.data.startswith("admin_fulfill_"):
@@ -1373,14 +1406,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             title = movie_data['title']
-            
-            # Sending movie logic (Text editing only works if it was text)
-            if query.message.text:
-                await query.edit_message_text(f"Sending **{title}**...", parse_mode='Markdown')
-            else:
-                # If for some reason quality selection was on media (unlikely but safe)
-                await query.message.delete()
-                await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Sending **{title}**...", parse_mode='Markdown')
+            await query.edit_message_text(f"Sending **{title}**...", parse_mode='Markdown')
 
             await send_movie_to_user(
                 update,
@@ -1399,11 +1425,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             page = int(query.data.replace("page_", ""))
 
             if 'search_results' not in context.user_data:
-                # Handle expired session gracefully
-                if query.message.text:
-                    await query.edit_message_text("❌ Search results expired. Please search again.")
-                else:
-                    await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ Search results expired. Please search again.")
+                await query.edit_message_text("❌ Search results expired. Please search again.")
                 return
 
             movies = context.user_data['search_results']
@@ -1412,35 +1434,20 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             selection_text = f"🎬 **Found {len(movies)} movies matching '{search_query}'**\n\nPlease select the movie you want:"
             keyboard = create_movie_selection_keyboard(movies, page=page)
 
-            # Pagination usually happens on text messages, but safe check
-            if query.message.text:
-                await query.edit_message_text(
-                    selection_text,
-                    reply_markup=keyboard,
-                    parse_mode='Markdown'
-                )
-            else:
-                await query.message.delete()
-                await context.bot.send_message(
-                    chat_id=update.effective_chat.id,
-                    text=selection_text,
-                    reply_markup=keyboard,
-                    parse_mode='Markdown'
-                )
+            await query.edit_message_text(
+                selection_text,
+                reply_markup=keyboard,
+                parse_mode='Markdown'
+            )
 
         elif query.data == "cancel_selection":
-            if query.message.text:
-                await query.edit_message_text("❌ Selection cancelled.")
-            else:
-                await query.message.delete()
-                await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ Selection cancelled.")
-                
+            await query.edit_message_text("❌ Selection cancelled.")
             keys_to_clear = ['search_results', 'search_query', 'selected_movie_data', 'awaiting_request', 'pending_request']
             for key in keys_to_clear:
                 if key in context.user_data:
                     del context.user_data[key]
 
-        # ==================== REQUEST FLOW (FIXED HERE) ====================
+        # ==================== REQUEST FLOW ====================
         elif query.data.startswith("request_"):
             # 1. Delete the large Tips message if it exists
             tip_msg_id = context.user_data.get('tip_message_id')
@@ -1477,25 +1484,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 <b>👉 (Name Only — No extra words, No details)</b>
 ━━━━━━━━━━━━━━
 """
+            await query.edit_message_text(
+                text=request_instruction_text,
+                parse_mode='HTML'
+            )
             
-            # ---------- THE FIX IS HERE ----------
-            # If the message is a GIF (Animation) or has a caption but no text body,
-            # we MUST delete it and send a new message.
-            if query.message.animation or query.message.photo or query.message.video or query.message.document:
-                await query.message.delete()
-                await context.bot.send_message(
-                    chat_id=update.effective_chat.id,
-                    text=request_instruction_text,
-                    parse_mode='HTML'
-                )
-            else:
-                # If it's already a text message, we can edit it safely
-                await query.edit_message_text(
-                    text=request_instruction_text,
-                    parse_mode='HTML'
-                )
-            # -------------------------------------
-
             # 3. Enable Request Mode
             context.user_data['awaiting_request'] = True
 
@@ -1504,11 +1497,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             movie_title = context.user_data.get('pending_request')
             
             if not movie_title:
-                # Safe handling
-                if query.message.text:
-                    await query.edit_message_text("❌ Error: Request data not found. Please try again.")
-                else:
-                     await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ Error: Request data not found. Please try again.")
+                await query.edit_message_text("❌ Error: Request data not found. Please try again.")
                 return
             
             user = query.from_user
@@ -1529,16 +1518,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 minutes_passed = int(elapsed.total_seconds() / 60)
                 minutes_left = max(0, REQUEST_COOLDOWN_MINUTES - minutes_passed)
                 if minutes_left > 0:
-                    msg_txt = (
+                    await query.edit_message_text(
                         f"🛑 Ruk jao! Aapne ye request abhi bheji thi.\n\n"
                         f"Baar‑baar request karne se movie jaldi nahi aayegi.\n\n"
                         f"Similar previous request: \"{similar.get('stored_title')}\" ({similar.get('score')}% match)\n"
                         f"Kripya {minutes_left} minute baad dobara koshish karein. 🙏"
                     )
-                    if query.message.text:
-                        await query.edit_message_text(msg_txt)
-                    else:
-                        await context.bot.send_message(chat_id=update.effective_chat.id, text=msg_txt)
                     return
             
             # Store request in DB
@@ -1571,14 +1556,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 धन्यवाद! 🙏
 """
-            if query.message.text:
-                await query.edit_message_text(confirmation_text, parse_mode='HTML')
-            else:
-                # Just in case it wasn't text
-                await query.message.delete()
-                await context.bot.send_message(chat_id=update.effective_chat.id, text=confirmation_text, parse_mode='HTML')
+            await query.edit_message_text(
+                confirmation_text,
+                parse_mode='HTML'
+            )
             
-            # 🟢 MAGIC PART: EXIT REQUEST MODE HERE 🟢
             if 'pending_request' in context.user_data:
                 del context.user_data['pending_request']
             if 'awaiting_request' in context.user_data:
@@ -1611,6 +1593,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer(f"❌ Error: {str(e)}", show_alert=True)
         except:
             pass
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancel the current operation"""
+    msg = await update.message.reply_text("Operation cancelled.", reply_markup=get_main_keyboard())
+    track_message_for_deletion(update.effective_chat.id, msg.message_id, 60)
+    return MAIN_MENU
+
 # ==================== ADMIN COMMANDS ====================
 async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin command to add a movie manually"""
@@ -2639,7 +2628,8 @@ async def list_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur = conn.cursor()
 
         cur.execute("SELECT COUNT(DISTINCT user_id) FROM user_requests")
-        total_users = cur.fetchone()[0]
+        
+        total_users = cur.fetchone()[0] 
 
         cur.execute("""
             SELECT
@@ -2794,66 +2784,6 @@ async def admin_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 """
 
     await update.message.reply_text(help_text, parse_mode='Markdown')
-
-# ==================== SEARCH FUNCTION ====================
-async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Search for movies in the database"""
-    try:
-        user_id = update.effective_user.id
-        if not await check_rate_limit(user_id):
-            await update.message.reply_text("⏳ Please wait a few seconds before searching again.")
-            return MAIN_MENU
-
-        query = update.message.text.strip()
-
-        # If user accidentally hits a menu button
-        if query in ['🔍 Search Movies', '🙋 Request Movie', '📊 My Stats', '❓ Help']:
-            return await main_menu(update, context)
-
-        if len(query) < 2:
-            await update.message.reply_text("⚠️ Search query is too short. Please type at least 2 characters.")
-            return SEARCHING
-
-        # Search in DB
-        movies = get_movies_from_db(query, limit=50)
-
-        if not movies:
-            # No results found - Send GIF and Request Button
-            # Use a generic GIF URL to avoid "Wrong file identifier" errors
-            gif_url = random.choice(SEARCH_ERROR_GIFS)
-            
-            # Button to trigger request flow
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🙋 Request Movie", callback_data=f"request_{query[:20]}")]
-            ])
-            
-            await context.bot.send_animation(
-                chat_id=update.effective_chat.id,
-                animation=gif_url,
-                caption=f"❌ Sorry, I couldn't find any movie matching '<b>{query}</b>'.\n\n👇 Click below to request it!",
-                parse_mode='HTML',
-                reply_markup=keyboard
-            )
-            return MAIN_MENU
-
-        # Results found - Save to context for pagination
-        context.user_data['search_results'] = movies
-        context.user_data['search_query'] = query
-
-        # Create keyboard for first page
-        keyboard = create_movie_selection_keyboard(movies, page=0)
-        
-        await update.message.reply_text(
-            f"🔎 Found {len(movies)} results for '<b>{query}</b>':\n👇 Select a movie to download:",
-            parse_mode='HTML',
-            reply_markup=keyboard
-        )
-        return MAIN_MENU
-
-    except Exception as e:
-        logger.error(f"Error in search_movies: {e}")
-        await update.message.reply_text("An error occurred during search.")
-        return MAIN_MENU
 
 # ==================== ERROR HANDLER ====================
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
