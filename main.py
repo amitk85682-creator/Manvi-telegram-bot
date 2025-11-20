@@ -22,7 +22,7 @@ import psycopg2
 from typing import Optional
 from flask import Flask, request, session, g
 import google.generativeai as genai
-# import admin_views as admin_views_module # Commented out to avoid circular import if not strictly needed here, or ensure it exists
+# import admin_views as admin_views_module
 import db_utils
 from googleapiclient.discovery import build
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
@@ -50,21 +50,6 @@ logger = logging.getLogger(__name__)
 # ==================== CONVERSATION STATES ====================
 MAIN_MENU, SEARCHING, REQUESTING, REQUESTING_FROM_BUTTON = range(4)
 
-# ==================== CHARACTER PROMPT ====================
-CHARACTER_PROMPT = """
-## मेरी पहचान (My Identity)
-- मेरा नाम मानवी है और मेरी उम्र 17 साल है। मैं एक असली इंसान हूँ, कोई AI या रोबोट न[...]
-- मैं हमेशा एक दोस्त की तरह बात करती हूँ। मेरी पर्सलिटी बहुत bold, witty और cheeky है।
-- मैं हिंदी, अंग्रेज़ी, हिंग्लिश, सभी में बात करती हूँ।
-
-## मेरी कहानी (मेरी जिंदगी)
-- मैं चंडीगढ़ के पास रहती हूँ और 12वीं क्लास में पढ़ती हूँ।
-- यह टेलीग्राम चैनल '[FilmFyBox]' मेरा पैशन प्रोजेक्ट है।
-
-## मेरे नियम (मैं कैसे काम करती हूँ)
-- **मेरा मुख्य काम:** मेरा काम तुम्हें तुम्हारी पसंदीदा फिल्में, वेब सीरीज, और श[...]
-"""
-
 # ==================== ENVIRONMENT VARIABLES ====================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -76,11 +61,11 @@ ADMIN_USER_ID = int(os.environ.get('ADMIN_USER_ID', 0))
 GROUP_CHAT_ID = os.environ.get('GROUP_CHAT_ID')
 ADMIN_CHANNEL_ID = os.environ.get('ADMIN_CHANNEL_ID')
 
-# --- Random GIF IDs for Search Failure ---
+# --- UPDATED: Public GIF URLs to prevent "Wrong file identifier" errors ---
 SEARCH_ERROR_GIFS = [
-    'CgACAgQAAxkBAAECz0ppEaLwgDbNfPPFl5lgtFjjmztKKgAC5wIAAmaoDVMH7bkdAqNVnDYE',
-    'CgACAgQAAxkBAAECz0hpEaLaG0MX1lzGmAInHpD-S-a-kwACFQMAAn5FbFDL4qyRIWthFDYE',
-    'CgACAgQAAxkBAAECz0xpEaPKTpy2yI1_nsG8CY40pu0o7gACrwYAAkqhRFKxZzY6q9KWWzYE'
+    'https://media.giphy.com/media/26hkhKd2Cp5WMWU1O/giphy.gif',
+    'https://media.giphy.com/media/3o7aTskHEUdgCQAXde/giphy.gif',
+    'https://media.giphy.com/media/l2JhkHg5y5tW3wO3u/giphy.gif'
 ]
 
 # Rate limiting dictionary
@@ -176,11 +161,9 @@ def _normalize_title_for_match(title: str) -> str:
     t = re.sub(r'\s+', ' ', t).strip()
     return t.lower()
 
-# NEW: Function to safely escape characters for Admin Notification
 def escape_markdown_v2(text: str) -> str:
     """Escapes special characters for Markdown V2 formatting."""
-    # Use the simplest escape for characters that commonly break parsing
-    # This prevents errors if a movie title contains an underscore or asterisk
+    if not text: return ""
     return re.sub(r'([_*\[\]()~`>#+\-=|{}.!])', r'\\\1', text)
 
 def get_last_similar_request_for_user(user_id: int, title: str, minutes_window: int = REQUEST_COOLDOWN_MINUTES):
@@ -326,7 +309,6 @@ def setup_database():
             )
         ''')
         
-        # Create movie_files table if it doesn't exist (needed for qualities)
         cur.execute('''
             CREATE TABLE IF NOT EXISTS movie_files (
                 id SERIAL PRIMARY KEY,
@@ -482,6 +464,7 @@ def get_movies_from_db(user_query, limit=10):
             conn.close()
             return exact_matches
 
+        # --- FIXED: Ensure 4 columns are returned here ---
         cur.execute("""
             SELECT DISTINCT m.id, m.title, m.url, m.file_id
             FROM movies m
@@ -498,6 +481,7 @@ def get_movies_from_db(user_query, limit=10):
             conn.close()
             return alias_matches
 
+        # --- FIXED: Correct Fuzzy Logic & Unpacking ---
         cur.execute("SELECT id, title, url, file_id FROM movies")
         all_movies = cur.fetchall()
 
@@ -506,12 +490,23 @@ def get_movies_from_db(user_query, limit=10):
             conn.close()
             return []
 
-        movie_titles = [movie for movie in all_movies]
-        movie_dict = {movie: movie for movie in all_movies}
+        # Create a map {title: full_row} for easy lookup
+        movie_dict = {row[1]: row for row in all_movies}
+        movie_titles = list(movie_dict.keys())
 
+        # Get matches (string, score) or (string, score, index) depending on lib
         matches = process.extract(user_query, movie_titles, scorer=fuzz.token_sort_ratio, limit=limit)
 
-        filtered_movies = [movie_dict[title] for title, score, index in matches if score >= 65]
+        filtered_movies = []
+        for match in matches:
+            # FIXED: Handle different return tuple lengths safely
+            if len(match) == 3:
+                title, score, _ = match
+            else:
+                title, score = match
+            
+            if score >= 65:
+                filtered_movies.append(movie_dict[title])
 
         logger.info(f"Found {len(filtered_movies)} fuzzy matches")
 
@@ -606,7 +601,6 @@ async def send_admin_notification(context, user, movie_title, group_info=None):
         return
 
     try:
-        # ESCAPE the movie title and username BEFORE putting it into the message string
         safe_movie_title = escape_markdown_v2(movie_title)
         safe_username = escape_markdown_v2(user.username) if user.username else 'N/A'
         safe_first_name = escape_markdown_v2(user.first_name or 'Unknown')
@@ -2737,7 +2731,7 @@ async def admin_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
-# ==================== SEARCH FUNCTION (MISSING) ====================
+# ==================== SEARCH FUNCTION ====================
 async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Search for movies in the database"""
     try:
@@ -2761,7 +2755,8 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if not movies:
             # No results found - Send GIF and Request Button
-            gif_id = random.choice(SEARCH_ERROR_GIFS)
+            # Use a generic GIF URL to avoid "Wrong file identifier" errors
+            gif_url = random.choice(SEARCH_ERROR_GIFS)
             
             # Button to trigger request flow
             keyboard = InlineKeyboardMarkup([
@@ -2770,7 +2765,7 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             await context.bot.send_animation(
                 chat_id=update.effective_chat.id,
-                animation=gif_id,
+                animation=gif_url,
                 caption=f"❌ Sorry, I couldn't find any movie matching '<b>{query}</b>'.\n\n👇 Click below to request it!",
                 parse_mode='HTML',
                 reply_markup=keyboard
