@@ -1188,17 +1188,19 @@ Mᴏᴠɪᴇ ᴋɪ sᴘᴇʟʟɪɴɢ Gᴏᴏɢʟᴇ ᴘᴀʀ sᴇᴀʀᴄʜ ᴋ�
             return MAIN_MENU
 
     elif len(movies_found) == 1:
-    # Ensure we handle the possibility that a query returns fewer columns unexpectedly
-    # Although your SQL asks for 4 (id, title, url, file_id), let's ensure we get 4 before unpacking.
-       if len(movies_found[0]) == 4:
-        movie_id, title, url, file_id = movies_found[0]
-        await send_movie_to_user(update, context, movie_id, title, url, file_id)
-    else:
-        # If unpacking still fails, log the error and proceed to the fallback message
-        logger.error(f"Failed to unpack movie data: {movies_found[0]}")
-        await update.message.reply_text("Sorry, an error occurred while retrieving movie details.")
-        return MAIN_MENU # Return to prevent further errors
+            # Note: This entire block MUST be indented by 4 spaces inside the elif
+            
+            # Unpack and send the single movie result
+            if len(movies_found[0]) == 4:
+                movie_id, title, url, file_id = movies_found[0]
+                await send_movie_to_user(update, context, movie_id, title, url, file_id)
+            else:
+                # If unpacking still fails, log the error and proceed to the fallback message
+                logger.error(f"Failed to unpack movie data: {movies_found[0]}")
+                await update.message.reply_text("Sorry, an error occurred while retrieving movie details.")
+                return MAIN_MENU # Return to prevent further errors
 
+        # Handle the case where MULTIPLE movies are found
         else:
             context.user_data['search_results'] = movies_found
             context.user_data['search_query'] = user_message
@@ -1211,8 +1213,14 @@ Mᴏᴠɪᴇ ᴋɪ sᴘᴇʟʟɪɴɢ Gᴏᴏɢʟᴇ ᴘᴀʀ sᴇᴀʀᴄʜ ᴋ�
                 reply_markup=keyboard,
                 parse_mode='Markdown'
             )
-            track_message_for_deletion(update.effective_chat.id, msg.message_id, 300)
-            return MAIN_MENU # Reset state so buttons handle the rest
+            # track_message_for_deletion(update.effective_chat.id, msg.message_id, 300) # Assuming this function exists
+            # return MAIN_MENU # Reset state so buttons handle the rest
+            return MAIN_MENU
+            
+    except Exception as e:
+        logger.error(f"Error in search movies: {e}")
+        await update.message.reply_text("Sorry, something went wrong. Please try again.")
+        return MAIN_MENU
 
     except Exception as e:
         logger.error(f"Error in search movies: {e}")
