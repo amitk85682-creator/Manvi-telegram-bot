@@ -1272,36 +1272,42 @@ async def request_movie_from_button(update: Update, context: ContextTypes.DEFAUL
     try:
         user_message = (update.message.text or "").strip()
         
+        # Check for Main Menu Buttons (Emergency Exit)
+        menu_buttons = ['🔍 Search Movies', '🙋 Request Movie', '📊 My Stats', '❓ Help', '/start']
+        if user_message in menu_buttons:
+            if 'awaiting_request' in context.user_data:
+                del context.user_data['awaiting_request']
+            if 'pending_request' in context.user_data:
+                del context.user_data['pending_request']
+            return await main_menu(update, context)
+
         if not user_message:
             await update.message.reply_text("कृपया मूवी का नाम भेजें।")
             return REQUESTING_FROM_BUTTON
 
-        # Store movie name in context for confirmation
+        # Store movie name
         context.user_data['pending_request'] = user_message
         
-        # NOTE: Hum yaha 'awaiting_request' delete NAHI kar rahe. 
-        # Kyunki user Confirm karne se pehle naam change kar sakta hai (dobara type karke).
-        # 'awaiting_request' tabhi delete hoga jab wo button callback (Confirm) dabayega.
-        
-        # Show confirmation button
         confirm_keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("📽️ Confirm 🎬", callback_data=f"confirm_request_{user_message[:40]}")]
         ])
         
         msg = await update.message.reply_text(
             f"✅ आपने '<b>{user_message}</b>' को रिक्वेस्ट करना चाहते हैं?\n\n"
+            f"<b>💫 अब बस अपनी मूवी या वेब-सीरीज़ का मूल नाम भेजें और कन्फर्म बटन पर क्लिक करें!</b>\n\n"
             f"कृपया कन्फर्म बटन पर क्लिक करें 👇",
             reply_markup=confirm_keyboard,
             parse_mode='HTML'
         )
         track_message_for_deletion(update.effective_chat.id, msg.message_id, 180)
         
-        # State ko maintain rakhein
+        # ❌ REMOVED: Maine yahan se wo delete code HATA diya hai.
+        # Ab bot "Request Mode" me hi rahega jab tak Confirm na dabaya jaye.
+        
         return MAIN_MENU
 
     except Exception as e:
         logger.error(f"Error in request_movie_from_button: {e}")
-        await update.message.reply_text("Sorry, an error occurred while processing your request.")
         return MAIN_MENU
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle inline button callbacks"""
@@ -1309,6 +1315,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
 
+        # ==================== MOVIE SELECTION ====================
         if query.data.startswith("movie_"):
             movie_id = int(query.data.replace("movie_", ""))
 
@@ -1324,7 +1331,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             movie_id, title = movie
-
             qualities = get_all_movie_qualities(movie_id)
 
             if not qualities:
@@ -1354,10 +1360,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode='Markdown'
             )
 
+        # ==================== ADMIN ACTIONS ====================
         elif query.data.startswith("admin_fulfill_"):
             parts = query.data.split('_', 3)
-            user_id = int(parts)
-            movie_title = parts
+            user_id = int(parts[2])
+            movie_title = parts[3]
 
             conn = get_db_connection()
             if conn:
@@ -1368,7 +1375,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if movie_data:
                     movie_id, url, file_id = movie_data
                     value_to_send = file_id if file_id else url
-
                     num_notified = await notify_users_for_movie(context, movie_title, value_to_send)
 
                     await query.edit_message_text(
@@ -1385,8 +1391,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif query.data.startswith("admin_delete_"):
             parts = query.data.split('_', 3)
-            user_id = int(parts)
-            movie_title = parts
+            user_id = int(parts[2])
+            movie_title = parts[3]
 
             conn = get_db_connection()
             if conn:
@@ -1399,10 +1405,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await query.edit_message_text("❌ Database error during deletion.")
 
+        # ==================== QUALITY SELECTION ====================
         elif query.data.startswith("quality_"):
             parts = query.data.split('_')
-            movie_id = int(parts)
-            selected_quality = parts
+            movie_id = int(parts[1])
+            selected_quality = parts[2]
 
             movie_data = context.user_data.get('selected_movie_data')
 
@@ -1425,7 +1432,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             title = movie_data['title']
-
             await query.edit_message_text(f"Sending **{title}**...", parse_mode='Markdown')
 
             await send_movie_to_user(
@@ -1440,6 +1446,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if 'selected_movie_data' in context.user_data:
                 del context.user_data['selected_movie_data']
 
+        # ==================== PAGINATION ====================
         elif query.data.startswith("page_"):
             page = int(query.data.replace("page_", ""))
 
@@ -1461,28 +1468,23 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif query.data == "cancel_selection":
             await query.edit_message_text("❌ Selection cancelled.")
-            if 'search_results' in context.user_data:
-                del context.user_data['search_results']
-            if 'search_query' in context.user_data:
-                del context.user_data['search_query']
-            if 'selected_movie_data' in context.user_data:
-                del context.user_data['selected_movie_data']
+            keys_to_clear = ['search_results', 'search_query', 'selected_movie_data', 'awaiting_request', 'pending_request']
+            for key in keys_to_clear:
+                if key in context.user_data:
+                    del context.user_data[key]
 
+        # ==================== REQUEST FLOW ====================
         elif query.data.startswith("request_"):
-            movie_title = query.data.replace("request_", "")
-            # 👇👇👇 यहाँ से कोड जोड़ें (ADD FROM HERE) 👇👇👇
-            # Purana Tips Message turant delete karein
+            # 1. Delete the large Tips message if it exists
             tip_msg_id = context.user_data.get('tip_message_id')
             if tip_msg_id:
                 try:
                     await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=tip_msg_id)
                 except Exception:
-                    pass # Agar pehle hi delete ho gaya to ignore karein
-                
-                # Data saaf karein
+                    pass 
                 del context.user_data['tip_message_id']
-            # 👆👆👆 यहाँ तक (TILL HERE) 👆👆👆
-            # Send the detailed request instructions
+            
+            # 2. Send instructions
             request_instruction_text = """
 <b>🎬 Movie / Web-Series Request System</b>
 
@@ -1505,21 +1507,19 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • Animal full HD leaked
 
 ━━━━━━━━━━━━━━
-f"<b>💫 अब बस अपनी मूवी या वेब-सीरीज़ का मूल नाम भेजें और कन्फर्म बटन पर क्लिक करें!</b>\n\n"
 <b>👉 (Name Only — No extra words, No details)</b>
 ━━━━━━━━━━━━━━
 """
-            
             await query.edit_message_text(
                 text=request_instruction_text,
                 parse_mode='HTML'
             )
             
-            # Set the conversation state to REQUESTING_FROM_BUTTON
+            # 3. Enable Request Mode
             context.user_data['awaiting_request'] = True
 
         elif query.data.startswith("confirm_request_"):
-            # Extract movie title from user_data
+            # Retrieve pending request name
             movie_title = context.user_data.get('pending_request')
             
             if not movie_title:
@@ -1536,7 +1536,7 @@ f"<b>💫 अब बस अपनी मूवी या वेब-सीरी�
                 )
                 return
             
-            # Check for similar recent requests
+            # Check for duplicates/cooldown
             similar = get_last_similar_request_for_user(user.id, movie_title, minutes_window=REQUEST_COOLDOWN_MINUTES)
             if similar:
                 last_time = similar.get("requested_at")
@@ -1545,14 +1545,14 @@ f"<b>💫 अब बस अपनी मूवी या वेब-सीरी�
                 minutes_left = max(0, REQUEST_COOLDOWN_MINUTES - minutes_passed)
                 if minutes_left > 0:
                     await query.edit_message_text(
-                        "🛑 Ruk jao! Aapne ye request abhi bheji thi.\n\n"
-                        "Baar‑baar request karne se movie jaldi nahi aayegi.\n\n"
+                        f"🛑 Ruk jao! Aapne ye request abhi bheji thi.\n\n"
+                        f"Baar‑baar request karne se movie jaldi nahi aayegi.\n\n"
                         f"Similar previous request: \"{similar.get('stored_title')}\" ({similar.get('score')}% match)\n"
                         f"Kripya {minutes_left} minute baad dobara koshish karein. 🙏"
                     )
                     return
             
-            # Store the request
+            # Store request in DB
             stored = store_user_request(
                 user.id,
                 user.username,
@@ -1567,34 +1567,34 @@ f"<b>💫 अब बस अपनी मूवी या वेब-सीरी�
                 await query.edit_message_text("Sorry, आपका request store नहीं हो पाया। बाद में कोशिश करें।")
                 return
             
-            # Send admin notification
+            # Notify Admin
             group_info = query.message.chat.title if query.message.chat.type != "private" else None
             await send_admin_notification(context, user, movie_title, group_info)
             
-            # Send confirmation message
             confirmation_text = f"""
 ✅ <b>Request Successfully Submitted!</b>
 
 🎬 Movie: <b>{movie_title}</b>
 
-📝 आपकी request सफलतापूर्वक दर्ज कर लि गई है!
+📝 आपकी request सफलतापूर्वक दर्ज कर ली गई है!
 
 ⏳ जैसे ही यह उपलब्ध होगी, मैं आपको तुरंत सूचित कर दिया जायेगा।
 
 धन्यवाद! 🙏
 """
-            
             await query.edit_message_text(
                 confirmation_text,
                 parse_mode='HTML'
             )
             
-            # Clear pending request from context
+            # 🟢 MAGIC PART: EXIT REQUEST MODE HERE 🟢
+            # Confirm hone ke baad hi flags delete honge
             if 'pending_request' in context.user_data:
                 del context.user_data['pending_request']
             if 'awaiting_request' in context.user_data:
                 del context.user_data['awaiting_request']
 
+        # ==================== DOWNLOAD SHORTCUT ====================
         elif query.data.startswith("download_"):
             movie_title = query.data.replace("download_", "")
 
@@ -1621,7 +1621,6 @@ f"<b>💫 अब बस अपनी मूवी या वेब-सीरी�
             await query.answer(f"❌ Error: {str(e)}", show_alert=True)
         except:
             pass
-
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Cancel the current operation"""
     msg = await update.message.reply_text("Operation cancelled.", reply_markup=get_main_keyboard())
