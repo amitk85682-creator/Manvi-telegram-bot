@@ -22,7 +22,7 @@ import psycopg2
 from typing import Optional
 from flask import Flask, request, session, g
 import google.generativeai as genai
-import admin_views as admin_views_module
+# import admin_views as admin_views_module # Commented out to avoid circular import if not strictly needed here, or ensure it exists
 import db_utils
 from googleapiclient.discovery import build
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
@@ -183,9 +183,6 @@ def escape_markdown_v2(text: str) -> str:
     # This prevents errors if a movie title contains an underscore or asterisk
     return re.sub(r'([_*\[\]()~`>#+\-=|{}.!])', r'\\\1', text)
 
-# Your existing check_rate_limit, is_valid_url, etc. functions follow here...
-# ...
-
 def get_last_similar_request_for_user(user_id: int, title: str, minutes_window: int = REQUEST_COOLDOWN_MINUTES):
     """Look up the user's most recent request that is sufficiently similar to title"""
     conn = get_db_connection()
@@ -254,13 +251,12 @@ def user_burst_count(user_id: int, window_seconds: int = 60):
         since = datetime.now() - timedelta(seconds=window_seconds)
         cur.execute("SELECT COUNT(*) FROM user_requests WHERE user_id = %s AND requested_at >= %s", (user_id, since))
         
-        # Change is here: [0] lagaya hai taaki tuple se value nikale
         result = cur.fetchone()
         cnt = result[0] if result else 0 
         
         cur.close()
         conn.close()
-        return cnt # Ab ye integer return karega
+        return cnt
     except Exception as e:
         logger.error(f"Error counting burst requests for user {user_id}: {e}")
         try:
@@ -268,6 +264,7 @@ def user_burst_count(user_id: int, window_seconds: int = 60):
         except:
             pass
         return 0
+
 async def delete_messages_after_delay(context, chat_id, message_ids, delay=60):
     """Delete messages after specified delay"""
     try:
@@ -326,6 +323,17 @@ def setup_database():
                 movie_id INTEGER REFERENCES movies(id) ON DELETE CASCADE,
                 alias TEXT NOT NULL,
                 UNIQUE(movie_id, alias)
+            )
+        ''')
+        
+        # Create movie_files table if it doesn't exist (needed for qualities)
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS movie_files (
+                id SERIAL PRIMARY KEY,
+                movie_id INTEGER REFERENCES movies(id) ON DELETE CASCADE,
+                quality TEXT,
+                url TEXT,
+                file_id TEXT
             )
         ''')
 
@@ -618,15 +626,10 @@ Movie: **{safe_movie_title}**
 Time: {datetime.now().strftime('%Y-%m-%d %I:%M %p')}
         """
         
-        # We need to send in MarkdownV2 to use this strict escaping, 
-        # but your code is using legacy 'Markdown'. 
-        # For simplicity, we just use the raw text message with HTML parsing.
-        
-        # Use HTML for better reliability since your old code uses it elsewhere
         await context.bot.send_message(
             chat_id=ADMIN_CHANNEL_ID, 
             text=message, 
-            parse_mode='HTML' # Change from 'Markdown' to 'HTML' or remove parse_mode
+            parse_mode='HTML' 
         )
     except Exception as e:
         logger.error(f"Error sending admin notification: {e}")
@@ -1084,8 +1087,8 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                     stats_text = f"""
 📊 Your Stats:
-- Total Requests: {request_count}
-- Fulfilled Requests: {fulfilled_count}
+- Total Requests: {request_count[0] if request_count else 0}
+- Fulfilled Requests: {fulfilled_count[0] if fulfilled_count else 0}
 """
                     msg = await update.message.reply_text(stats_text)
                     track_message_for_deletion(update.effective_chat.id, msg.message_id, 180)
@@ -1119,7 +1122,6 @@ Just use the buttons below to navigate!
         logger.error(f"Error in main menu: {e}")
         return MAIN_MENU
 
-        return MAIN_MENU
 async def request_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle movie requests with duplicate detection, fuzzy matching and cooldowns"""
     try:
@@ -1227,14 +1229,12 @@ async def request_movie_from_button(update: Update, context: ContextTypes.DEFAUL
         )
         track_message_for_deletion(update.effective_chat.id, msg.message_id, 180)
         
-        # ❌ REMOVED: Maine yahan se wo delete code HATA diya hai.
-        # Ab bot "Request Mode" me hi rahega jab tak Confirm na dabaya jaye.
-        
         return MAIN_MENU
 
     except Exception as e:
         logger.error(f"Error in request_movie_from_button: {e}")
         return MAIN_MENU
+
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle inline button callbacks"""
     try:
@@ -1514,7 +1514,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             
             # 🟢 MAGIC PART: EXIT REQUEST MODE HERE 🟢
-            # Confirm hone ke baad hi flags delete honge
             if 'pending_request' in context.user_data:
                 del context.user_data['pending_request']
             if 'awaiting_request' in context.user_data:
@@ -1547,6 +1546,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer(f"❌ Error: {str(e)}", show_alert=True)
         except:
             pass
+
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Cancel the current operation"""
     msg = await update.message.reply_text("Operation cancelled.", reply_markup=get_main_keyboard())
@@ -2581,11 +2581,7 @@ async def list_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur = conn.cursor()
 
         cur.execute("SELECT COUNT(DISTINCT user_id) FROM user_requests")
-        
-        # --- FIXED LINE IS HERE ---
-        # Tuple se value nikalne ke liye [0] lagaya hai
-        total_users = cur.fetchone()[0] 
-        # --------------------------
+        total_users = cur.fetchone()[0]
 
         cur.execute("""
             SELECT
@@ -2625,49 +2621,39 @@ async def list_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Error in list_all_users: {e}")
         await update.message.reply_text(f"❌ Error: {e}")
+
 async def get_bot_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Get comprehensive bot statistics"""
-    
-    # 1. Admin Check
     if update.effective_user.id != ADMIN_USER_ID:
         await update.message.reply_text("⛔ Admin only command.")
         return
 
-    conn = None # Initialize conn to handle cleanup in finally block
-    cur = None  # Initialize cur to handle cleanup in finally block
+    conn = None
+    cur = None
 
     try:
-        # 2. Database Connection
         conn = get_db_connection()
         if not conn:
             await update.message.reply_text("❌ Database connection failed.")
             return
 
         cur = conn.cursor()
-
-        # 3. SQL Queries (Fetching Data)
         
-        # Total movies
         cur.execute("SELECT COUNT(*) FROM movies")
-        total_movies = cur.fetchone()[0] # Fetch the single count value
+        total_movies = cur.fetchone()[0]
         
-        # Total unique users
         cur.execute("SELECT COUNT(DISTINCT user_id) FROM user_requests")
-        total_users = cur.fetchone()[0] # Fetch the single count value
+        total_users = cur.fetchone()[0]
 
-        # Total requests
         cur.execute("SELECT COUNT(*) FROM user_requests")
-        total_requests = cur.fetchone()[0] # Fetch the single count value
+        total_requests = cur.fetchone()[0]
 
-        # Fulfilled requests
         cur.execute("SELECT COUNT(*) FROM user_requests WHERE notified = TRUE")
-        fulfilled = cur.fetchone()[0] # Fetch the single count value
+        fulfilled = cur.fetchone()[0]
 
-        # Today's requests
         cur.execute("SELECT COUNT(*) FROM user_requests WHERE DATE(requested_at) = CURRENT_DATE")
-        today_requests = cur.fetchone()[0] # Fetch the single count value
+        today_requests = cur.fetchone()[0]
 
-        # Top users
         cur.execute("""
             SELECT first_name, username, COUNT(*) as req_count
             FROM user_requests
@@ -2677,10 +2663,8 @@ async def get_bot_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """)
         top_users = cur.fetchall()
 
-        # 4. Calculation
         fulfillment_rate = (fulfilled / total_requests * 100) if total_requests > 0 else 0
 
-        # 5. Build the Statistics Text (CORRECT INDENTATION)
         stats_text = f"""
 📊 **Bot Statistics**
 
@@ -2697,29 +2681,22 @@ async def get_bot_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 **Top Requesters:**
 """
-        # Append Top Users
         if top_users:
             for name, username, count in top_users:
-                # Escape Markdown characters in name/username if necessary, but keep it simple here.
                 username_str = f"`@{username}`" if username else "N/A"
                 stats_text += f"• {name} ({username_str}): {count} requests\n"
         else:
             stats_text += "No user data available."
             
-        # 6. Send the Message
-        await update.message.reply_text(stats_text, parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(stats_text, parse_mode='Markdown')
         
     except Exception as e:
-        # 7. Error Handling
         logger.error(f"Error in get_bot_stats: {e}")
         await update.message.reply_text(f"❌ Error while fetching stats: {e}")
         
     finally:
-        # 8. Connection Cleanup (ensures connection closes even if an error occurs)
-        if cur:
-            cur.close()
-        if conn:
-            conn.close()
+        if cur: cur.close()
+        if conn: conn.close()
 
 async def admin_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show admin commands help"""
@@ -2759,6 +2736,65 @@ async def admin_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 """
 
     await update.message.reply_text(help_text, parse_mode='Markdown')
+
+# ==================== SEARCH FUNCTION (MISSING) ====================
+async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Search for movies in the database"""
+    try:
+        user_id = update.effective_user.id
+        if not await check_rate_limit(user_id):
+            await update.message.reply_text("⏳ Please wait a few seconds before searching again.")
+            return MAIN_MENU
+
+        query = update.message.text.strip()
+
+        # If user accidentally hits a menu button
+        if query in ['🔍 Search Movies', '🙋 Request Movie', '📊 My Stats', '❓ Help']:
+            return await main_menu(update, context)
+
+        if len(query) < 2:
+            await update.message.reply_text("⚠️ Search query is too short. Please type at least 2 characters.")
+            return SEARCHING
+
+        # Search in DB
+        movies = get_movies_from_db(query, limit=50)
+
+        if not movies:
+            # No results found - Send GIF and Request Button
+            gif_id = random.choice(SEARCH_ERROR_GIFS)
+            
+            # Button to trigger request flow
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🙋 Request Movie", callback_data=f"request_{query[:20]}")]
+            ])
+            
+            await context.bot.send_animation(
+                chat_id=update.effective_chat.id,
+                animation=gif_id,
+                caption=f"❌ Sorry, I couldn't find any movie matching '<b>{query}</b>'.\n\n👇 Click below to request it!",
+                parse_mode='HTML',
+                reply_markup=keyboard
+            )
+            return MAIN_MENU
+
+        # Results found - Save to context for pagination
+        context.user_data['search_results'] = movies
+        context.user_data['search_query'] = query
+
+        # Create keyboard for first page
+        keyboard = create_movie_selection_keyboard(movies, page=0)
+        
+        await update.message.reply_text(
+            f"🔎 Found {len(movies)} results for '<b>{query}</b>':\n👇 Select a movie to download:",
+            parse_mode='HTML',
+            reply_markup=keyboard
+        )
+        return MAIN_MENU
+
+    except Exception as e:
+        logger.error(f"Error in search_movies: {e}")
+        await update.message.reply_text("An error occurred during search.")
+        return MAIN_MENU
 
 # ==================== ERROR HANDLER ====================
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
