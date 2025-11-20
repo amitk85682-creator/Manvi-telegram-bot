@@ -1503,7 +1503,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • Animal full HD leaked
 
 ━━━━━━━━━━━━━━
-
+f"<b>💫 अब बस अपनी मूवी या वेब-सीरीज़ का मूल नाम भेजें और कन्फर्म बटन पर क्लिक करें!</b>\n\n"
 <b>👉 (Name Only — No extra words, No details)</b>
 ━━━━━━━━━━━━━━
 """
@@ -2640,8 +2640,8 @@ async def list_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         page = 1
-        if context.args and context.args.isdigit():
-            page = int(context.args)
+        if context.args and context.args[0].isdigit():
+            page = int(context.args[0])
 
         per_page = 10
         offset = (page - 1) * per_page
@@ -2654,7 +2654,11 @@ async def list_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur = conn.cursor()
 
         cur.execute("SELECT COUNT(DISTINCT user_id) FROM user_requests")
-total_users = cur.fetchone()[0] # [0] add kiya
+        
+        # --- FIXED LINE IS HERE ---
+        # Tuple se value nikalne ke liye [0] lagaya hai
+        total_users = cur.fetchone()[0] 
+        # --------------------------
 
         cur.execute("""
             SELECT
@@ -2694,7 +2698,6 @@ total_users = cur.fetchone()[0] # [0] add kiya
     except Exception as e:
         logger.error(f"Error in list_all_users: {e}")
         await update.message.reply_text(f"❌ Error: {e}")
-
 async def get_bot_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Get comprehensive bot statistics"""
     
