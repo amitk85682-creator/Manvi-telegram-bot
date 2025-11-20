@@ -78,9 +78,9 @@ ADMIN_CHANNEL_ID = os.environ.get('ADMIN_CHANNEL_ID')
 
 # --- Random GIF IDs for Search Failure ---
 SEARCH_ERROR_GIFS = [
-    'CgACAgQAAxkBAAECz0ppEaLwgDbNfPPFl5lgtFjjmztKKgAC5wIAAmaoDVMH7bkdAqNVnDYE',
-    'CgACAgQAAxkBAAECz0hpEaLaG0MX1lzGmAInHpD-S-a-kwACFQMAAn5FbFDL4qyRIWthFDYE',
-    'CgACAgQAAxkBAAECz0xpEaPKTpy2yI1_nsG8CY40pu0o7gACrwYAAkqhRFKxZzY6q9KWWzYE'
+    'https://media.giphy.com/media/26hkhKd2Cp5WMWU1O/giphy.gif',
+    'https://media.giphy.com/media/3o7aTskHEUdgCQAXde/giphy.gif',
+    'https://media.giphy.com/media/l2JhkHg5y5tW3wO3u/giphy.gif'
 ]
 
 # Rate limiting dictionary
@@ -1975,7 +1975,7 @@ async def notify_user_by_username(update: Update, context: ContextTypes.DEFAULT_
             await update.message.reply_text("Usage: /notifyuser @username Your message here")
             return
 
-        target_username = context.args.replace('@', '')
+        target_username = context.args[0].replace('@', '')
         message_text = ' '.join(context.args[1:])
 
         conn = get_db_connection()
@@ -2091,8 +2091,8 @@ async def schedule_notification(update: Update, context: ContextTypes.DEFAULT_TY
             )
             return
 
-        delay_minutes = int(context.args)
-        target_username = context.args.replace('@', '')
+        delay_minutes = int(context.args[0])
+        target_username = context.args[1].replace('@', '')
         message_text = ' '.join(context.args[2:])
 
         conn = get_db_connection()
@@ -2166,7 +2166,7 @@ async def notify_user_with_media(update: Update, context: ContextTypes.DEFAULT_T
             )
             return
 
-        target_username = context.args.replace('@', '')
+        target_username = context.args[0].replace('@', '')
         optional_message = ' '.join(context.args[1:]) if len(context.args) > 1 else None
 
         replied_message = update.message.reply_to_message
@@ -2485,7 +2485,7 @@ async def forward_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        target_username = context.args.replace('@', '')
+        target_username = context.args[0].replace('@', '')
 
         conn = get_db_connection()
         if not conn:
@@ -2529,7 +2529,7 @@ async def get_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        target_username = context.args.replace('@', '')
+        target_username = context.args[0].replace('@', '')
 
         conn = get_db_connection()
         if not conn:
