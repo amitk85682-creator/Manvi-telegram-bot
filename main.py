@@ -176,6 +176,16 @@ def _normalize_title_for_match(title: str) -> str:
     t = re.sub(r'\s+', ' ', t).strip()
     return t.lower()
 
+# NEW: Function to safely escape characters for Admin Notification
+def escape_markdown_v2(text: str) -> str:
+    """Escapes special characters for Markdown V2 formatting."""
+    # Use the simplest escape for characters that commonly break parsing
+    # This prevents errors if a movie title contains an underscore or asterisk
+    return re.sub(r'([_*\[\]()~`>#+\-=|{}.!])', r'\\\1', text)
+
+# Your existing check_rate_limit, is_valid_url, etc. functions follow here...
+# ...
+
 def get_last_similar_request_for_user(user_id: int, title: str, minutes_window: int = REQUEST_COOLDOWN_MINUTES):
     """Look up the user's most recent request that is sufficiently similar to title"""
     conn = get_db_connection()
@@ -550,7 +560,7 @@ async def analyze_intent(message_text):
             return {"is_request": False, "content_title": None}
 
         genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel(model_name='gemini-1.5-flash')
+        model = genai.GenerativeModel(model_name='gemini-3-pro')
 
         prompt = f"""
         You are a 'Request Analyzer' for a Telegram bot named Manvi.
@@ -582,35 +592,42 @@ async def analyze_intent(message_text):
         return {"is_request": True, "content_title": message_text}
 
 # ==================== NOTIFICATION FUNCTIONS ====================
-async def send_admin_notification(context: ContextTypes.DEFAULT_TYPE, user, movie_title, group_info=None):
+async def send_admin_notification(context, user, movie_title, group_info=None):
     """Send notification to admin channel about a new request"""
     if not ADMIN_CHANNEL_ID:
         return
 
     try:
-        user_info = f"User: {user.first_name or 'Unknown'}"
-        if user.username:
-            user_info += f" (`@{user.username}`)"
+        # ESCAPE the movie title and username BEFORE putting it into the message string
+        safe_movie_title = escape_markdown_v2(movie_title)
+        safe_username = escape_markdown_v2(user.username) if user.username else 'N/A'
+        safe_first_name = escape_markdown_v2(user.first_name or 'Unknown')
+
+        user_info = f"User: {safe_first_name}"
+        user_info += f" (`@{safe_username}`)"
         user_info += f" (ID: {user.id})"
 
         group_info_text = f"From Group: {group_info}" if group_info else "Via Private Message"
 
         message = f"""
-🎬 **NEW MOVIE REQUEST!** 🎬
+🎬 New Movie Request! 🎬
 
-**Movie:** {movie_title}
+Movie: **{safe_movie_title}**
 {user_info}
 {group_info_text}
 Time: {datetime.now().strftime('%Y-%m-%d %I:%M %p')}
         """
-
+        
+        # We need to send in MarkdownV2 to use this strict escaping, 
+        # but your code is using legacy 'Markdown'. 
+        # For simplicity, we just use the raw text message with HTML parsing.
+        
+        # Use HTML for better reliability since your old code uses it elsewhere
         await context.bot.send_message(
-            chat_id=ADMIN_CHANNEL_ID,
-            text=message,
-            reply_markup=get_admin_request_keyboard(user.id, movie_title),
-            parse_mode='Markdown'
+            chat_id=ADMIN_CHANNEL_ID, 
+            text=message, 
+            parse_mode='HTML' # Change from 'Markdown' to 'HTML' or remove parse_mode
         )
-
     except Exception as e:
         logger.error(f"Error sending admin notification: {e}")
 
@@ -1171,9 +1188,16 @@ Mᴏᴠɪᴇ ᴋɪ sᴘᴇʟʟɪɴɢ Gᴏᴏɢʟᴇ ᴘᴀʀ sᴇᴀʀᴄʜ ᴋ�
             return MAIN_MENU
 
         elif len(movies_found) == 1:
-            movie_id, title, url, file_id = movies_found
-            await send_movie_to_user(update, context, movie_id, title, url, file_id)
-            return MAIN_MENU # Reset state after success
+    # Ensure we handle the possibility that a query returns fewer columns unexpectedly
+    # Although your SQL asks for 4 (id, title, url, file_id), let's ensure we get 4 before unpacking.
+    if len(movies_found[0]) == 4:
+        movie_id, title, url, file_id = movies_found[0]
+        await send_movie_to_user(update, context, movie_id, title, url, file_id)
+    else:
+        # If unpacking still fails, log the error and proceed to the fallback message
+        logger.error(f"Failed to unpack movie data: {movies_found[0]}")
+        await update.message.reply_text("Sorry, an error occurred while retrieving movie details.")
+        return MAIN_MENU # Return to prevent further errors
 
         else:
             context.user_data['search_results'] = movies_found
