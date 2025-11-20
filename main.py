@@ -1187,10 +1187,10 @@ Mᴏᴠɪᴇ ᴋɪ sᴘᴇʟʟɪɴɢ Gᴏᴏɢʟᴇ ᴘᴀʀ sᴇᴀʀᴄʜ ᴋ�
             # IMPORTANT: Return MAIN_MENU to reset state
             return MAIN_MENU
 
-        elif len(movies_found) == 1:
+    elif len(movies_found) == 1:
     # Ensure we handle the possibility that a query returns fewer columns unexpectedly
     # Although your SQL asks for 4 (id, title, url, file_id), let's ensure we get 4 before unpacking.
-    if len(movies_found[0]) == 4:
+       if len(movies_found[0]) == 4:
         movie_id, title, url, file_id = movies_found[0]
         await send_movie_to_user(update, context, movie_id, title, url, file_id)
     else:
