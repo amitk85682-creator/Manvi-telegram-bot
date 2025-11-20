@@ -243,10 +243,14 @@ def user_burst_count(user_id: int, window_seconds: int = 60):
         cur = conn.cursor()
         since = datetime.now() - timedelta(seconds=window_seconds)
         cur.execute("SELECT COUNT(*) FROM user_requests WHERE user_id = %s AND requested_at >= %s", (user_id, since))
-        cnt = cur.fetchone()  #  add करें
+        
+        # Change is here: [0] lagaya hai taaki tuple se value nikale
+        result = cur.fetchone()
+        cnt = result[0] if result else 0 
+        
         cur.close()
         conn.close()
-        return cnt
+        return cnt # Ab ye integer return karega
     except Exception as e:
         logger.error(f"Error counting burst requests for user {user_id}: {e}")
         try:
@@ -254,7 +258,6 @@ def user_burst_count(user_id: int, window_seconds: int = 60):
         except:
             pass
         return 0
-
 async def delete_messages_after_delay(context, chat_id, message_ids, delay=60):
     """Delete messages after specified delay"""
     try:
@@ -2651,7 +2654,7 @@ async def list_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur = conn.cursor()
 
         cur.execute("SELECT COUNT(DISTINCT user_id) FROM user_requests")
-        total_users = cur.fetchone()  #  add करें
+total_users = cur.fetchone()[0] # [0] add kiya
 
         cur.execute("""
             SELECT
