@@ -81,6 +81,10 @@ SEARCH_ERROR_GIFS = [
     'https://media.giphy.com/media/26hkhKd2Cp5WMWU1O/giphy.gif',
     'https://media.giphy.com/media/3o7aTskHEUdgCQAXde/giphy.gif',
     'https://media.giphy.com/media/l2JhkHg5y5tW3wO3u/giphy.gif'
+    'https://media.giphy.com/media/14uQ3cOFteDaU/giphy.gif',
+    'https://media.giphy.com/media/xT9IgG50Fb7Mi0prBC/giphy.gif',
+    'https://media.giphy.com/media/3o7abB06u9bNzA8lu8/giphy.gif',
+    'https://media.giphy.com/media/3o7qDP7gNY08v4wYLy/giphy.gif',
 ]
 
 # Rate limiting dictionary
