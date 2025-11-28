@@ -1636,20 +1636,20 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== ADMIN COMMANDS ====================
 async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin command to add a movie manually"""
+    """Admin command to add a movie manually (Supports Unreleased)"""
     if update.effective_user.id != ADMIN_USER_ID:
-        await update.message.reply_text("Sorry Darling, सिर्फ एडमिन ही इस कमांड का इस्तेमाल कर सकते हैं।")
+        await update.message.reply_text("Sorry Darling, sirf Admin hi is command ka istemal kar sakte hain.")
         return
 
     conn = None
     try:
         parts = context.args
         if len(parts) < 2:
-            await update.message.reply_text("गलत फॉर्मेट! ऐसे इस्तेमाल करें:\n/addmovie टाइटल का नाम [File ID या Link]")
+            await update.message.reply_text("Galat Format! Aise use karein:\n/addmovie MovieName Link/FileID/unreleased")
             return
 
-        value = parts[-1]
-        title = " ".join(parts[:-1])
+        value = parts[-1]  # Last part is link/id/unreleased
+        title = " ".join(parts[:-1]) # Rest is title
 
         logger.info(f"Adding movie: {title} with value: {value}")
 
@@ -1660,49 +1660,81 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         cur = conn.cursor()
 
-        if any(value.startswith(prefix) for prefix in ["BQAC", "BAAC", "CAAC", "AQAC"]):
+        # CASE 1: UNRELEASED MOVIE
+        if value.strip().lower() == "unreleased":
+            # is_unreleased = TRUE set karenge
             cur.execute(
-                "INSERT INTO movies (title, url, file_id) VALUES (%s, %s, %s) ON CONFLICT (title) DO UPDATE SET url = EXCLUDED.url, file_id = EXCLUDED.file_id",
-                (title.strip(), "", value.strip())
+                """
+                INSERT INTO movies (title, url, file_id, is_unreleased) 
+                VALUES (%s, %s, %s, %s) 
+                ON CONFLICT (title) DO UPDATE SET 
+                    is_unreleased = EXCLUDED.is_unreleased,
+                    url = '', 
+                    file_id = NULL
+                """,
+                (title.strip(), "", None, True)
             )
-            message = f"✅ '{title}' को file ID के साथ सफलतापूर्वक जोड़ दिया गया है।"
+            message = f"✅ '{title}' ko successfully **Unreleased** mark kar diya gaya hai. (Cute message activate ho gaya ✨)"
 
+        # CASE 2: TELEGRAM FILE ID
+        elif any(value.startswith(prefix) for prefix in ["BQAC", "BAAC", "CAAC", "AQAC"]):
+            cur.execute(
+                """
+                INSERT INTO movies (title, url, file_id, is_unreleased) 
+                VALUES (%s, %s, %s, %s) 
+                ON CONFLICT (title) DO UPDATE SET 
+                    url = EXCLUDED.url, 
+                    file_id = EXCLUDED.file_id,
+                    is_unreleased = FALSE
+                """,
+                (title.strip(), "", value.strip(), False)
+            )
+            message = f"✅ '{title}' ko File ID ke sath add kar diya gaya hai."
+
+        # CASE 3: URL LINK
         elif "http" in value or "." in value:
             normalized_url = value.strip()
-
             if not value.startswith(('http://', 'https://')):
                 await update.message.reply_text("❌ Invalid URL format. URL must start with http:// or https://")
                 return
 
             cur.execute(
-                "INSERT INTO movies (title, url, file_id) VALUES (%s, %s, NULL) ON CONFLICT (title) DO UPDATE SET url = EXCLUDED.url, file_id = NULL",
-                (title.strip(), normalized_url)
+                """
+                INSERT INTO movies (title, url, file_id, is_unreleased) 
+                VALUES (%s, %s, %s, %s) 
+                ON CONFLICT (title) DO UPDATE SET 
+                    url = EXCLUDED.url, 
+                    file_id = NULL,
+                    is_unreleased = FALSE
+                """,
+                (title.strip(), normalized_url, None, False)
             )
-            message = f"✅ '{title}' को URL के साथ सफलतापूर्वक जोड़ दिया गया है।"
+            message = f"✅ '{title}' ko URL ke sath add kar diya gaya hai."
 
         else:
-            await update.message.reply_text("❌ Invalid format. कृपया सही File ID या URL दें।")
+            await update.message.reply_text("❌ Invalid format. Please provide valid File ID, URL, or type 'unreleased'.")
             return
 
         conn.commit()
         await update.message.reply_text(message)
 
-        cur.execute("SELECT id, title, url, file_id FROM movies WHERE title = %s", (title.strip(),))
-        movie_found = cur.fetchone()
+        # Notify Users logic (Agar movie sach mein release hui hai to hi notify karein)
+        if value.strip().lower() != "unreleased":
+            cur.execute("SELECT id, title, url, file_id FROM movies WHERE title = %s", (title.strip(),))
+            movie_found = cur.fetchone()
 
-        if movie_found:
-            movie_id, title, url, file_id = movie_found
-            value_to_send = file_id if file_id else url
+            if movie_found:
+                movie_id, title, url, file_id = movie_found
+                value_to_send = file_id if file_id else url
 
-            num_notified = await notify_users_for_movie(context, title, value_to_send)
-            await notify_in_group(context, title)
-            await update.message.reply_text(f"कुल {num_notified} users को notify किया गया है।")
-        else:
-            await update.message.reply_text("Notification failed: Could not retrieve updated movie details.")
+                num_notified = await notify_users_for_movie(context, title, value_to_send)
+                # Group notification optional
+                # await notify_in_group(context, title)
+                await update.message.reply_text(f"📢 Notification: {num_notified} users notified.")
 
     except Exception as e:
         logger.error(f"Error in add_movie command: {e}")
-        await update.message.reply_text(f"एक एरर आया: {e}")
+        await update.message.reply_text(f"Ek error aaya: {e}")
     finally:
         if conn:
             conn.close()
