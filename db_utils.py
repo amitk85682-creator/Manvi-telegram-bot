@@ -65,7 +65,7 @@ def ensure_tables_exist(conn):
             WHERE table_name='movie_files' AND column_name='file_size';
         """)
         if not cur.fetchone():
-            cur.execute("ALTER TABLE movie_files ADD COLUMN file_size TEXT;")
+            cur.execute("ALTER TABLE movie_files ADD COLUMN IF NOT EXISTS file_size TEXT;")
             logger.info("Added file_size column to movie_files table.")
 
         conn.commit()
@@ -158,10 +158,17 @@ def upsert_movie_and_files(conn, title: str, description: str, qualities: Dict[s
         cur.close()
 
 def get_all_movies(conn) -> List[Dict]:
-    """Fetch all movies for admin list."""
+    """Fetch all movies for admin list with file count."""
     try:
         cur = conn.cursor(cursor_factory=RealDictCursor)
-        cur.execute("SELECT id, title, description FROM movies ORDER BY id DESC")
+        # 👇 Updated Query: Counts files/links for each movie for the dashboard status
+        cur.execute("""
+            SELECT m.id, m.title, m.description,
+                   (SELECT COUNT(*) FROM movie_files mf WHERE mf.movie_id = m.id) as file_count,
+                   m.url, m.file_id
+            FROM movies m 
+            ORDER BY m.id DESC
+        """)
         movies = cur.fetchall()
         cur.close()
         return movies
