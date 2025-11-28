@@ -52,20 +52,36 @@ def add_movie_post():
     description = request.form.get('description', '').strip()
     aliases = request.form.get('aliases', '').strip()
 
+    # Updated to capture both URL and SIZE
     qualities = {
-        'Low Quality': request.form.get('q_360', '').strip(),
-    'SD Quality': request.form.get('q_480', '').strip(),
-    'Standard Quality': request.form.get('q_720', '').strip(),
-    'HD Quality': request.form.get('q_1080', '').strip(),
-    '4K': request.form.get('q_2160', '').strip()
+        'Low Quality': {
+            'url': request.form.get('q_360', '').strip(),
+            'size': request.form.get('s_360', '').strip()
+        },
+        'SD Quality': {
+            'url': request.form.get('q_480', '').strip(),
+            'size': request.form.get('s_480', '').strip()
+        },
+        'Standard Quality': {
+            'url': request.form.get('q_720', '').strip(),
+            'size': request.form.get('s_720', '').strip()
+        },
+        'HD Quality': {
+            'url': request.form.get('q_1080', '').strip(),
+            'size': request.form.get('s_1080', '').strip()
+        },
+        '4K': {
+            'url': request.form.get('q_2160', '').strip(),
+            'size': request.form.get('s_2160', '').strip()
+        }
     }
 
     if not title:
         flash('Title is required.', 'error')
         return redirect(url_for('admin.add_movie_form'))
 
-    # Ensure at least one non-empty quality (url or file id) before inserting/updating
-    if not any(qualities.values()):
+    # Ensure at least one non-empty quality URL exists
+    if not any(q['url'] for q in qualities.values()):
         flash('At least one quality link/file id is required.', 'error')
         return redirect(url_for('admin.add_movie_form'))
 
@@ -74,11 +90,13 @@ def add_movie_post():
         flash('Database connection failed.', 'error')
         return redirect(url_for('admin.add_movie_form'))
 
+    # Note: db_utils.upsert_movie_and_files must be updated to handle the new dictionary structure
     movie_id = db_utils.upsert_movie_and_files(conn, title, description, qualities, aliases)
+    
     if movie_id:
-        flash(f'Movie \"{title}\" added/updated (id={movie_id}).', 'success')
+        flash(f'Movie "{title}" added/updated (id={movie_id}).', 'success')
     else:
-        flash(f'Failed to add/update movie \"{title}\". See logs.', 'error')
+        flash(f'Failed to add/update movie "{title}". See logs.', 'error')
 
     return redirect(url_for('admin.add_movie_form'))
 
@@ -115,17 +133,35 @@ def bulk_upload():
                         failed += 1
                         continue
                     description = (row.get('Description') or row.get('description') or '').strip()
+                    
+                    # Updated CSV reading logic for Sizes
                     qualities = {
-    'Low Quality': (row.get('URL_360') or row.get('url_360') or row.get('360p') or '').strip(),
-    'SD Quality': (row.get('URL_480') or row.get('url_480') or row.get('480p') or '').strip(),
-    'Standard Quality': (row.get('URL_720') or row.get('url_720') or row.get('720p') or '').strip(),
-    'HD Quality': (row.get('URL_1080') or row.get('url_1080') or row.get('1080p') or '').strip(),
-    '4K': (row.get('URL_2160') or row.get('url_2160') or row.get('2160p') or '').strip()
-}
+                        'Low Quality': {
+                            'url': (row.get('URL_360') or row.get('url_360') or row.get('360p') or '').strip(),
+                            'size': (row.get('Size_360') or row.get('size_360') or '').strip()
+                        },
+                        'SD Quality': {
+                            'url': (row.get('URL_480') or row.get('url_480') or row.get('480p') or '').strip(),
+                            'size': (row.get('Size_480') or row.get('size_480') or '').strip()
+                        },
+                        'Standard Quality': {
+                            'url': (row.get('URL_720') or row.get('url_720') or row.get('720p') or '').strip(),
+                            'size': (row.get('Size_720') or row.get('size_720') or '').strip()
+                        },
+                        'HD Quality': {
+                            'url': (row.get('URL_1080') or row.get('url_1080') or row.get('1080p') or '').strip(),
+                            'size': (row.get('Size_1080') or row.get('size_1080') or '').strip()
+                        },
+                        '4K': {
+                            'url': (row.get('URL_2160') or row.get('url_2160') or row.get('2160p') or '').strip(),
+                            'size': (row.get('Size_2160') or row.get('size_2160') or '').strip()
+                        }
+                    }
+                    
                     aliases = (row.get('Aliases') or row.get('aliases') or '').strip()
 
                     # skip rows with no quality/file info
-                    if not any(qualities.values()):
+                    if not any(q['url'] for q in qualities.values()):
                         failed += 1
                         continue
 
@@ -148,8 +184,6 @@ def bulk_upload():
     # GET
     return render_template('admin_add_movie.html')
 
-# --- New: Manage movies and edit endpoints ---
-
 @admin.route('/admin/manage', methods=['GET'])
 @login_required
 def manage_movies():
@@ -157,7 +191,7 @@ def manage_movies():
     if not conn:
         flash('DB connection failed', 'error')
         return redirect(url_for('admin.add_movie_form'))
-    # db_utils.get_all_movies should return list of dicts: id, title, url, file_id, description, aliases
+    
     movies = []
     try:
         movies = db_utils.get_all_movies(conn)
@@ -178,19 +212,36 @@ def edit_movie(movie_id):
         title = request.form.get('title', '').strip()
         description = request.form.get('description', '').strip()
         aliases = request.form.get('aliases', '').strip()
+        
+        # Updated to capture both URL and SIZE
         qualities = {
-            'Low Quality': request.form.get('q_360', '').strip(),
-    'SD Quality': request.form.get('q_480', '').strip(),
-    'Standard Quality': request.form.get('q_720', '').strip(),
-    'HD Quality': request.form.get('q_1080', '').strip(),
-    '4K': request.form.get('q_2160', '').strip()
-}
+            'Low Quality': {
+                'url': request.form.get('q_360', '').strip(),
+                'size': request.form.get('s_360', '').strip()
+            },
+            'SD Quality': {
+                'url': request.form.get('q_480', '').strip(),
+                'size': request.form.get('s_480', '').strip()
+            },
+            'Standard Quality': {
+                'url': request.form.get('q_720', '').strip(),
+                'size': request.form.get('s_720', '').strip()
+            },
+            'HD Quality': {
+                'url': request.form.get('q_1080', '').strip(),
+                'size': request.form.get('s_1080', '').strip()
+            },
+            '4K': {
+                'url': request.form.get('q_2160', '').strip(),
+                'size': request.form.get('s_2160', '').strip()
+            }
+        }
 
         if not title:
             flash('Title is required.', 'error')
             return redirect(url_for('admin.edit_movie', movie_id=movie_id))
 
-        if not any(qualities.values()):
+        if not any(q['url'] for q in qualities.values()):
             flash('At least one quality link/file id is required.', 'error')
             return redirect(url_for('admin.edit_movie', movie_id=movie_id))
 
