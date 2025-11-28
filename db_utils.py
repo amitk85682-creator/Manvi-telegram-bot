@@ -1,4 +1,3 @@
-tum ise update kar ke de do
 import os
 import logging
 from urllib.parse import urlparse, quote
