@@ -1308,7 +1308,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             conn = get_db_connection()
             cur = conn.cursor()
-            cur.execute("SELECT id, title FROM movies WHERE id = %s", (movie_id,))
+            # 👇 UPDATE: Added is_unreleased to the query
+            cur.execute("SELECT id, title, is_unreleased FROM movies WHERE id = %s", (movie_id,))
             movie = cur.fetchone()
             cur.close()
             conn.close()
@@ -1317,7 +1318,27 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text("❌ Movie not found in database.")
                 return
 
-            movie_id, title = movie
+            # 👇 UPDATE: Unpack is_unreleased variable
+            movie_id, title, is_unreleased = movie
+
+            # 👇 UPDATE: Check if movie is Unreleased
+            if is_unreleased:
+                unreleased_msg = f"""
+Oops…!!
+Baby.. ye '<b>{title}</b>'
+
+abhi officially release hi nahi hui 😔💗
+
+👉 Isliye iska link provide karna possible nahi hai.
+👉 Jaise hi release hogi, system me auto-add ho jayegi ✨🍿
+
+⏳ Tab tak thoda wait karlo yaar…
+main to yahan hoon na jaan, update turant mil jayega 😘💖
+"""
+                await query.edit_message_text(text=unreleased_msg, parse_mode='HTML')
+                return
+
+            # 👇 Normal Flow (Agar movie released hai)
             qualities = get_all_movie_qualities(movie_id)
 
             if not qualities:
@@ -1339,6 +1360,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             }
 
             selection_text = f"✅ You selected: **{title}**\n\n⬇️ **Please choose the file quality:**"
+            # Note: Ensure create_quality_selection_keyboard handles file_size if you updated that too
             keyboard = create_quality_selection_keyboard(movie_id, title, qualities)
 
             await query.edit_message_text(
@@ -1346,7 +1368,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=keyboard,
                 parse_mode='Markdown'
             )
-
         # ==================== ADMIN ACTIONS ====================
         elif query.data.startswith("admin_fulfill_"):
             parts = query.data.split('_', 3)
