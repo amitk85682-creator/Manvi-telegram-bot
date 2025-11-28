@@ -6,15 +6,43 @@
   <style>
     body { font-family: Arial, sans-serif; background:#0f0f0f; color:#eee; padding:20px; margin:0; }
     .wrap { max-width:1000px; margin:20px auto; background:#1e1e1e; padding:22px; border-radius:8px; }
-    table { width:100%; border-collapse:collapse; margin-top:12px; }
-    th, td { padding:8px; border-bottom:1px solid #2a2a2a; text-align:left; color:#ddd; }
-    .missing { color:#ff8a8a; font-weight:bold; }
-    a.button { padding:6px 10px; background:#00d4ff; color:#111; border-radius:6px; text-decoration:none; font-weight:bold; }
+    
+    /* Header & Buttons */
+    .header { display:flex; justify-content:space-between; align-items:center; margin-bottom:20px; }
+    .btn-group { display:flex; gap:10px; }
+    .button { padding:8px 14px; background:#00d4ff; color:#111; border-radius:999px; text-decoration:none; font-weight:bold; font-size:0.9rem; transition:0.2s; }
+    .button:hover { opacity:0.8; }
+    .btn-logout { background:#333; color:#ccc; border:1px solid #444; }
+    .btn-edit { background:#2a2a2a; color:#fff; border:1px solid #444; padding:5px 12px; font-size:0.85rem; }
+    .btn-edit:hover { background:#00d4ff; color:#000; border-color:#00d4ff; }
+
+    /* Table Styling */
+    table { width:100%; border-collapse:collapse; margin-top:10px; background:#161616; border-radius:8px; overflow:hidden; }
+    th { background:#252525; padding:12px; text-align:left; color:#aaa; font-size:0.9rem; text-transform:uppercase; letter-spacing:1px; }
+    td { padding:12px; border-bottom:1px solid #2a2a2a; color:#ddd; font-size:0.95rem; }
+    tr:last-child td { border-bottom:none; }
+    tr:hover { background:#1f1f1f; }
+
+    /* Status Badges */
+    .badge { padding:4px 8px; border-radius:4px; font-size:0.75rem; font-weight:bold; }
+    .badge-ok { background:#1b3a1b; color:#4caf50; border:1px solid #2e5c2e; }
+    .badge-missing { background:#3a1b1b; color:#ff5252; border:1px solid #5c2e2e; }
+    
+    .flash { padding:10px; margin-bottom:15px; border-radius:6px; background:#2a2a2a; border-left:4px solid #00d4ff; color:#fff; }
   </style>
 </head>
 <body>
   <div class="wrap">
-    <h2>Manage Movies</h2>
+    
+    <div class="header">
+        <h2 style="margin:0;">Manage Movies</h2>
+        <div class="btn-group">
+            <a class="button" href="{{ url_for('admin.add_movie_form') }}">+ Add Movie</a>
+            <a class="button" href="{{ url_for('admin.bulk_upload') }}">Bulk Upload</a>
+            <a class="button btn-logout" href="{{ url_for('admin.logout') }}">Logout</a>
+        </div>
+    </div>
+
     {% with messages = get_flashed_messages(with_categories=true) %}
       {% if messages %}
         {% for category, message in messages %}
@@ -23,34 +51,46 @@
       {% endif %}
     {% endwith %}
 
-    <div style="margin-bottom:12px;">
-      <a class="button" href="{{ url_for('admin.add_movie_form') }}">Add Movie</a>
-      <a class="button" href="{{ url_for('admin.bulk_upload') }}">Bulk Upload</a>
-      <a class="button" href="{{ url_for('admin.logout') }}">Logout</a>
-    </div>
-
     <table>
       <thead>
-        <tr><th>ID</th><th>Title</th><th>Has File/URL?</th><th>Aliases</th><th>Actions</th></tr>
+        <tr>
+            <th width="5%">ID</th>
+            <th width="40%">Title</th>
+            <th width="15%">Status</th>
+            <th width="25%">Aliases</th>
+            <th width="15%">Actions</th>
+        </tr>
       </thead>
       <tbody>
         {% for m in movies %}
           <tr>
-            <td>{{ m.id }}</td>
-            <td>{{ m.title }}</td>
+            <td>#{{ m.id }}</td>
             <td>
-              {% if m.url or m.file_id %}
-                Yes
+                <strong>{{ m.title }}</strong>
+                {% if m.description %}
+                    <div style="font-size:0.8rem; color:#777; margin-top:2px;">{{ m.description[:50] }}...</div>
+                {% endif %}
+            </td>
+            <td>
+              {% if m.file_count and m.file_count > 0 %}
+                <span class="badge badge-ok">✅ {{ m.file_count }} Qualities</span>
+              {% elif m.url or m.file_id %}
+                <span class="badge badge-ok">✅ Available</span>
               {% else %}
-                <span class="missing">Missing</span>
+                <span class="badge badge-missing">❌ Missing Files</span>
               {% endif %}
             </td>
-            <td>{{ m.aliases }}</td>
+            <td style="color:#888; font-size:0.85rem;">
+                {{ m.aliases or '-' }}
+            </td>
             <td>
-              <a class="button" href="{{ url_for('admin.edit_movie', movie_id=m.id) }}">Edit</a>
-              <!-- optionally add delete endpoint/link -->
+              <a class="button btn-edit" href="{{ url_for('admin.edit_movie', movie_id=m.id) }}">✏️ Edit</a>
             </td>
           </tr>
+        {% else %}
+            <tr>
+                <td colspan="5" style="text-align:center; padding:30px; color:#666;">No movies found. Add some!</td>
+            </tr>
         {% endfor %}
       </tbody>
     </table>
