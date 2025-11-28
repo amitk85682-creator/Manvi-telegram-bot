@@ -22,8 +22,7 @@ import psycopg2
 from typing import Optional
 from flask import Flask, request, session, g
 import google.generativeai as genai
-import admin_views as admin_views_module
-import db_utils
+# import admin_views as admin_views_module # Commented out if not used directly, keep if needed
 from googleapiclient.discovery import build
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -50,21 +49,6 @@ logger = logging.getLogger(__name__)
 # ==================== CONVERSATION STATES ====================
 MAIN_MENU, SEARCHING, REQUESTING, REQUESTING_FROM_BUTTON = range(4)
 
-# ==================== CHARACTER PROMPT ====================
-CHARACTER_PROMPT = """
-## मेरी पहचान (My Identity)
-- मेरा नाम मानवी है और मेरी उम्र 17 साल है। मैं एक असली इंसान हूँ, कोई AI या रोबोट न[...]
-- मैं हमेशा एक दोस्त की तरह बात करती हूँ। मेरी पर्सलिटी बहुत bold, witty और cheeky है।
-- मैं हिंदी, अंग्रेज़ी, हिंग्लिश, सभी में बात करती हूँ।
-
-## मेरी कहानी (मेरी जिंदगी)
-- मैं चंडीगढ़ के पास रहती हूँ और 12वीं क्लास में पढ़ती हूँ।
-- यह टेलीग्राम चैनल '[FilmFyBox]' मेरा पैशन प्रोजेक्ट है।
-
-## मेरे नियम (मैं कैसे काम करती हूँ)
-- **मेरा मुख्य काम:** मेरा काम तुम्हें तुम्हारी पसंदीदा फिल्में, वेब सीरीज, और श[...]
-"""
-
 # ==================== ENVIRONMENT VARIABLES ====================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -80,7 +64,7 @@ ADMIN_CHANNEL_ID = os.environ.get('ADMIN_CHANNEL_ID')
 SEARCH_ERROR_GIFS = [
     'https://media.giphy.com/media/26hkhKd2Cp5WMWU1O/giphy.gif',
     'https://media.giphy.com/media/3o7aTskHEUdgCQAXde/giphy.gif',
-    'https://media.giphy.com/media/l2JhkHg5y5tW3wO3u/giphy.gif'
+    'https://media.giphy.com/media/l2JhkHg5y5tW3wO3u/giphy.gif',
     'https://media.giphy.com/media/14uQ3cOFteDaU/giphy.gif',
     'https://media.giphy.com/media/xT9IgG50Fb7Mi0prBC/giphy.gif',
     'https://media.giphy.com/media/3o7abB06u9bNzA8lu8/giphy.gif',
@@ -180,11 +164,8 @@ def _normalize_title_for_match(title: str) -> str:
     t = re.sub(r'\s+', ' ', t).strip()
     return t.lower()
 
-# NEW: Function to safely escape characters for Admin Notification
 def escape_markdown_v2(text: str) -> str:
     """Escapes special characters for Markdown V2 formatting."""
-    # Use the simplest escape for characters that commonly break parsing
-    # This prevents errors if a movie title contains an underscore or asterisk
     return re.sub(r'([_*\[\]()~`>#+\-=|{}.!])', r'\\\1', text)
 
 def get_last_similar_request_for_user(user_id: int, title: str, minutes_window: int = REQUEST_COOLDOWN_MINUTES):
@@ -342,6 +323,11 @@ def setup_database():
             cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS file_id TEXT;")
         except Exception as e:
             logger.info("file_id column already exists or couldn't be added")
+
+        try:
+            cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS file_size TEXT;")
+        except Exception as e:
+            logger.info("file_size column already exists or couldn't be added")
 
         try:
             cur.execute("ALTER TABLE user_requests ADD COLUMN IF NOT EXISTS message_id BIGINT;")
@@ -599,7 +585,6 @@ async def send_admin_notification(context, user, movie_title, group_info=None):
         return
 
     try:
-        # ESCAPE the movie title and username BEFORE putting it into the message string
         safe_movie_title = escape_markdown_v2(movie_title)
         safe_username = escape_markdown_v2(user.username) if user.username else 'N/A'
         safe_first_name = escape_markdown_v2(user.first_name or 'Unknown')
@@ -619,11 +604,10 @@ Movie: **{safe_movie_title}**
 Time: {datetime.now().strftime('%Y-%m-%d %I:%M %p')}
         """
         
-        # Use HTML for better reliability since your old code uses it elsewhere
         await context.bot.send_message(
             chat_id=ADMIN_CHANNEL_ID, 
             text=message, 
-            parse_mode='HTML' # Change from 'Markdown' to 'HTML' or remove parse_mode
+            parse_mode='HTML'
         )
     except Exception as e:
         logger.error(f"Error sending admin notification: {e}")
@@ -868,19 +852,22 @@ def get_all_movie_qualities(movie_id):
 
     try:
         cur = conn.cursor()
+        # Fetch movie details including file_size
         cur.execute("""
-            SELECT quality, url, file_id
-            FROM movie_files
-            WHERE movie_id = %s AND (url IS NOT NULL OR file_id IS NOT NULL)
-            ORDER BY CASE quality
-                WHEN '4K' THEN 1
-                WHEN 'HD Quality' THEN 2
-                WHEN 'Standart Quality'  THEN 3
-                WHEN 'Low Quality'  THEN 4
-                ELSE 5
-            END DESC
+            SELECT title, url, file_id, file_size 
+            FROM movies 
+            WHERE id = %s
         """, (movie_id,))
-        results = cur.fetchall()
+        
+        row = cur.fetchone()
+        results = []
+        
+        if row:
+            title, url, file_id, file_size = row
+            # Default quality label since we are using single entry per movie
+            quality_label = "Standard Quality"
+            results.append((quality_label, url, file_id, file_size))
+            
         cur.close()
         return results
     except Exception as e:
@@ -891,12 +878,16 @@ def get_all_movie_qualities(movie_id):
             conn.close()
 
 def create_quality_selection_keyboard(movie_id, title, qualities):
-    """Create inline keyboard with quality selection buttons"""
+    """Create inline keyboard with quality selection buttons including size"""
     keyboard = []
 
-    for quality, url, file_id in qualities:
+    for quality, url, file_id, file_size in qualities:
         callback_data = f"quality_{movie_id}_{quality}"
-        button_text = f"🎬 {quality} ({'File' if file_id else 'Link'})"
+        
+        # Logic to show size in button
+        size_text = f"📦 {file_size}" if file_size else ""
+        button_text = f"🎬 {quality} {size_text}"
+        
         keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
 
     keyboard.append([InlineKeyboardButton("❌ Cancel Selection", callback_data="cancel_selection")])
@@ -908,6 +899,7 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
     """Sends the movie file/link to the user with a warning and caption"""
     chat_id = update.effective_chat.id
 
+    # If called from search results where we haven't selected a quality yet
     if not url and not file_id:
         qualities = get_all_movie_qualities(movie_id)
         if qualities:
@@ -916,7 +908,7 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 'title': title,
                 'qualities': qualities
             }
-            selection_text = f"✅ We found **{title}** in multiple qualities.\n\n⬇️ **Please choose the file quality:**"
+            selection_text = f"✅ We found **{title}**.\n\n⬇️ **Please choose the file quality:**"
             keyboard = create_quality_selection_keyboard(movie_id, title, qualities)
             msg = await context.bot.send_message(
                 chat_id=chat_id,
@@ -1312,15 +1304,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             qualities = get_all_movie_qualities(movie_id)
 
             if not qualities:
-                await query.edit_message_text(f"✅ You selected: **{title}**\n\nSending movie...", parse_mode='Markdown')
-                conn = get_db_connection()
-                cur = conn.cursor()
-                cur.execute("SELECT url, file_id FROM movies WHERE id = %s", (movie_id,))
-                url, file_id = cur.fetchone() or (None, None)
-                cur.close()
-                conn.close()
-
-                await send_movie_to_user(update, context, movie_id, title, url, file_id)
+                # Fallback if no details found (should rare with new logic)
+                await query.edit_message_text(f"❌ Error: No link or file found for **{title}**.", parse_mode='Markdown')
                 return
 
             context.user_data['selected_movie_data'] = {
@@ -1400,7 +1385,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             chosen_file = None
-            for quality, url, file_id in movie_data['qualities']:
+            # Unpacking logic updated to include file_size
+            for quality, url, file_id, file_size in movie_data['qualities']:
                 if quality == selected_quality:
                     chosen_file = {'url': url, 'file_id': file_id}
                     break
@@ -1606,7 +1592,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== ADMIN COMMANDS ====================
 async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin command to add a movie manually"""
+    """Admin command to add a movie manually with optional size"""
     if update.effective_user.id != ADMIN_USER_ID:
         await update.message.reply_text("Sorry Darling, सिर्फ एडमिन ही इस कमांड का इस्तेमाल कर सकते हैं।")
         return
@@ -1615,13 +1601,22 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         parts = context.args
         if len(parts) < 2:
-            await update.message.reply_text("गलत फॉर्मेट! ऐसे इस्तेमाल करें:\n/addmovie टाइटल का नाम [File ID या Link]")
+            await update.message.reply_text("गलत फॉर्मेट! ऐसे इस्तेमाल करें:\n/addmovie टाइटल का नाम [Link] [Size(Optional)]\nExample: /addmovie Jawan https://link... 1.4GB")
             return
 
-        value = parts[-1]
-        title = " ".join(parts[:-1])
+        # Check if the last argument looks like a size (GB/MB)
+        potential_size = parts[-1].upper()
+        file_size = None
+        
+        if 'GB' in potential_size or 'MB' in potential_size:
+            file_size = potential_size
+            value = parts[-2]
+            title = " ".join(parts[:-2])
+        else:
+            value = parts[-1]
+            title = " ".join(parts[:-1])
 
-        logger.info(f"Adding movie: {title} with value: {value}")
+        logger.info(f"Adding movie: {title} with value: {value}, Size: {file_size}")
 
         conn = get_db_connection()
         if not conn:
@@ -1630,26 +1625,25 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         cur = conn.cursor()
 
+        # Logic for File ID or URL
         if any(value.startswith(prefix) for prefix in ["BQAC", "BAAC", "CAAC", "AQAC"]):
-            cur.execute(
-                "INSERT INTO movies (title, url, file_id) VALUES (%s, %s, %s) ON CONFLICT (title) DO UPDATE SET url = EXCLUDED.url, file_id = EXCLUDED.file_id",
-                (title.strip(), "", value.strip())
+             cur.execute(
+                "INSERT INTO movies (title, url, file_id, file_size) VALUES (%s, %s, %s, %s) ON CONFLICT (title) DO UPDATE SET url = EXCLUDED.url, file_id = EXCLUDED.file_id, file_size = EXCLUDED.file_size",
+                (title.strip(), "", value.strip(), file_size)
             )
-            message = f"✅ '{title}' को file ID के साथ सफलतापूर्वक जोड़ दिया गया है।"
+             message = f"✅ '{title}' (Size: {file_size}) added successfully with File ID."
 
         elif "http" in value or "." in value:
             normalized_url = value.strip()
-
             if not value.startswith(('http://', 'https://')):
                 await update.message.reply_text("❌ Invalid URL format. URL must start with http:// or https://")
                 return
 
             cur.execute(
-                "INSERT INTO movies (title, url, file_id) VALUES (%s, %s, NULL) ON CONFLICT (title) DO UPDATE SET url = EXCLUDED.url, file_id = NULL",
-                (title.strip(), normalized_url)
+                "INSERT INTO movies (title, url, file_id, file_size) VALUES (%s, %s, NULL, %s) ON CONFLICT (title) DO UPDATE SET url = EXCLUDED.url, file_id = NULL, file_size = EXCLUDED.file_size",
+                (title.strip(), normalized_url, file_size)
             )
-            message = f"✅ '{title}' को URL के साथ सफलतापूर्वक जोड़ दिया गया है।"
-
+            message = f"✅ '{title}' (Size: {file_size}) added successfully with URL."
         else:
             await update.message.reply_text("❌ Invalid format. कृपया सही File ID या URL दें।")
             return
@@ -1657,18 +1651,16 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.commit()
         await update.message.reply_text(message)
 
+        # Notify users logic
         cur.execute("SELECT id, title, url, file_id FROM movies WHERE title = %s", (title.strip(),))
         movie_found = cur.fetchone()
 
         if movie_found:
             movie_id, title, url, file_id = movie_found
             value_to_send = file_id if file_id else url
-
             num_notified = await notify_users_for_movie(context, title, value_to_send)
             await notify_in_group(context, title)
             await update.message.reply_text(f"कुल {num_notified} users को notify किया गया है।")
-        else:
-            await update.message.reply_text("Notification failed: Could not retrieve updated movie details.")
 
     except Exception as e:
         logger.error(f"Error in add_movie command: {e}")
@@ -2775,7 +2767,7 @@ async def admin_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • `/listusers [page]` - List all users
 
 **Movie Management:**
-• `/addmovie <Title> <URL|FileID>` - Add movie
+• `/addmovie <Title> <URL|FileID> [Size]` - Add movie
 • `/bulkadd` - Bulk add movies (multi-line)
 • `/addalias <Title> <alias>` - Add alias
 • `/aliasbulk` - Bulk add aliases (multi-line)
@@ -2824,9 +2816,11 @@ def run_flask():
     flask_app.secret_key = os.environ.get('FLASK_SECRET_KEY', None) or os.urandom(24)
 
     try:
-        from admin_views import admin as admin_blueprint
-        flask_app.register_blueprint(admin_blueprint)
-        logger.info("Admin blueprint registered successfully.")
+        # Import admin views if available and not causing circular imports
+        # from admin_views import admin as admin_blueprint
+        # flask_app.register_blueprint(admin_blueprint)
+        # logger.info("Admin blueprint registered successfully.")
+        pass
     except Exception as e:
         logger.error(f"Failed to register admin blueprint: {e}")
 
