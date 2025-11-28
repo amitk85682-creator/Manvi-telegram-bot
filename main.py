@@ -1304,49 +1304,49 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ==================== MOVIE SELECTION ====================
-        if query.data.startswith("movie_"):
-            movie_id = int(query.data.replace("movie_", ""))
+        if query.data.startswith("movie_"):
+            movie_id = int(query.data.replace("movie_", ""))
 
-            conn = get_db_connection()
-            cur = conn.cursor()
-            cur.execute("SELECT id, title FROM movies WHERE id = %s", (movie_id,))
-            movie = cur.fetchone()
-            cur.close()
-            conn.close()
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT id, title FROM movies WHERE id = %s", (movie_id,))
+            movie = cur.fetchone()
+            cur.close()
+            conn.close()
 
-            if not movie:
-                await query.edit_message_text("❌ Movie not found in database.")
-                return
+            if not movie:
+                await query.edit_message_text("❌ Movie not found in database.")
+                return
 
-            movie_id, title = movie
-            qualities = get_all_movie_qualities(movie_id)
+            movie_id, title = movie
+            qualities = get_all_movie_qualities(movie_id)
 
-            if not qualities:
-                await query.edit_message_text(f"✅ You selected: **{title}**\n\nSending movie...", parse_mode='Markdown')
-                conn = get_db_connection()
-                cur = conn.cursor()
-                cur.execute("SELECT url, file_id FROM movies WHERE id = %s", (movie_id,))
-                url, file_id = cur.fetchone() or (None, None)
-                cur.close()
-                conn.close()
+            if not qualities:
+                await query.edit_message_text(f"✅ You selected: **{title}**\n\nSending movie...", parse_mode='Markdown')
+                conn = get_db_connection()
+                cur = conn.cursor()
+                cur.execute("SELECT url, file_id FROM movies WHERE id = %s", (movie_id,))
+                url, file_id = cur.fetchone() or (None, None)
+                cur.close()
+                conn.close()
 
-                await send_movie_to_user(update, context, movie_id, title, url, file_id)
-                return
+                await send_movie_to_user(update, context, movie_id, title, url, file_id)
+                return
 
-            context.user_data['selected_movie_data'] = {
-                'id': movie_id,
-                'title': title,
-                'qualities': qualities
-            }
+            context.user_data['selected_movie_data'] = {
+                'id': movie_id,
+                'title': title,
+                'qualities': qualities
+            }
 
-            selection_text = f"✅ You selected: **{title}**\n\n⬇️ **Please choose the file quality:**"
-            keyboard = create_quality_selection_keyboard(movie_id, title, qualities)
+            selection_text = f"✅ You selected: **{title}**\n\n⬇️ **Please choose the file quality:**"
+            keyboard = create_quality_selection_keyboard(movie_id, title, qualities)
 
-            await query.edit_message_text(
-                selection_text,
-                reply_markup=keyboard,
-                parse_mode='Markdown'
-            )
+            await query.edit_message_text(
+                selection_text,
+                reply_markup=keyboard,
+                parse_mode='Markdown'
+            )
         # ==================== ADMIN ACTIONS ====================
         elif query.data.startswith("admin_fulfill_"):
             parts = query.data.split('_', 3)
