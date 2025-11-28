@@ -45,7 +45,23 @@ def ensure_tables_exist(conn):
     try:
         cur = conn.cursor()
         
-        # Create movie_files table if not exists
+        # 1. Create movies table if not exists (Basic structure)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS movies (
+                id SERIAL PRIMARY KEY,
+                title TEXT NOT NULL UNIQUE,
+                url TEXT,
+                file_id TEXT,
+                description TEXT
+            );
+        """)
+
+        # 2. Add 'is_unreleased' column to movies if it doesn't exist
+        cur.execute("""
+            ALTER TABLE movies ADD COLUMN IF NOT EXISTS is_unreleased BOOLEAN DEFAULT FALSE;
+        """)
+
+        # 3. Create movie_files table
         cur.execute("""
             CREATE TABLE IF NOT EXISTS movie_files (
                 id SERIAL PRIMARY KEY,
@@ -58,16 +74,9 @@ def ensure_tables_exist(conn):
             );
         """)
         
-        # Check if file_size column exists in movie_files, if not add it
-        cur.execute("""
-            SELECT column_name 
-            FROM information_schema.columns 
-            WHERE table_name='movie_files' AND column_name='file_size';
-        """)
-        if not cur.fetchone():
-            cur.execute("ALTER TABLE movie_files ADD COLUMN IF NOT EXISTS file_size TEXT;")
-            logger.info("Added file_size column to movie_files table.")
-
+        # 4. Check if file_size column exists in movie_files (legacy check)
+        cur.execute("ALTER TABLE movie_files ADD COLUMN IF NOT EXISTS file_size TEXT;")
+        
         conn.commit()
         cur.close()
     except Exception as e:
@@ -76,52 +85,77 @@ def ensure_tables_exist(conn):
 
 def upsert_movie_and_files(conn, title: str, description: str, qualities: Dict[str, Any], aliases_str: str, movie_id: Optional[int] = None) -> Optional[int]:
     """
-    Insert or update movie, its multiple quality links/sizes, and aliases.
-    accepts qualities as: {'Quality': {'url': '...', 'size': '...'}, ...}
-    Returns movie_id or None on error.
+    Insert or update movie.
+    - Handles 'file_size' storage.
+    - Handles 'is_unreleased' logic: If any link is 'unreleased', sets flag TRUE. If real link, sets FALSE.
     """
     if not title:
         return None
     
+    # --- Check for Unreleased Status ---
+    is_unreleased_flag = False
+    if qualities:
+        for q, data in qualities.items():
+            link_check = ""
+            if isinstance(data, dict):
+                link_check = data.get('url', '').strip().lower()
+            else:
+                link_check = str(data).strip().lower()
+            
+            if link_check == "unreleased":
+                is_unreleased_flag = True
+                break
+
     cur = conn.cursor()
     try:
         current_movie_id = movie_id
 
-        # 1. Insert or Update Movie Record
+        # 1. Insert or Update Movie Record (With is_unreleased flag)
         if current_movie_id:
             # Update existing
             cur.execute("""
                 UPDATE movies 
-                SET title = %s, description = %s 
+                SET title = %s, description = %s, is_unreleased = %s
                 WHERE id = %s
-            """, (title.strip(), description, current_movie_id))
+            """, (title.strip(), description, is_unreleased_flag, current_movie_id))
         else:
-            # Insert new or update description on conflict
+            # Insert new
             cur.execute("""
-                INSERT INTO movies (title, url, file_id, description)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (title) DO UPDATE SET description = EXCLUDED.description
+                INSERT INTO movies (title, url, file_id, description, is_unreleased)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (title) DO UPDATE SET 
+                    description = EXCLUDED.description,
+                    is_unreleased = EXCLUDED.is_unreleased
                 RETURNING id
-            """, (title.strip(), "", None, description))
+            """, (title.strip(), "", None, description, is_unreleased_flag))
             current_movie_id = cur.fetchone()[0]
 
-        # 2. Upsert Qualities (Files/Links + Sizes)
+        # 2. Upsert Qualities (Only if NOT unreleased)
+        # If it IS unreleased, we don't need to add fake files to movie_files table, just the flag on movies table is enough.
+        # But if you provided real links mixed with unreleased (unlikely), we process them.
+        
         if qualities:
             for quality, data in qualities.items():
                 link = ""
                 size = ""
 
-                # Handle data format (Dict or String)
+                # Handle data format
                 if isinstance(data, dict):
                     link = data.get('url', '').strip()
                     size = data.get('size', '').strip()
                 else:
                     link = str(data).strip() if data else ""
                 
+                # Skip empty links
                 if not link:
                     continue
 
-                # Determine if it's a File ID (BQAC...) or URL
+                # If the specific link is "unreleased", skip inserting it into movie_files
+                # (The movie is already marked via flag above)
+                if link.lower() == "unreleased":
+                    continue
+
+                # Determine if it's a File ID or URL
                 if any(link.startswith(prefix) for prefix in ("BQAC", "BAAC", "CAAC", "AQAC")):
                     cur.execute("""
                         INSERT INTO movie_files (movie_id, quality, file_id, url, file_size)
@@ -158,12 +192,12 @@ def upsert_movie_and_files(conn, title: str, description: str, qualities: Dict[s
         cur.close()
 
 def get_all_movies(conn) -> List[Dict]:
-    """Fetch all movies for admin list with file count."""
+    """Fetch all movies for admin list with file count and unreleased status."""
     try:
         cur = conn.cursor(cursor_factory=RealDictCursor)
-        # 👇 Updated Query: Counts files/links for each movie for the dashboard status
+        # Added is_unreleased to selection
         cur.execute("""
-            SELECT m.id, m.title, m.description,
+            SELECT m.id, m.title, m.description, m.is_unreleased,
                    (SELECT COUNT(*) FROM movie_files mf WHERE mf.movie_id = m.id) as file_count,
                    m.url, m.file_id
             FROM movies m 
@@ -177,11 +211,11 @@ def get_all_movies(conn) -> List[Dict]:
         return []
 
 def get_movie_by_id(conn, movie_id: int) -> Optional[Dict]:
-    """Fetch full movie details including qualities and aliases."""
+    """Fetch full movie details including qualities, size, aliases, and release status."""
     try:
         cur = conn.cursor(cursor_factory=RealDictCursor)
         
-        # Get basic info
+        # Get basic info (Updated to include is_unreleased)
         cur.execute("SELECT * FROM movies WHERE id = %s", (movie_id,))
         movie = cur.fetchone()
         if not movie:
@@ -191,7 +225,7 @@ def get_movie_by_id(conn, movie_id: int) -> Optional[Dict]:
         cur.execute("SELECT quality, url, file_id, file_size FROM movie_files WHERE movie_id = %s", (movie_id,))
         files = cur.fetchall()
         
-        # Reconstruct qualities dictionary for the form
+        # Reconstruct qualities dictionary
         qualities_dict = {
             'Low Quality': {'url': '', 'size': ''},
             'SD Quality': {'url': '', 'size': ''},
@@ -202,7 +236,6 @@ def get_movie_by_id(conn, movie_id: int) -> Optional[Dict]:
         
         for f in files:
             q_name = f['quality']
-            # Determine value (File ID or URL)
             val = f['file_id'] if f['file_id'] else f['url']
             size = f['file_size'] if f['file_size'] else ''
             
@@ -214,10 +247,13 @@ def get_movie_by_id(conn, movie_id: int) -> Optional[Dict]:
         aliases_rows = cur.fetchall()
         aliases_str = ", ".join([row['alias'] for row in aliases_rows])
 
-        # Convert RealDictRow to standard dict and add extras
+        # Assemble final data
         movie_data = dict(movie)
         movie_data['qualities'] = qualities_dict
         movie_data['aliases'] = aliases_str
+        # Ensure is_unreleased is present (it should be from SELECT *, but good to be safe)
+        if 'is_unreleased' not in movie_data:
+             movie_data['is_unreleased'] = False
 
         cur.close()
         return movie_data
