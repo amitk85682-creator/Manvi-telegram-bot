@@ -861,15 +861,16 @@ def create_movie_selection_keyboard(movies, page=0, movies_per_page=5):
     return InlineKeyboardMarkup(keyboard)
 
 def get_all_movie_qualities(movie_id):
-    """Fetch all available qualities for a given movie ID"""
+    """Fetch all available qualities and their SIZES for a given movie ID"""
     conn = get_db_connection()
     if not conn:
         return []
 
     try:
         cur = conn.cursor()
+        # Update: Added file_size to the SELECT statement
         cur.execute("""
-            SELECT quality, url, file_id
+            SELECT quality, url, file_id, file_size
             FROM movie_files
             WHERE movie_id = %s AND (url IS NOT NULL OR file_id IS NOT NULL)
             ORDER BY CASE quality
@@ -891,12 +892,20 @@ def get_all_movie_qualities(movie_id):
             conn.close()
 
 def create_quality_selection_keyboard(movie_id, title, qualities):
-    """Create inline keyboard with quality selection buttons"""
+    """Create inline keyboard with quality selection buttons showing SIZE"""
     keyboard = []
 
-    for quality, url, file_id in qualities:
+    # Note: qualities tuple ab 4 items ka hai -> (quality, url, file_id, file_size)
+    for quality, url, file_id, file_size in qualities:
         callback_data = f"quality_{movie_id}_{quality}"
-        button_text = f"🎬 {quality} ({'File' if file_id else 'Link'})"
+        
+        # Agar size available hai to dikhayein, nahi to sirf Quality dikhayein
+        size_text = f" - {file_size}" if file_size else ""
+        link_type = "File" if file_id else "Link"
+        
+        # Button text example: "🎬 720p - 1.4GB (Link)"
+        button_text = f"🎬 {quality}{size_text} ({link_type})"
+        
         keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
 
     keyboard.append([InlineKeyboardButton("❌ Cancel Selection", callback_data="cancel_selection")])
