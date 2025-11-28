@@ -1402,6 +1402,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if not movie_data or movie_data.get('id') != movie_id:
                 qualities = get_all_movie_qualities(movie_id)
+                # Note: qualities now contains (quality, url, file_id, file_size)
                 movie_data = {'id': movie_id, 'title': 'Movie', 'qualities': qualities}
 
             if not movie_data or 'qualities' not in movie_data:
@@ -1409,10 +1410,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             chosen_file = None
-            for quality, url, file_id in movie_data['qualities']:
+            
+            # --- FIX IS BELOW THIS LINE ---
+            # We added 'file_size' to the unpacking because the DB function returns 4 values now
+            for quality, url, file_id, file_size in movie_data['qualities']:
                 if quality == selected_quality:
                     chosen_file = {'url': url, 'file_id': file_id}
                     break
+            # -----------------------------
 
             if not chosen_file:
                 await query.edit_message_text("❌ Error fetching the file for that quality.")
@@ -1432,7 +1437,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if 'selected_movie_data' in context.user_data:
                 del context.user_data['selected_movie_data']
-
         # ==================== PAGINATION ====================
         elif query.data.startswith("page_"):
             page = int(query.data.replace("page_", ""))
