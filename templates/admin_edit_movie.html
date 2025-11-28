@@ -2,16 +2,26 @@
 <html>
 <head>
   <meta charset="utf-8">
-  <title>Edit Movie</title>
+  <title>Edit Movie - {{ movie.title }}</title>
   <style>
     body { font-family: Arial, sans-serif; background:#0f0f0f; color:#eee; padding:20px; margin:0; }
     .wrap { max-width:900px; margin:20px auto; background:#1e1e1e; padding:22px; border-radius:8px; }
     input, textarea { width:100%; padding:10px; margin-top:8px; border-radius:6px; border:1px solid #333; background:#0f0f0f; color:#fff; }
     label { display:block; margin-top:12px; color:#bbb; }
-    .qualities { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:8px; }
+    
+    /* Updated Grid */
+    .qualities { display:grid; grid-template-columns:1fr; gap:15px; margin-top:8px; }
+    
+    /* Layout for Link + Size */
+    .q-row { display: flex; gap: 10px; align-items: center; }
+    .q-row input:first-child { flex: 3; } /* Link gets 75% width */
+    .q-row input:last-child { flex: 1; }  /* Size gets 25% width */
+    
     .actions { display:flex; gap:12px; margin-top:18px; }
     button { padding:10px 16px; border-radius:999px; border:none; background:#00d4ff; color:#111; font-weight:bold; cursor:pointer; }
-    small { color:#999; }
+    .btn-cancel { background:#444; color:#fff; }
+    .flash { padding:8px; margin-bottom:10px; border-radius:6px; background:#2a2a2a; border:1px solid #444; color:#fff; }
+    small { color:#999; display:block; margin-bottom:4px; }
   </style>
 </head>
 <body>
@@ -30,38 +40,57 @@
       <input name="title" type="text" required value="{{ movie.title }}">
 
       <label>Description</label>
-<textarea name="description" rows="3">{{ movie.description }}</textarea>
+      <textarea name="description" rows="3">{{ movie.description }}</textarea>
 
-<label>Download Links / File IDs (fill one or more)</label>
-<div class="qualities">
-  <div>
-    <small>360p (Low)</small>
-    <input name="q_360" type="text" placeholder="360p link or file id" value="{{ movie.q_360 or '' }}">
-  </div>
-  <div>
-    <small>480p (SD)</small>
-    <input name="q_480" type="text" placeholder="480p link or file id" value="{{ movie.q_480 or '' }}">
-  </div>
-  <div>
-    <small>720p (Standard)</small>
-    <input name="q_720" type="text" placeholder="720p link or file id" value="{{ movie.q_720 or '' }}">
-  </div>
-  <div>
-    <small>1080p (HD)</small>
-    <input name="q_1080" type="text" placeholder="1080p link or file id" value="{{ movie.q_1080 or '' }}">
-  </div>
-  <div>
-    <small>2160p (4K)</small>
-    <input name="q_2160" type="text" placeholder="4K link or file id" value="{{ movie.q_2160 or '' }}">
-  </div>
-</div>
+      <label>Download Links & Sizes</label>
+      <div class="qualities">
+        <div>
+          <small>360p (Low)</small>
+          <div class="q-row">
+             <input name="q_360" type="text" placeholder="Link / File ID" value="{{ movie.qualities['Low Quality']['url'] }}">
+             <input name="s_360" type="text" placeholder="Size (e.g. 300MB)" value="{{ movie.qualities['Low Quality']['size'] }}">
+          </div>
+        </div>
+
+        <div>
+          <small>480p (SD)</small>
+          <div class="q-row">
+             <input name="q_480" type="text" placeholder="Link / File ID" value="{{ movie.qualities['SD Quality']['url'] }}">
+             <input name="s_480" type="text" placeholder="Size" value="{{ movie.qualities['SD Quality']['size'] }}">
+          </div>
+        </div>
+
+        <div>
+          <small>720p (Standard)</small>
+          <div class="q-row">
+             <input name="q_720" type="text" placeholder="Link / File ID" value="{{ movie.qualities['Standard Quality']['url'] }}">
+             <input name="s_720" type="text" placeholder="Size" value="{{ movie.qualities['Standard Quality']['size'] }}">
+          </div>
+        </div>
+
+        <div>
+          <small>1080p (HD)</small>
+          <div class="q-row">
+             <input name="q_1080" type="text" placeholder="Link / File ID" value="{{ movie.qualities['HD Quality']['url'] }}">
+             <input name="s_1080" type="text" placeholder="Size" value="{{ movie.qualities['HD Quality']['size'] }}">
+          </div>
+        </div>
+
+        <div>
+          <small>2160p (4K)</small>
+          <div class="q-row">
+             <input name="q_2160" type="text" placeholder="Link / File ID" value="{{ movie.qualities['4K']['url'] }}">
+             <input name="s_2160" type="text" placeholder="Size" value="{{ movie.qualities['4K']['size'] }}">
+          </div>
+        </div>
+      </div>
 
       <label>Aliases (comma separated)</label>
       <input name="aliases" type="text" value="{{ movie.aliases or '' }}">
 
       <div class="actions">
-        <button type="submit">Save</button>
-        <a href="{{ url_for('admin.manage_movies') }}"><button type="button">Back</button></a>
+        <button type="submit">Save Changes</button>
+        <a href="{{ url_for('admin.manage_movies') }}"><button type="button" class="btn-cancel">Back</button></a>
       </div>
     </form>
   </div>
