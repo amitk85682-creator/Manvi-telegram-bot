@@ -1302,72 +1302,51 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
 
-        # ==================== MOVIE SELECTION ====================
-        if query.data.startswith("movie_"):
-            movie_id = int(query.data.replace("movie_", ""))
 
-            conn = get_db_connection()
-            cur = conn.cursor()
-            # 👇 UPDATE: Added is_unreleased to the query
-            cur.execute("SELECT id, title, is_unreleased FROM movies WHERE id = %s", (movie_id,))
-            movie = cur.fetchone()
-            cur.close()
-            conn.close()
+# ==================== MOVIE SELECTION ====================
+        if query.data.startswith("movie_"):
+            movie_id = int(query.data.replace("movie_", ""))
 
-            if not movie:
-                await query.edit_message_text("❌ Movie not found in database.")
-                return
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT id, title FROM movies WHERE id = %s", (movie_id,))
+            movie = cur.fetchone()
+            cur.close()
+            conn.close()
 
-            # 👇 UPDATE: Unpack is_unreleased variable
-            movie_id, title, is_unreleased = movie
+            if not movie:
+                await query.edit_message_text("❌ Movie not found in database.")
+                return
 
-            # 👇 UPDATE: Check if movie is Unreleased
-            if is_unreleased:
-                unreleased_msg = f"""
-Oops…!!
-Baby.. ye '<b>{title}</b>'
+            movie_id, title = movie
+            qualities = get_all_movie_qualities(movie_id)
 
-abhi officially release hi nahi hui 😔💗
+            if not qualities:
+                await query.edit_message_text(f"✅ You selected: **{title}**\n\nSending movie...", parse_mode='Markdown')
+                conn = get_db_connection()
+                cur = conn.cursor()
+                cur.execute("SELECT url, file_id FROM movies WHERE id = %s", (movie_id,))
+                url, file_id = cur.fetchone() or (None, None)
+                cur.close()
+                conn.close()
 
-👉 Isliye iska link provide karna possible nahi hai.
-👉 Jaise hi release hogi, system me auto-add ho jayegi ✨🍿
+                await send_movie_to_user(update, context, movie_id, title, url, file_id)
+                return
 
-⏳ Tab tak thoda wait karlo yaar…
-main to yahan hoon na jaan, update turant mil jayega 😘💖
-"""
-                await query.edit_message_text(text=unreleased_msg, parse_mode='HTML')
-                return
+            context.user_data['selected_movie_data'] = {
+                'id': movie_id,
+                'title': title,
+                'qualities': qualities
+            }
 
-            # 👇 Normal Flow (Agar movie released hai)
-            qualities = get_all_movie_qualities(movie_id)
+            selection_text = f"✅ You selected: **{title}**\n\n⬇️ **Please choose the file quality:**"
+            keyboard = create_quality_selection_keyboard(movie_id, title, qualities)
 
-            if not qualities:
-                await query.edit_message_text(f"✅ You selected: **{title}**\n\nSending movie...", parse_mode='Markdown')
-                conn = get_db_connection()
-                cur = conn.cursor()
-                cur.execute("SELECT url, file_id FROM movies WHERE id = %s", (movie_id,))
-                url, file_id = cur.fetchone() or (None, None)
-                cur.close()
-                conn.close()
-
-                await send_movie_to_user(update, context, movie_id, title, url, file_id)
-                return
-
-            context.user_data['selected_movie_data'] = {
-                'id': movie_id,
-                'title': title,
-                'qualities': qualities
-            }
-
-            selection_text = f"✅ You selected: **{title}**\n\n⬇️ **Please choose the file quality:**"
-            # Note: Ensure create_quality_selection_keyboard handles file_size if you updated that too
-            keyboard = create_quality_selection_keyboard(movie_id, title, qualities)
-
-            await query.edit_message_text(
-                selection_text,
-                reply_markup=keyboard,
-                parse_mode='Markdown'
-            )
+            await query.edit_message_text(
+                selection_text,
+                reply_markup=keyboard,
+                parse_mode='Markdown'
+            )
         # ==================== ADMIN ACTIONS ====================
         elif query.data.startswith("admin_fulfill_"):
             parts = query.data.split('_', 3)
