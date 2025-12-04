@@ -637,11 +637,11 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
 
     caption_text = (
         f"🎬 <b>{movie_title}</b>\n\n"
-        "🔗 <b>JOIN »</b> FilmfyBox (http://t.me/filmfybox)\n\n"
+        "🔗 <b>JOIN »</b> FlimFyBox Movies HD (https://t.me/FilmFyBoxMoviesHD)\n\n"
         "🔹 <b>Please drop the movie name, and I'll find it for you as soon as possible. 🎬✨👇</b>\n"
-        "🔹 <b>FlimfyBox Chat (https://t.me/Filmfybox002)</b>"
+        "🔹 <b>Support group (https://t.me/+2hFeRL4DYfBjZDQ1)</b>"
     )
-    join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url="http://t.me/filmfybox")]])
+    join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url="https://t.me/FilmFyBoxMoviesHD")]])
 
     try:
         conn = get_db_connection()
@@ -824,7 +824,7 @@ def get_movie_options_keyboard(movie_title, url):
     keyboard = [
         [InlineKeyboardButton("🎬 Watch Now", url=url)],
         [InlineKeyboardButton("📥 Download", callback_data=f"download_{movie_title[:50]}")],
-        [InlineKeyboardButton("➡️ Join Channel", url="http://t.me/filmfybox")]
+        [InlineKeyboardButton("➡️ Join Channel", url="https://t.me/FilmFyBoxMoviesHD")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -947,11 +947,11 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
         name = title
         caption_text = (
             f"🎬 <b>{name}</b>\n\n"
-            "🔗 <b>JOIN »</b> <a href='http://t.me/filmfybox'>FilmfyBox</a>\n\n"
+            "🔗 <b>JOIN »</b> <a href='https://t.me/FilmFyBoxMoviesHD'>FilmfyBox</a>\n\n"
             "🔹 <b>Please drop the movie name, and I'll find it for you as soon as possible. 🎬✨👇</b>\n"
-            "🔹 <b><a href='https://t.me/Filmfybox002'>FlimfyBox Chat</a></b>"
+            "🔹 <b><a href='https://t.me/+2hFeRL4DYfBjZDQ1'>FlimfyBox Chat</a></b>"
         )
-        join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url="http://t.me/filmfybox")]])
+        join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url="https://t.me/FilmFyBoxMoviesHD")]])
 
         if file_id:
             sent_msg = await context.bot.send_document(
@@ -2252,7 +2252,7 @@ async def notify_user_with_media(update: Update, context: ContextTypes.DEFAULT_T
 
         sent_msg = None
         media_type = "unknown"
-        join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url="http://t.me/filmfybox")]])
+        join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url="https://t.me/FilmFyBoxMoviesHD")]])
 
         if replied_message.document:
             media_type = "file"
@@ -2362,7 +2362,7 @@ async def broadcast_with_media(update: Update, context: ContextTypes.DEFAULT_TYP
 
         success_count = 0
         failed_count = 0
-        join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url="http://t.me/filmfybox")]])
+        join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url="https://t.me/FilmFyBoxMoviesHD")]])
 
         for user_id, first_name, username in all_users:
             try:
@@ -2470,7 +2470,7 @@ async def quick_notify(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         success_count = 0
         failed_count = 0
-        join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url="http://t.me/filmfybox")]])
+        join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url="https://t.me/FilmFyBoxMoviesHD")]])
 
         for user_id, first_name, username in target_users:
             try:
