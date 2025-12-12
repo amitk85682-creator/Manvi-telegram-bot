@@ -2454,3 +2454,799 @@ async def schedule_notification(update: Update, context: ContextTypes.DEFAULT_TY
             f"To: `@{target_username}` ({first_name})\n"
             f"Delay: 
 
+# ==================== ADVANCED NOTIFICATION COMMANDS ====================
+async def notify_user_with_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Notify user with media by replying to a message"""
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("⛔ Admin only command.")
+        return
+
+    try:
+        if not update.message.reply_to_message:
+            await update.message.reply_text(
+                "❌ Please reply to a message (file/video/audio/photo) with:\n"
+                "/notifyuserwithmedia @username Optional message"
+            )
+            return
+
+        if not context.args:
+            await update.message.reply_text(
+                "Usage: /notifyuserwithmedia @username [optional message]\n"
+                "Example: /notifyuserwithmedia @amit002 Here's your requested movie!"
+            )
+            return
+
+        target_username = context.args[0].replace('@', '')
+        optional_message = ' '.join(context.args[1:]) if len(context.args) > 1 else None
+
+        replied_message = update.message.reply_to_message
+
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Database connection failed.")
+            return
+
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT DISTINCT user_id, first_name FROM user_requests WHERE username ILIKE %s LIMIT 1",
+            (target_username,)
+        )
+        user = cur.fetchone()
+
+        if not user:
+            await update.message.reply_text(f"❌ User `@{target_username}` not found in database.", parse_mode='Markdown')
+            cur.close()
+            conn.close()
+            return
+
+        user_id, first_name = user
+        cur.close()
+        conn.close()
+
+        notification_header = optional_message if optional_message else ""
+
+        warning_msg = await context.bot.send_message(
+            chat_id=user_id,
+            text="⚠️ ❌👉This file automatically❗️deletes after 1 minute❗️so please forward it to another chat👈❌",
+            parse_mode='Markdown'
+        )
+
+        sent_msg = None
+        media_type = "unknown"
+        join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url="https://t.me/FilmFyBoxMoviesHD")]])
+
+        if replied_message.document:
+            media_type = "file"
+            sent_msg = await context.bot.send_document(
+                chat_id=user_id,
+                document=replied_message.document.file_id,
+                caption=notification_header if notification_header else None,
+                reply_markup=join_keyboard
+            )
+        elif replied_message.video:
+            media_type = "video"
+            sent_msg = await context.bot.send_video(
+                chat_id=user_id,
+                video=replied_message.video.file_id,
+                caption=notification_header if notification_header else None,
+                reply_markup=join_keyboard
+            )
+        elif replied_message.audio:
+            media_type = "audio"
+            sent_msg = await context.bot.send_audio(
+                chat_id=user_id,
+                audio=replied_message.audio.file_id,
+                caption=notification_header if notification_header else None,
+                reply_markup=join_keyboard
+            )
+        elif replied_message.photo:
+            media_type = "photo"
+            photo = replied_message.photo[-1]
+            sent_msg = await context.bot.send_photo(
+                chat_id=user_id,
+                photo=photo.file_id,
+                caption=notification_header if notification_header else None,
+                reply_markup=join_keyboard
+            )
+        elif replied_message.text:
+            media_type = "text"
+            text_to_send = replied_message.text
+            if optional_message:
+                text_to_send = f"{optional_message}\n\n{text_to_send}"
+            sent_msg = await context.bot.send_message(
+                chat_id=user_id,
+                text=text_to_send
+            )
+        else:
+            await update.message.reply_text("❌ Unsupported media type.")
+            return
+
+        if sent_msg and media_type != "text":
+            asyncio.create_task(
+                delete_messages_after_delay(
+                    context,
+                    user_id,
+                    [sent_msg.message_id, warning_msg.message_id],
+                    60
+                )
+            )
+
+        confirmation = f"✅ **Notification Sent!**\n\n"
+        confirmation += f"To: `@{target_username}` ({first_name})\n"
+        confirmation += f"Media Type: {media_type.capitalize()}"
+
+        await update.message.reply_text(confirmation, parse_mode='Markdown')
+
+    except telegram.error.Forbidden:
+        await update.message.reply_text(f"❌ User blocked the bot.")
+    except Exception as e:
+        logger.error(f"Error in notify_user_with_media: {e}")
+        await update.message.reply_text(f"❌ Error: {e}")
+
+async def broadcast_with_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Broadcast media to all users"""
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("⛔ Admin only command.")
+        return
+
+    replied_message = update.message.reply_to_message
+    if not replied_message:
+        await update.message.reply_text("❌ Please reply to a media message to broadcast it.")
+        return
+
+    try:
+        optional_message = ' '.join(context.args) if context.args else None
+
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Database connection failed.")
+            return
+
+        cur = conn.cursor()
+        cur.execute("SELECT DISTINCT user_id, first_name, username FROM user_requests")
+        all_users = cur.fetchall()
+
+        if not all_users:
+            await update.message.reply_text("No users found in database.")
+            cur.close()
+            conn.close()
+            return
+
+        status_msg = await update.message.reply_text(
+            f"📤 Broadcasting media to {len(all_users)} users...\n⏳ Please wait..."
+        )
+
+        success_count = 0
+        failed_count = 0
+        join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url="https://t.me/FilmFyBoxMoviesHD")]])
+
+        for user_id, first_name, username in all_users:
+            try:
+                if optional_message:
+                    await context.bot.send_message(
+                        chat_id=user_id,
+                        text=optional_message
+                    )
+
+                if replied_message.document:
+                    await context.bot.send_document(
+                        chat_id=user_id,
+                        document=replied_message.document.file_id,
+                        reply_markup=join_keyboard
+                    )
+                elif replied_message.video:
+                    await context.bot.send_video(
+                        chat_id=user_id,
+                        video=replied_message.video.file_id,
+                        reply_markup=join_keyboard
+                    )
+                elif replied_message.audio:
+                    await context.bot.send_audio(
+                        chat_id=user_id,
+                        audio=replied_message.audio.file_id,
+                        reply_markup=join_keyboard
+                    )
+                elif replied_message.photo:
+                    photo = replied_message.photo[-1]
+                    await context.bot.send_photo(
+                        chat_id=user_id,
+                        photo=photo.file_id,
+                        reply_markup=join_keyboard
+                    )
+
+                success_count += 1
+                await asyncio.sleep(0.1)
+
+            except telegram.error.Forbidden:
+                failed_count += 1
+            except Exception as e:
+                failed_count += 1
+                logger.error(f"Failed broadcast to {user_id}: {e}")
+
+        await status_msg.edit_text(
+            f"📊 **Broadcast Complete**\n\n"
+            f"✅ Sent: {success_count}\n"
+            f"❌ Failed: {failed_count}\n"
+            f"📝 Total: {len(all_users)}",
+            parse_mode='Markdown'
+        )
+
+        cur.close()
+        conn.close()
+
+    except Exception as e:
+        logger.error(f"Error in broadcast_with_media: {e}")
+        await update.message.reply_text(f"❌ Error: {e}")
+
+async def quick_notify(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Quick notify - sends media to specific requesters"""
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("⛔ Admin only command.")
+        return
+
+    replied_message = update.message.reply_to_message
+    if not replied_message:
+        await update.message.reply_text("❌ Reply to a media message first!")
+        return
+
+    if not context.args:
+        await update.message.reply_text("Usage: /qnotify <@username | MovieTitle>")
+        return
+
+    try:
+        query = ' '.join(context.args)
+
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Database connection failed.")
+            return
+
+        cur = conn.cursor()
+
+        target_users = []
+
+        if query.startswith('@'):
+            username = query.replace('@', '')
+            cur.execute(
+                "SELECT DISTINCT user_id, first_name, username FROM user_requests WHERE username ILIKE %s",
+                (username,)
+            )
+            target_users = cur.fetchall()
+        else:
+            cur.execute(
+                "SELECT DISTINCT user_id, first_name, username FROM user_requests WHERE movie_title ILIKE %s AND notified = FALSE",
+                (f'%{query}%',)
+            )
+            target_users = cur.fetchall()
+
+        if not target_users:
+            await update.message.reply_text(f"❌ No users found for '{query}'")
+            cur.close()
+            conn.close()
+            return
+
+        success_count = 0
+        failed_count = 0
+        join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url="https://t.me/FilmFyBoxMoviesHD")]])
+
+        for user_id, first_name, username in target_users:
+            try:
+                caption = f"🎬 {query}" if not query.startswith('@') else None
+                if replied_message.document:
+                    await context.bot.send_document(
+                        chat_id=user_id,
+                        document=replied_message.document.file_id,
+                        caption=caption,
+                        reply_markup=join_keyboard
+                    )
+                elif replied_message.video:
+                    await context.bot.send_video(
+                        chat_id=user_id,
+                        video=replied_message.video.file_id,
+                        caption=caption,
+                        reply_markup=join_keyboard
+                    )
+                elif replied_message.photo:
+                    photo = replied_message.photo[-1]
+                    await context.bot.send_photo(
+                        chat_id=user_id,
+                        photo=photo.file_id,
+                        caption=caption,
+                        reply_markup=join_keyboard
+                    )
+
+                success_count += 1
+
+                if not query.startswith('@'):
+                    cur.execute(
+                        "UPDATE user_requests SET notified = TRUE WHERE user_id = %s AND movie_title ILIKE %s",
+                        (user_id, f'%{query}%')
+                    )
+                    conn.commit()
+
+                await asyncio.sleep(0.1)
+
+            except Exception as e:
+                failed_count += 1
+                logger.error(f"Failed to send to {user_id}: {e}")
+
+        await update.message.reply_text(
+            f"✅ Sent to {success_count} user(s)\n"
+            f"❌ Failed for {failed_count} user(s)\n"
+            f"Query: {query}"
+        )
+
+        cur.close()
+        conn.close()
+
+    except Exception as e:
+        logger.error(f"Error in quick_notify: {e}")
+        await update.message.reply_text(f"❌ Error: {e}")
+
+async def forward_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Forward message from channel to user"""
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("⛔ Admin only command.")
+        return
+
+    replied_message = update.message.reply_to_message
+    if not replied_message:
+        await update.message.reply_text("❌ Reply to a message first!")
+        return
+
+    if not context.args:
+        await update.message.reply_text("Usage: /forwardto @username_or_userid")
+        return
+
+    try:
+        target_username = context.args[0].replace('@', '')
+
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Database connection failed.")
+            return
+
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT DISTINCT user_id, first_name FROM user_requests WHERE username ILIKE %s LIMIT 1",
+            (target_username,)
+        )
+        user = cur.fetchone()
+
+        if not user:
+            await update.message.reply_text(f"❌ User `@{target_username}` not found.", parse_mode='Markdown')
+            cur.close()
+            conn.close()
+            return
+
+        user_id, first_name = user
+        cur.close()
+        conn.close()
+
+        await replied_message.forward(chat_id=user_id)
+
+        await update.message.reply_text(f"✅ Forwarded to `@{target_username}` ({first_name})", parse_mode='Markdown')
+
+    except Exception as e:
+        logger.error(f"Error in forward_to_user: {e}")
+        await update.message.reply_text(f"❌ Error: {e}")
+
+# ==================== USER MANAGEMENT COMMANDS ====================
+async def get_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Get user information"""
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("⛔ Admin only command.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("Usage: /userinfo @username")
+        return
+
+    conn = None
+    try:
+        target_username = context.args[0].replace('@', '')
+
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Database connection failed.")
+            return
+
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT
+                user_id,
+                username,
+                first_name,
+                COUNT(*) as total_requests,
+                SUM(CASE WHEN notified = TRUE THEN 1 ELSE 0 END) as fulfilled,
+                MAX(requested_at) as last_request
+            FROM user_requests
+            WHERE username ILIKE %s
+            GROUP BY user_id, username, first_name
+        """, (target_username,))
+
+        user_info = cur.fetchone()
+
+        if not user_info:
+            await update.message.reply_text(f"❌ No data found for `@{target_username}`", parse_mode='Markdown')
+            cur.close()
+            return
+
+        user_id, username, first_name, total, fulfilled, last_request = user_info
+        fulfilled = fulfilled or 0
+
+        cur.execute("""
+            SELECT movie_title, requested_at, notified
+            FROM user_requests
+            WHERE user_id = %s
+            ORDER BY requested_at DESC
+            LIMIT 5
+        """, (user_id,))
+        recent_requests = cur.fetchall()
+        cur.close()
+
+        username_str = f"`@{username}`" if username else "N/A"
+
+        info_text = f"""
+👤 **User Information**
+
+**Basic Info:**
+• Name: {first_name or 'Unknown'}
+• Username: {username_str}
+• User ID: `{user_id}`
+
+**Statistics:**
+• Total Requests: {total}
+• Fulfilled: {fulfilled}
+• Pending: {total - fulfilled}
+• Last Request: {last_request.strftime('%Y-%m-%d %H:%M') if last_request else 'N/A'}
+
+**Recent Requests:**
+"""
+
+        if recent_requests:
+            for movie, req_time, notified in recent_requests:
+                status = "✅" if notified else "⏳"
+                info_text += f"{status} {movie} - {req_time.strftime('%m/%d %H:%M')}\n"
+        else:
+            info_text += "No recent requests."
+
+        await update.message.reply_text(info_text, parse_mode='Markdown')
+
+    except Exception as e:
+        logger.error(f"Error in get_user_info: {e}")
+        await update.message.reply_text(f"❌ Error: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+async def list_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """List all bot users"""
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("⛔ Admin only command.")
+        return
+
+    conn = None
+    try:
+        page = 1
+        if context.args and context.args[0].isdigit():
+            page = int(context.args[0])
+
+        per_page = 10
+        offset = (page - 1) * per_page
+
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Database connection failed.")
+            return
+
+        cur = conn.cursor()
+
+        cur.execute("SELECT COUNT(DISTINCT user_id) FROM user_requests")
+        result = cur.fetchone()
+        total_users = result[0] if result else 0
+
+        cur.execute("""
+            SELECT
+                user_id,
+                username,
+                first_name,
+                COUNT(*) as requests,
+                MAX(requested_at) as last_seen
+            FROM user_requests
+            GROUP BY user_id, username, first_name
+            ORDER BY MAX(requested_at) DESC
+            LIMIT %s OFFSET %s
+        """, (per_page, offset))
+
+        users = cur.fetchall()
+        cur.close()
+
+        total_pages = (total_users + per_page - 1) // per_page if total_users > 0 else 1
+
+        users_text = f"👥 **Bot Users** (Page {page}/{total_pages})\n\n"
+
+        if not users:
+            users_text += "No users found on this page."
+        else:
+            for idx, (user_id, username, first_name, req_count, last_seen) in enumerate(users, start=offset+1):
+                username_str = f"`@{username}`" if username else "N/A"
+                users_text += f"{idx}. {first_name or 'Unknown'} ({username_str})\n"
+                users_text += f"   ID: `{user_id}` | Requests: {req_count}\n"
+                if last_seen:
+                    users_text += f"   Last seen: {last_seen.strftime('%Y-%m-%d %H:%M')}\n\n"
+                else:
+                    users_text += f"   Last seen: N/A\n\n"
+
+        users_text += f"\n📊 Total Users: {total_users}"
+
+        await update.message.reply_text(users_text, parse_mode='Markdown')
+
+    except Exception as e:
+        logger.error(f"Error in list_all_users: {e}")
+        await update.message.reply_text(f"❌ Error: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+# ==================== STATS & HELP COMMANDS ====================
+async def get_bot_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Get comprehensive bot statistics"""
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("⛔ Admin only command.")
+        return
+
+    conn = None
+    cur = None
+
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Database connection failed.")
+            return
+
+        cur = conn.cursor()
+        
+        cur.execute("SELECT COUNT(*) FROM movies")
+        result = cur.fetchone()
+        total_movies = result[0] if result else 0
+        
+        cur.execute("SELECT COUNT(DISTINCT user_id) FROM user_requests")
+        result = cur.fetchone()
+        total_users = result[0] if result else 0
+
+        cur.execute("SELECT COUNT(*) FROM user_requests")
+        result = cur.fetchone()
+        total_requests = result[0] if result else 0
+
+        cur.execute("SELECT COUNT(*) FROM user_requests WHERE notified = TRUE")
+        result = cur.fetchone()
+        fulfilled = result[0] if result else 0
+
+        cur.execute("SELECT COUNT(*) FROM user_requests WHERE DATE(requested_at) = CURRENT_DATE")
+        result = cur.fetchone()
+        today_requests = result[0] if result else 0
+
+        cur.execute("""
+            SELECT first_name, username, COUNT(*) as req_count
+            FROM user_requests
+            GROUP BY user_id, first_name, username
+            ORDER BY req_count DESC
+            LIMIT 5
+        """)
+        top_users = cur.fetchall() or []
+
+        fulfillment_rate = (fulfilled / total_requests * 100) if total_requests > 0 else 0
+
+        stats_text = f"""
+📊 <b>Bot Statistics</b>
+
+<b>Database:</b>
+• Movies: {total_movies}
+• Users: {total_users}
+• Total Requests: {total_requests}
+• Fulfilled: {fulfilled}
+• Pending: {total_requests - fulfilled}
+
+<b>Activity:</b>
+• Today's Requests: {today_requests}
+• Fulfillment Rate: {fulfillment_rate:.1f}%
+
+<b>Top Requesters:</b>
+"""
+        if top_users:
+            for name, username, count in top_users:
+                name_display = name if name else "Unknown"
+                username_str = f"@{username}" if username else "N/A"
+                stats_text += f"• {escape_html(name_display)} ({escape_html(username_str)}): {count} requests\n"
+        else:
+            stats_text += "No user data available."
+            
+        await update.message.reply_text(stats_text, parse_mode='HTML')
+        
+    except Exception as e:
+        logger.error(f"Error in get_bot_stats: {e}")
+        await update.message.reply_text(f"❌ Error while fetching stats: {e}")
+        
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
+async def admin_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show admin commands help"""
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("⛔ Admin only command.")
+        return
+
+    help_text = """
+👑 <b>Admin Commands Guide</b>
+
+<b>Movie Management:</b>
+• <code>/addmovie Title URL/FileID/unreleased</code> - Add movie
+• <code>/addquality Title | Quality | URL/FileID | Size</code> - Add quality
+• <code>/listqualities MovieName</code> - List movie qualities
+• <code>/bulkadd</code> - Bulk add movies (multi-line)
+• <code>/addalias Title alias</code> - Add alias
+• <code>/aliasbulk</code> - Bulk add aliases (multi-line)
+• <code>/aliases MovieTitle</code> - List aliases
+
+<b>Notifications:</b>
+• <code>/notify MovieTitle</code> - Auto-notify requesters
+• <code>/notifyuser @user msg</code> - Send text message
+• <code>/notifyuserwithmedia @user [msg]</code> - Reply to media + send
+• <code>/qnotify @user|MovieTitle</code> - Quick notify (reply to media)
+• <code>/forwardto @user</code> - Forward message (reply to msg)
+
+<b>Broadcast:</b>
+• <code>/broadcast msg</code> - Text broadcast to all
+• <code>/broadcastmedia [msg]</code> - Media broadcast (reply to media)
+• <code>/schedulenotify min @user msg</code> - Schedule notification
+
+<b>User Management:</b>
+• <code>/userinfo @username</code> - Get user stats
+• <code>/listusers [page]</code> - List all users
+
+<b>Channel Post:</b>
+• <code>/post_query MovieName</code> - Post with 3 bot links (with photo)
+
+<b>Stats & Help:</b>
+• <code>/stats</code> - Bot statistics
+• <code>/adminhelp</code> - This help message
+"""
+
+    await update.message.reply_text(help_text, parse_mode='HTML')
+
+# ==================== ERROR HANDLER ====================
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Log errors and handle them gracefully"""
+    logger.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
+
+    if isinstance(update, Update) and update.effective_message:
+        try:
+            await update.effective_message.reply_text(
+                "Sorry, something went wrong. Please try again later.",
+                reply_markup=get_main_keyboard()
+            )
+        except Exception as e:
+            logger.error(f"Failed to send error message to user: {e}")
+
+# ==================== FLASK APP ====================
+flask_app = Flask(__name__)
+
+@flask_app.route('/')
+def home():
+    return "Bot is running!"
+
+@flask_app.route('/health')
+def health():
+    return "OK", 200
+
+@flask_app.route(f'/{UPDATE_SECRET_CODE}')
+def trigger_update():
+    result = update_movies_in_db()
+    return result
+
+def run_flask():
+    port = int(os.environ.get('PORT', 8080))
+    flask_app.secret_key = os.environ.get('FLASK_SECRET_KEY', None) or os.urandom(24)
+
+    try:
+        import admin_views
+        from admin_views import admin as admin_blueprint
+        flask_app.register_blueprint(admin_blueprint)
+        logger.info("Admin blueprint registered successfully.")
+    except Exception as e:
+        logger.warning(f"Admin blueprint not registered: {e}")
+
+    flask_app.run(host='0.0.0.0', port=port)
+
+# ==================== MAIN BOT FUNCTION ====================
+def main():
+    """Run the Telegram bot"""
+    logger.info("Bot is starting...")
+
+    if not TELEGRAM_BOT_TOKEN:
+        logger.error("No Telegram bot token found. Exiting.")
+        return
+
+    try:
+        setup_database()
+    except Exception as e:
+        logger.error(f"Database setup failed but continuing: {e}")
+
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).read_timeout(30).write_timeout(30).build()
+
+    # Custom handler for request flow
+    async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle text messages based on context"""
+        if context.user_data.get('awaiting_request'):
+            return await request_movie_from_button(update, context)
+        else:
+            return await main_menu(update, context)
+
+    # Conversation handler for user interaction flow
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler('start', start)],
+        states={
+            MAIN_MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message)],
+            SEARCHING: [MessageHandler(filters.TEXT & ~filters.COMMAND, search_movies)],
+            REQUESTING: [MessageHandler(filters.TEXT & ~filters.COMMAND, request_movie)],
+            REQUESTING_FROM_BUTTON: [MessageHandler(filters.TEXT & ~filters.COMMAND, request_movie_from_button)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)],
+        per_message=False,
+        per_chat=True,
+    )
+
+    # Register callback handler FIRST
+    application.add_handler(CallbackQueryHandler(button_callback))
+    application.add_handler(conv_handler)
+
+    # Admin commands - Movie Management
+    application.add_handler(CommandHandler("addmovie", add_movie))
+    application.add_handler(CommandHandler("addquality", add_movie_quality))
+    application.add_handler(CommandHandler("listqualities", list_movie_qualities))
+    application.add_handler(CommandHandler("bulkadd", bulk_add_movies))
+    application.add_handler(CommandHandler("addalias", add_alias))
+    application.add_handler(CommandHandler("aliases", list_aliases))
+    application.add_handler(CommandHandler("aliasbulk", bulk_add_aliases))
+    
+    # Admin commands - Notifications
+    application.add_handler(CommandHandler("notify", notify_manually))
+    application.add_handler(CommandHandler("notifyuser", notify_user_by_username))
+    application.add_handler(CommandHandler("notifyuserwithmedia", notify_user_with_media))
+    application.add_handler(CommandHandler("qnotify", quick_notify))
+    application.add_handler(CommandHandler("forwardto", forward_to_user))
+    
+    # Admin commands - Broadcast
+    application.add_handler(CommandHandler("broadcast", broadcast_message))
+    application.add_handler(CommandHandler("broadcastmedia", broadcast_with_media))
+    application.add_handler(CommandHandler("schedulenotify", schedule_notification))
+    
+    # Admin commands - User Management
+    application.add_handler(CommandHandler("userinfo", get_user_info))
+    application.add_handler(CommandHandler("listusers", list_all_users))
+    
+    # Admin commands - Stats & Help
+    application.add_handler(CommandHandler("stats", get_bot_stats))
+    application.add_handler(CommandHandler("adminhelp", admin_help))
+    
+    # Admin commands - Channel Post
+    application.add_handler(MessageHandler(filters.PHOTO & filters.CaptionRegex(r'^/post_query'), admin_post_query))
+
+    # Error handler
+    application.add_error_handler(error_handler)
+
+    # Start Flask in a separate thread
+    flask_thread = threading.Thread(target=run_flask)
+    flask_thread.daemon = True
+    flask_thread.start()
+    logger.info("Flask server started in a background thread.")
+
+    # Run the bot
+    logger.info("Starting bot polling...")
+    application.run_polling()
+
+if __name__ == '__main__':
+    main()
