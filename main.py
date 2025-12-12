@@ -2452,7 +2452,8 @@ async def schedule_notification(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text(
             f"⏰ Notification scheduled!\n\n"
             f"To: `@{target_username}` ({first_name})\n"
-            f"Delay: 
+            f"Delay: {delay_minutes} minutes ⏳"
+)
 
 # ==================== ADVANCED NOTIFICATION COMMANDS ====================
 async def notify_user_with_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
