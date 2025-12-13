@@ -617,12 +617,13 @@ async def send_admin_notification(context, user, movie_title, group_info=None):
 
     try:
         # ESCAPE the movie title and username BEFORE putting it into the message string
-        safe_movie_title = escape_markdown_v2(movie_title)
-        safe_username = escape_markdown_v2(user.username) if user.username else 'N/A'
-        safe_first_name = escape_markdown_v2(user.first_name or 'Unknown')
+        safe_movie_title = movie_title.replace('<', '&lt;').replace('>', '&gt;')
+        safe_username = user.username if user.username else 'N/A'
+        safe_first_name = (user.first_name or 'Unknown').replace('<', '&lt;').replace('>', '&gt;')
 
         user_info = f"User: {safe_first_name}"
-        user_info += f" (`@{safe_username}`)"
+        if user.username:
+            user_info += f" (@{safe_username})"
         user_info += f" (ID: {user.id})"
 
         group_info_text = f"From Group: {group_info}" if group_info else "Via Private Message"
@@ -636,11 +637,11 @@ Movie: <b>{safe_movie_title}</b>
 Time: {datetime.now().strftime('%Y-%m-%d %I:%M %p')}
 """
 
-await context.bot.send_message(
-    chat_id=ADMIN_CHANNEL_ID, 
-    text=message, 
-    parse_mode='HTML'
-)
+        await context.bot.send_message(
+            chat_id=ADMIN_CHANNEL_ID, 
+            text=message, 
+            parse_mode='HTML'
+        )
     except Exception as e:
         logger.error(f"Error sending admin notification: {e}")
 
