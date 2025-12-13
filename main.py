@@ -2096,7 +2096,7 @@ async def bulk_add_aliases(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def bulk_add_aliases(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Add multiple aliases at once"""
     if update.effective_user.id != ADMIN_USER_ID:
-        await update.message.reply_text("Sorry Darling, सिर्फ एडमिन ही इस कमांड का इस्तेमाल कर सकते हैं।")
+        await update.message.reply_text("Sry baby 😘 sirf admin hi yeh command use kar sakta hai 💅")
         return
 
     conn = None
