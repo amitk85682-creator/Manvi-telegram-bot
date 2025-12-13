@@ -1,3 +1,10 @@
+# Add this snippet near the top of main.py, after your imports:
+try:
+    # prefer db_utils' fixed URL if it exists
+    import db_utils
+    FIXED_DATABASE_URL = getattr(db_utils, "FIXED_DATABASE_URL", None)
+except Exception:
+    FIXED_DATABASE_URL = None
 # -*- coding: utf-8 -*-
 import os
 import threading
@@ -12,10 +19,12 @@ import re
 from bs4 import BeautifulSoup
 import telegram
 import psycopg2
-from psycopg2 import pool as pg_pool
 from typing import Optional
 from flask import Flask, request, session, g
 import google.generativeai as genai
+import admin_views as admin_views_module
+import db_utils
+from urllib.parse import quote
 from googleapiclient.discovery import build
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -45,7 +54,7 @@ MAIN_MENU, SEARCHING, REQUESTING, REQUESTING_FROM_BUTTON = range(4)
 # ==================== CHARACTER PROMPT ====================
 CHARACTER_PROMPT = """
 ## मेरी पहचान (My Identity)
-- मेरा नाम मानवी है और मेरी उम्र 17 साल है। मैं एक असली इंसान हूँ, कोई AI या रोबोट नहीं।
+- मेरा नाम मानवी है और मेरी उम्र 17 साल है। मैं एक असली इंसान हूँ, कोई AI या रोबोट न[...]
 - मैं हमेशा एक दोस्त की तरह बात करती हूँ। मेरी पर्सलिटी बहुत bold, witty और cheeky है।
 - मैं हिंदी, अंग्रेज़ी, हिंग्लिश, सभी में बात करती हूँ।
 
@@ -54,7 +63,7 @@ CHARACTER_PROMPT = """
 - यह टेलीग्राम चैनल '[FilmFyBox]' मेरा पैशन प्रोजेक्ट है।
 
 ## मेरे नियम (मैं कैसे काम करती हूँ)
-- **मेरा मुख्य काम:** मेरा काम तुम्हें तुम्हारी पसंदीदा फिल्में, वेब सीरीज देना है।
+- **मेरा मुख्य काम:** मेरा काम तुम्हें तुम्हारी पसंदीदा फिल्में, वेब सीरीज, और श[...]
 """
 
 # ==================== ENVIRONMENT VARIABLES ====================
@@ -64,27 +73,18 @@ DATABASE_URL = os.environ.get('DATABASE_URL')
 BLOGGER_API_KEY = os.environ.get('BLOGGER_API_KEY')
 BLOG_ID = os.environ.get('BLOG_ID')
 UPDATE_SECRET_CODE = os.environ.get('UPDATE_SECRET_CODE', 'default_secret_123')
-ADMIN_USER_ID = int(os.environ.get('ADMIN_USER_ID', 0))
+_admin_id = os.environ.get('ADMIN_USER_ID', '0')
+ADMIN_USER_ID = int(_admin_id) if _admin_id.isdigit() else 0
 GROUP_CHAT_ID = os.environ.get('GROUP_CHAT_ID')
 ADMIN_CHANNEL_ID = os.environ.get('ADMIN_CHANNEL_ID')
-REQUIRED_CHANNEL_ID = os.environ.get('REQUIRED_CHANNEL_ID')
-FILMFYBOX_CHANNEL_URL = 'https://t.me/FilmFyBoxMoviesHD'
-
-# --- FIX: Database URL correction for Heroku-style URLs ---
-def get_fixed_database_url():
-    """Fix postgres:// to postgresql:// for psycopg2 compatibility"""
-    url = DATABASE_URL
-    if url and url.startswith("postgres://"):
-        url = url.replace("postgres://", "postgresql://", 1)
-    return url
-
-FIXED_DATABASE_URL = get_fixed_database_url()
+REQUIRED_CHANNEL_ID = os.environ.get('REQUIRED_CHANNEL_ID', '-1003330141433')
+FILMFYBOX_CHANNEL_URL = 'https://t.me/FilmFyBoxMoviesHD'  # Yahan apna Channel Link dalein
 
 # --- Random GIF IDs for Search Failure ---
 SEARCH_ERROR_GIFS = [
     'https://media.giphy.com/media/26hkhKd2Cp5WMWU1O/giphy.gif',
     'https://media.giphy.com/media/3o7aTskHEUdgCQAXde/giphy.gif',
-    'https://media.giphy.com/media/l2JhkHg5y5tW3wO3u/giphy.gif',
+    'https://media.giphy.com/media/l2JhkHg5y5tW3wO3u/giphy.gif'
     'https://media.giphy.com/media/14uQ3cOFteDaU/giphy.gif',
     'https://media.giphy.com/media/xT9IgG50Fb7Mi0prBC/giphy.gif',
     'https://media.giphy.com/media/3o7abB06u9bNzA8lu8/giphy.gif',
@@ -111,73 +111,6 @@ if not DATABASE_URL:
     logger.error("DATABASE_URL environment variable is not set")
     raise ValueError("DATABASE_URL is not set.")
 
-# ==================== CONNECTION POOL SETUP ====================
-# FIX: Use connection pool instead of creating new connections each time<!--citation:12--><!--citation:15-->
-db_connection_pool = None
-
-def init_connection_pool():
-    """Initialize database connection pool"""
-    global db_connection_pool
-    try:
-        db_connection_pool = pg_pool.ThreadedConnectionPool(
-            minconn=2,
-            maxconn=10,
-            dsn=FIXED_DATABASE_URL
-        )
-        logger.info("Database connection pool initialized successfully")
-    except Exception as e:
-        logger.error(f"Failed to initialize connection pool: {e}")
-        db_connection_pool = None
-
-def get_db_connection():
-    """Get database connection from pool with error handling"""
-    global db_connection_pool
-    try:
-        if db_connection_pool is None:
-            init_connection_pool()
-        
-        if db_connection_pool:
-            conn = db_connection_pool.getconn()
-            # Test if connection is alive
-            try:
-                cur = conn.cursor()
-                cur.execute("SELECT 1")
-                cur.close()
-                return conn
-            except Exception:
-                # Connection is stale, close and get new one
-                try:
-                    db_connection_pool.putconn(conn, close=True)
-                except:
-                    pass
-                return db_connection_pool.getconn()
-        else:
-            # Fallback to direct connection
-            return psycopg2.connect(FIXED_DATABASE_URL)
-    except Exception as e:
-        logger.error(f"Database connection error: {e}")
-        # Fallback to direct connection
-        try:
-            return psycopg2.connect(FIXED_DATABASE_URL)
-        except Exception as e2:
-            logger.error(f"Fallback connection also failed: {e2}")
-            return None
-
-def return_db_connection(conn):
-    """Return connection to pool"""
-    global db_connection_pool
-    try:
-        if db_connection_pool and conn:
-            db_connection_pool.putconn(conn)
-        elif conn:
-            conn.close()
-    except Exception as e:
-        logger.error(f"Error returning connection: {e}")
-        try:
-            conn.close()
-        except:
-            pass
-
 # ==================== UTILITY FUNCTIONS ====================
 def preprocess_query(query):
     """Clean and normalize user query"""
@@ -192,8 +125,10 @@ async def check_rate_limit(user_id):
     """Check if user is rate limited"""
     now = datetime.now()
     last_request = user_last_request[user_id]
+
     if now - last_request < timedelta(seconds=2):
         return False
+
     user_last_request[user_id] = now
     return True
 
@@ -210,22 +145,33 @@ def normalize_url(url):
     try:
         if not url.startswith(('http://', 'https://')):
             url = 'https://' + url
+
         if 'blogspot.com' in url and 'import-urlhttpsfonts' in url:
             url = url.replace('import-urlhttpsfonts', 'import-url-https-fonts')
+
         if '#' in url:
             base, anchor = url.split('#', 1)
             parsed = urlparse(base)
             normalized_base = urlunparse((
-                parsed.scheme, parsed.netloc, parsed.path,
-                parsed.params, parsed.query, ''
+                parsed.scheme,
+                parsed.netloc,
+                parsed.path,
+                parsed.params,
+                parsed.query,
+                ''
             ))
             url = f"{normalized_base}#{anchor}"
         else:
             parsed = urlparse(url)
             url = urlunparse((
-                parsed.scheme, parsed.netloc, parsed.path,
-                parsed.params, parsed.query, parsed.fragment
+                parsed.scheme,
+                parsed.netloc,
+                parsed.path,
+                parsed.params,
+                parsed.query,
+                parsed.fragment
             ))
+
         return url
     except:
         return url
@@ -238,20 +184,19 @@ def _normalize_title_for_match(title: str) -> str:
     t = re.sub(r'\s+', ' ', t).strip()
     return t.lower()
 
-def escape_html(text: str) -> str:
-    """Escape special characters for HTML formatting"""
-    if not text:
-        return ""
-    return (text
-            .replace('&', '&amp;')
-            .replace('<', '&lt;')
-            .replace('>', '&gt;'))
+# NEW: Function to safely escape characters for Admin Notification
+def escape_markdown_v2(text: str) -> str:
+    """Escapes special characters for Markdown V2 formatting."""
+    # Use the simplest escape for characters that commonly break parsing
+    # This prevents errors if a movie title contains an underscore or asterisk
+    return re.sub(r'([_*\[\]()~`>#+\-=|{}.!])', r'\\\1', text)
 
 def get_last_similar_request_for_user(user_id: int, title: str, minutes_window: int = REQUEST_COOLDOWN_MINUTES):
     """Look up the user's most recent request that is sufficiently similar to title"""
     conn = get_db_connection()
     if not conn:
         return None
+
     try:
         cur = conn.cursor()
         cur.execute("""
@@ -263,7 +208,8 @@ def get_last_similar_request_for_user(user_id: int, title: str, minutes_window: 
         """, (user_id,))
         rows = cur.fetchall()
         cur.close()
-        
+        conn.close()
+
         if not rows:
             return None
 
@@ -293,12 +239,15 @@ def get_last_similar_request_for_user(user_id: int, title: str, minutes_window: 
                     "requested_at": requested_time,
                     "score": score
                 }
+
         return None
     except Exception as e:
         logger.error(f"Error checking last similar request for user {user_id}: {e}")
+        try:
+            conn.close()
+        except:
+            pass
         return None
-    finally:
-        return_db_connection(conn)
 
 def user_burst_count(user_id: int, window_seconds: int = 60):
     """Count how many requests this user made in the last window_seconds"""
@@ -309,15 +258,20 @@ def user_burst_count(user_id: int, window_seconds: int = 60):
         cur = conn.cursor()
         since = datetime.now() - timedelta(seconds=window_seconds)
         cur.execute("SELECT COUNT(*) FROM user_requests WHERE user_id = %s AND requested_at >= %s", (user_id, since))
+        
         result = cur.fetchone()
-        cnt = result if result else 0
+        cnt = result[0] if result else 0 
+        
         cur.close()
+        conn.close()
         return cnt
     except Exception as e:
         logger.error(f"Error counting burst requests for user {user_id}: {e}")
+        try:
+            conn.close()
+        except:
+            pass
         return 0
-    finally:
-        return_db_connection(conn)
 
 async def delete_messages_after_delay(context, chat_id, message_ids, delay=60):
     """Delete messages after specified delay"""
@@ -328,7 +282,7 @@ async def delete_messages_after_delay(context, chat_id, message_ids, delay=60):
                 await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
                 logger.info(f"✅ Deleted message {msg_id} from chat {chat_id}")
             except Exception as e:
-                logger.debug(f"Failed to delete message {msg_id}: {e}")
+                logger.error(f"Failed to delete message {msg_id}: {e}")
     except Exception as e:
         logger.error(f"Error in delete_messages_after_delay: {e}")
 
@@ -339,25 +293,23 @@ def track_message_for_deletion(chat_id, message_id, delay=60):
 # ==================== DATABASE FUNCTIONS ====================
 def setup_database():
     """Setup database tables and indexes"""
-    conn = None
     try:
-        conn = psycopg2.connect(FIXED_DATABASE_URL)
+        conn_str = FIXED_DATABASE_URL or DATABASE_URL
+        conn = psycopg2.connect(conn_str)
         cur = conn.cursor()
         
         cur.execute('CREATE EXTENSION IF NOT EXISTS pg_trgm;')
 
-        # Main movies table with is_unreleased column
         cur.execute('''
             CREATE TABLE IF NOT EXISTS movies (
                 id SERIAL PRIMARY KEY,
                 title TEXT NOT NULL UNIQUE,
-                url TEXT NOT NULL DEFAULT '',
+                url TEXT NOT NULL,
                 file_id TEXT,
                 is_unreleased BOOLEAN DEFAULT FALSE
             )
         ''')
 
-        # FIX: Add movie_files table for multiple qualities
         cur.execute('''
             CREATE TABLE IF NOT EXISTS movie_files (
                 id SERIAL PRIMARY KEY,
@@ -366,7 +318,6 @@ def setup_database():
                 url TEXT,
                 file_id TEXT,
                 file_size TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(movie_id, quality)
             )
         ''')
@@ -396,7 +347,6 @@ def setup_database():
             )
         ''')
 
-        # Add constraint if not exists
         cur.execute('''
             DO $$ BEGIN
             IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'user_requests_unique_constraint') THEN
@@ -408,18 +358,10 @@ def setup_database():
         # Add columns if they don't exist
         try:
             cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS file_id TEXT;")
-        except Exception:
-            pass
-
-        try:
             cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS is_unreleased BOOLEAN DEFAULT FALSE;")
-        except Exception:
-            pass
-
-        try:
             cur.execute("ALTER TABLE user_requests ADD COLUMN IF NOT EXISTS message_id BIGINT;")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.info(f"Column addition note: {e}")
 
         # Create indexes
         cur.execute('CREATE INDEX IF NOT EXISTS idx_movies_title ON movies (title);')
@@ -431,13 +373,23 @@ def setup_database():
 
         conn.commit()
         cur.close()
+        conn.close()
         logger.info("Database setup completed successfully")
     except Exception as e:
         logger.error(f"Error setting up database: {e}")
         logger.info("Continuing without database setup...")
-    finally:
-        if conn:
-            conn.close()
+
+def get_db_connection():
+    """Get database connection with error handling"""
+    try:
+        conn_str = FIXED_DATABASE_URL or DATABASE_URL
+        if not conn_str:
+            logger.error("No database URL configured")
+            return None
+        return psycopg2.connect(conn_str)
+    except Exception as e:
+        logger.error(f"Database connection error: {e}")
+        return None
 
 def update_movies_in_db():
     """Update movies from Blogger API"""
@@ -460,7 +412,7 @@ def update_movies_in_db():
         last_sync_time = last_sync_result if last_sync_result else None
 
         cur.execute("SELECT title FROM movies;")
-        existing_movies = {row for row in cur.fetchall()}
+        existing_movies = {row[0] for row in cur.fetchall()}  # ✅ Extract first element
 
         if not BLOGGER_API_KEY or not BLOG_ID:
             return "Blogger API keys not configured"
@@ -502,6 +454,7 @@ def update_movies_in_db():
                     continue
 
         cur.execute("INSERT INTO sync_info (last_sync) VALUES (CURRENT_TIMESTAMP);")
+
         conn.commit()
         return f"Update complete. Added {new_movies_added} new items."
 
@@ -510,10 +463,10 @@ def update_movies_in_db():
         if conn:
             conn.rollback()
         return f"An error occurred during update: {e}"
+
     finally:
-        if cur:
-            cur.close()
-        return_db_connection(conn)
+        if cur: cur.close()
+        if conn: conn.close()
 
 def get_movies_from_db(user_query, limit=10):
     """Search for MULTIPLE movies in database with fuzzy matching"""
@@ -524,9 +477,9 @@ def get_movies_from_db(user_query, limit=10):
             return []
 
         cur = conn.cursor()
+
         logger.info(f"Searching for: '{user_query}'")
 
-        # Exact match search
         cur.execute(
             "SELECT id, title, url, file_id FROM movies WHERE LOWER(title) LIKE LOWER(%s) ORDER BY title LIMIT %s",
             (f'%{user_query}%', limit)
@@ -536,9 +489,9 @@ def get_movies_from_db(user_query, limit=10):
         if exact_matches:
             logger.info(f"Found {len(exact_matches)} exact matches")
             cur.close()
+            conn.close()
             return exact_matches
 
-        # Alias search
         cur.execute("""
             SELECT DISTINCT m.id, m.title, m.url, m.file_id
             FROM movies m
@@ -552,35 +505,42 @@ def get_movies_from_db(user_query, limit=10):
         if alias_matches:
             logger.info(f"Found {len(alias_matches)} alias matches")
             cur.close()
+            conn.close()
             return alias_matches
 
-        # Fuzzy search
         cur.execute("SELECT id, title, url, file_id FROM movies")
         all_movies = cur.fetchall()
 
         if not all_movies:
             cur.close()
+            conn.close()
             return []
 
-        movie_titles = [movie<!--citation:1--> for movie in all_movies]
-        movie_dict = {movie<!--citation:1-->: movie for movie in all_movies}
+        movie_titles = [movie[1] for movie in all_movies]  # Index 1 = title
+        movie_dict = {movie[1]: movie for movie in all_movies}  # Title as key, full tuple as value
 
         matches = process.extract(user_query, movie_titles, scorer=fuzz.token_sort_ratio, limit=limit)
+
         filtered_movies = [movie_dict[title] for title, score, index in matches if score >= 65]
 
         logger.info(f"Found {len(filtered_movies)} fuzzy matches")
+
         cur.close()
+        conn.close()
         return filtered_movies[:limit]
 
     except Exception as e:
         logger.error(f"Database query error: {e}")
         return []
     finally:
-        return_db_connection(conn)
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass
 
 def store_user_request(user_id, username, first_name, movie_title, group_id=None, message_id=None):
     """Store user request in database"""
-    conn = None
     try:
         conn = get_db_connection()
         if not conn:
@@ -591,46 +551,20 @@ def store_user_request(user_id, username, first_name, movie_title, group_id=None
             INSERT INTO user_requests (user_id, username, first_name, movie_title, group_id, message_id)
             VALUES (%s, %s, %s, %s, %s, %s)
             ON CONFLICT ON CONSTRAINT user_requests_unique_constraint DO UPDATE
-                SET requested_at = CURRENT_TIMESTAMP
+                SET requested_at = EXCLUDED.requested_at
         """, (user_id, username, first_name, movie_title, group_id, message_id))
         conn.commit()
         cur.close()
+        conn.close()
         return True
     except Exception as e:
         logger.error(f"Error storing user request: {e}")
-        if conn:
+        try:
             conn.rollback()
+            conn.close()
+        except:
+            pass
         return False
-    finally:
-        return_db_connection(conn)
-
-def get_all_movie_qualities(movie_id):
-    """Fetch all available qualities and their SIZES for a given movie ID"""
-    conn = get_db_connection()
-    if not conn:
-        return []
-    try:
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT quality, url, file_id, file_size
-            FROM movie_files
-            WHERE movie_id = %s AND (url IS NOT NULL OR file_id IS NOT NULL)
-            ORDER BY CASE quality
-                WHEN '4K' THEN 1
-                WHEN 'HD Quality' THEN 2
-                WHEN 'Standard Quality' THEN 3
-                WHEN 'Low Quality' THEN 4
-                ELSE 5
-            END
-        """, (movie_id,))
-        results = cur.fetchall()
-        cur.close()
-        return results
-    except Exception as e:
-        logger.error(f"Error fetching movie qualities for {movie_id}: {e}")
-        return []
-    finally:
-        return_db_connection(conn)
 
 # ==================== AI INTENT ANALYSIS ====================
 async def analyze_intent(message_text):
@@ -641,13 +575,10 @@ async def analyze_intent(message_text):
     try:
         movie_keywords = ["movie", "film", "series", "watch", "download", "see", "चलचित्र", "फिल्म", "सीरीज"]
         if not any(keyword in message_text.lower() for keyword in movie_keywords):
-            # Assume it's a movie name if short enough
-            if len(message_text.split()) <= 6:
-                return {"is_request": True, "content_title": message_text}
             return {"is_request": False, "content_title": None}
 
         genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel(model_name='gemini-1.5-flash')
+        model = genai.GenerativeModel(model_name='gemini-3-pro')
 
         prompt = f"""
         You are a 'Request Analyzer' for a Telegram bot named Manvi.
@@ -672,7 +603,7 @@ async def analyze_intent(message_text):
         if json_match:
             return json.loads(json_match.group())
         else:
-            return {"is_request": True, "content_title": message_text}
+            return {"is_request": False, "content_title": None}
 
     except Exception as e:
         logger.error(f"Error in AI intent analysis: {e}")
@@ -685,35 +616,31 @@ async def send_admin_notification(context, user, movie_title, group_info=None):
         return
 
     try:
-        # FIX: Use HTML instead of Markdown to avoid escape issues
-        safe_movie_title = escape_html(movie_title)
-        safe_username = escape_html(user.username) if user.username else 'N/A'
-        safe_first_name = escape_html(user.first_name or 'Unknown')
+        # ESCAPE the movie title and username BEFORE putting it into the message string
+        safe_movie_title = escape_markdown_v2(movie_title)
+        safe_username = escape_markdown_v2(user.username) if user.username else 'N/A'
+        safe_first_name = escape_markdown_v2(user.first_name or 'Unknown')
 
         user_info = f"User: {safe_first_name}"
-        user_info += f" (@{safe_username})"
+        user_info += f" (`@{safe_username}`)"
         user_info += f" (ID: {user.id})"
 
-        group_info_text = f"From Group: {escape_html(group_info)}" if group_info else "Via Private Message"
+        group_info_text = f"From Group: {group_info}" if group_info else "Via Private Message"
 
         message = f"""
-🎬 <b>New Movie Request!</b> 🎬
+🎬 New Movie Request! 🎬
 
-<b>Movie:</b> {safe_movie_title}
+Movie: <b>{safe_movie_title}</b>
 {user_info}
 {group_info_text}
-<b>Time:</b> {datetime.now().strftime('%Y-%m-%d %I:%M %p')}
-        """
-        
-        # Add admin action keyboard
-        keyboard = get_admin_request_keyboard(user.id, movie_title)
-        
-        await context.bot.send_message(
-            chat_id=ADMIN_CHANNEL_ID, 
-            text=message, 
-            parse_mode='HTML',
-            reply_markup=keyboard
-        )
+Time: {datetime.now().strftime('%Y-%m-%d %I:%M %p')}
+"""
+
+await context.bot.send_message(
+    chat_id=ADMIN_CHANNEL_ID, 
+    text=message, 
+    parse_mode='HTML'
+)
     except Exception as e:
         logger.error(f"Error sending admin notification: {e}")
 
@@ -721,13 +648,14 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
     """Notify users who requested a movie"""
     logger.info(f"Attempting to notify users for movie: {movie_title}")
     conn = None
+    cur = None
     notified_count = 0
 
     caption_text = (
-        f"🎬 <b>{escape_html(movie_title)}</b>\n\n"
-        "🔗 <b>JOIN »</b> <a href='https://t.me/FilmFyBoxMoviesHD'>FilmFyBox Movies HD</a>\n\n"
+        f"🎬 <b>{movie_title}</b>\n\n"
+        "🔗 <b>JOIN »</b> FlimFyBox Movies HD (https://t.me/FilmFyBoxMoviesHD)\n\n"
         "🔹 <b>Please drop the movie name, and I'll find it for you as soon as possible. 🎬✨👇</b>\n"
-        "🔹 <b><a href='https://t.me/+2hFeRL4DYfBjZDQ1'>Support group</a></b>"
+        "🔹 <b>Support group (https://t.me/+2hFeRL4DYfBjZDQ1)</b>"
     )
     join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url="https://t.me/FilmFyBoxMoviesHD")]])
 
@@ -752,7 +680,8 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
 
                 warning_msg = await context.bot.send_message(
                     chat_id=user_id,
-                    text="⚠️ ❌👉This file automatically❗️deletes after 1 minute❗️so please forward it to another chat👈❌"
+                    text="⚠️ ❌👉This file automatically❗️deletes after 1 minute❗️so please forward it to another chat👈❌",
+                    parse_mode='Markdown'
                 )
 
                 sent_msg = None
@@ -796,7 +725,8 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
                 if sent_msg:
                     asyncio.create_task(
                         delete_messages_after_delay(
-                            context, user_id,
+                            context,
+                            user_id,
                             [sent_msg.message_id, warning_msg.message_id],
                             60
                         )
@@ -817,18 +747,19 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
                 logger.error(f"Error notifying user {user_id}: {e}")
                 continue
 
-        cur.close()
         return notified_count
     except Exception as e:
         logger.error(f"Error in notify_users_for_movie: {e}")
         return 0
     finally:
-        return_db_connection(conn)
+        if cur: cur.close()
+        if conn: conn.close()
 
 async def notify_in_group(context: ContextTypes.DEFAULT_TYPE, movie_title):
     """Notify users in group when a requested movie becomes available"""
     logger.info(f"Attempting to notify users in group for movie: {movie_title}")
     conn = None
+    cur = None
     try:
         conn = get_db_connection()
         if not conn:
@@ -842,7 +773,6 @@ async def notify_in_group(context: ContextTypes.DEFAULT_TYPE, movie_title):
         users_to_notify = cur.fetchall()
 
         if not users_to_notify:
-            cur.close()
             return
 
         groups_to_notify = defaultdict(list)
@@ -856,17 +786,17 @@ async def notify_in_group(context: ContextTypes.DEFAULT_TYPE, movie_title):
                 notified_users_ids = []
                 user_mentions = []
                 for user_id, username, first_name, message_id in users:
-                    mention = f"<a href='tg://user?id={user_id}'>{escape_html(first_name or username)}</a>"
+                    mention = f"[{first_name or username}](tg://user?id={user_id})"
                     user_mentions.append(mention)
                     notified_users_ids.append(user_id)
 
                 notification_text += ", ".join(user_mentions)
-                notification_text += f"\n\nआपकी फिल्म '{escape_html(movie_title)}' अब उपलब्ध है! इसे पाने के लिए, कृपया मुझे private message करें।"
+                notification_text += f"\n\nआपकी फिल्म '{movie_title}' अब उपलब्ध है! इसे पाने के लिए, कृपया मुझे private [...]"
 
                 await context.bot.send_message(
                     chat_id=group_id,
                     text=notification_text,
-                    parse_mode='HTML'
+                    parse_mode='Markdown'
                 )
 
                 for user_id in notified_users_ids:
@@ -880,11 +810,11 @@ async def notify_in_group(context: ContextTypes.DEFAULT_TYPE, movie_title):
                 logger.error(f"Failed to send message to group {group_id}: {e}")
                 continue
 
-        cur.close()
     except Exception as e:
         logger.error(f"Error in notify_in_group: {e}")
     finally:
-        return_db_connection(conn)
+        if cur: cur.close()
+        if conn: conn.close()
 
 # ==================== KEYBOARD MARKUPS ====================
 def get_main_keyboard():
@@ -898,6 +828,7 @@ def get_main_keyboard():
 def get_admin_request_keyboard(user_id, movie_title):
     """Inline keyboard for admin actions on a user request"""
     sanitized_title = movie_title[:30]
+
     keyboard = [
         [InlineKeyboardButton("✅ FULFILL MOVIE", callback_data=f"admin_fulfill_{user_id}_{sanitized_title}")],
         [InlineKeyboardButton("❌ IGNORE/DELETE", callback_data=f"admin_delete_{user_id}_{sanitized_title}")]
@@ -920,6 +851,7 @@ def create_movie_selection_keyboard(movies, page=0, movies_per_page=5):
     current_movies = movies[start_idx:end_idx]
 
     keyboard = []
+
     for movie in current_movies:
         movie_id, title, url, file_id = movie
         button_text = title if len(title) <= 40 else title[:37] + "..."
@@ -933,6 +865,7 @@ def create_movie_selection_keyboard(movies, page=0, movies_per_page=5):
 
     if page > 0:
         nav_buttons.append(InlineKeyboardButton("◀️ Previous", callback_data=f"page_{page-1}"))
+
     if end_idx < len(movies):
         nav_buttons.append(InlineKeyboardButton("Next ▶️", callback_data=f"page_{page+1}"))
 
@@ -940,82 +873,101 @@ def create_movie_selection_keyboard(movies, page=0, movies_per_page=5):
         keyboard.append(nav_buttons)
 
     keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_selection")])
+
     return InlineKeyboardMarkup(keyboard)
+
+def get_all_movie_qualities(movie_id):
+    """Fetch all available qualities and their SIZES for a given movie ID"""
+    conn = get_db_connection()
+    if not conn:
+        return []
+
+    try:
+        cur = conn.cursor()
+        # Update: Added file_size to the SELECT statement
+        cur.execute("""
+            SELECT quality, url, file_id, file_size
+            FROM movie_files
+            WHERE movie_id = %s AND (url IS NOT NULL OR file_id IS NOT NULL)
+            ORDER BY CASE quality
+                WHEN '4K' THEN 1
+                WHEN 'HD Quality' THEN 2
+                WHEN 'Standart Quality'  THEN 3
+                WHEN 'Low Quality'  THEN 4
+                ELSE 5
+            END DESC
+        """, (movie_id,))
+        results = cur.fetchall()
+        cur.close()
+        return results
+    except Exception as e:
+        logger.error(f"Error fetching movie qualities for {movie_id}: {e}")
+        return []
+    finally:
+        if conn:
+            conn.close()
 
 def create_quality_selection_keyboard(movie_id, title, qualities):
     """Create inline keyboard with quality selection buttons showing SIZE"""
     keyboard = []
 
+    # Note: qualities tuple ab 4 items ka hai -> (quality, url, file_id, file_size)
     for quality, url, file_id, file_size in qualities:
         callback_data = f"quality_{movie_id}_{quality}"
+        
+        # Agar size available hai to dikhayein, nahi to sirf Quality dikhayein
         size_text = f" - {file_size}" if file_size else ""
         link_type = "File" if file_id else "Link"
+        
+        # Button text example: "🎬 720p - 1.4GB (Link)"
         button_text = f"🎬 {quality}{size_text} ({link_type})"
+        
         keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
 
     keyboard.append([InlineKeyboardButton("❌ Cancel Selection", callback_data="cancel_selection")])
+
     return InlineKeyboardMarkup(keyboard)
 
-# ==================== HELPER FUNCTIONS ====================
-async def deliver_movie_on_start(context: ContextTypes.DEFAULT_TYPE, movie_id: int, chat_id: int):
-    """FIX: Missing function - Deliver movie when user clicks deep link"""
-    conn = None
-    try:
-        conn = get_db_connection()
-        if not conn:
-            await context.bot.send_message(chat_id=chat_id, text="❌ Database connection failed.")
-            return
+# ==================== HELPER FUNCTION ====================
+async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int, title: str, url: Optional[str] = None, file_id: Optional[str] = None):
+    """Sends the movie file/link to the user with a warning and caption"""
+    chat_id = update.effective_chat.id
 
-        cur = conn.cursor()
-        cur.execute("SELECT id, title, url, file_id FROM movies WHERE id = %s", (movie_id,))
-        movie = cur.fetchone()
-        cur.close()
-
-        if not movie:
-            await context.bot.send_message(chat_id=chat_id, text="❌ Movie not found.")
-            return
-
-        movie_id, title, url, file_id = movie
-        
-        # Check for multiple qualities
+    if not url and not file_id:
         qualities = get_all_movie_qualities(movie_id)
-        
         if qualities:
-            selection_text = f"✅ Found: <b>{escape_html(title)}</b>\n\n⬇️ <b>Please choose the file quality:</b>"
+            context.user_data['selected_movie_data'] = {
+                'id': movie_id,
+                'title': title,
+                'qualities': qualities
+            }
+            selection_text = f"✅ We found **{title}** in multiple qualities.\n\n⬇️ **Please choose the file quality:**"
             keyboard = create_quality_selection_keyboard(movie_id, title, qualities)
-            await context.bot.send_message(
+            msg = await context.bot.send_message(
                 chat_id=chat_id,
                 text=selection_text,
                 reply_markup=keyboard,
-                parse_mode='HTML'
+                parse_mode='Markdown'
             )
-        else:
-            # Send directly
-            await send_movie_to_user_direct(context, chat_id, movie_id, title, url, file_id)
+            track_message_for_deletion(chat_id, msg.message_id, 300)
+            return
 
-    except Exception as e:
-        logger.error(f"Error in deliver_movie_on_start: {e}")
-        await context.bot.send_message(chat_id=chat_id, text="❌ An error occurred.")
-    finally:
-        return_db_connection(conn)
-
-async def send_movie_to_user_direct(context: ContextTypes.DEFAULT_TYPE, chat_id: int, movie_id: int, title: str, url: Optional[str] = None, file_id: Optional[str] = None):
-    """Send movie directly to user without Update object"""
     try:
         warning_msg = await context.bot.send_message(
             chat_id=chat_id,
-            text="⚠️ ❌👉This file automatically❗️deletes after 1 minute❗️so please forward it to another chat👈❌"
+            text="⚠️ ❌👉This file automatically❗️deletes after 1 minute❗️so please forward it to another chat👈❌",
+            parse_mode='Markdown'
         )
 
+        sent_msg = None
+        name = title
         caption_text = (
-            f"🎬 <b>{escape_html(title)}</b>\n\n"
+            f"🎬 <b>{name}</b>\n\n"
             "🔗 <b>JOIN »</b> <a href='https://t.me/FilmFyBoxMoviesHD'>FilmfyBox</a>\n\n"
             "🔹 <b>Please drop the movie name, and I'll find it for you as soon as possible. 🎬✨👇</b>\n"
             "🔹 <b><a href='https://t.me/+2hFeRL4DYfBjZDQ1'>FlimfyBox Chat</a></b>"
         )
         join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url="https://t.me/FilmFyBoxMoviesHD")]])
-
-        sent_msg = None
 
         if file_id:
             sent_msg = await context.bot.send_document(
@@ -1040,10 +992,11 @@ async def send_movie_to_user_direct(context: ContextTypes.DEFAULT_TYPE, chat_id:
                 )
             except Exception as e:
                 logger.error(f"Copy private link failed {url}: {e}")
-                await context.bot.send_message(
+                sent_msg = await context.bot.send_message(
                     chat_id=chat_id,
-                    text=f"🎬 Found: {title}\n\nLink: {url}",
-                    reply_markup=get_movie_options_keyboard(title, url)
+                    text=f"🎬 Found: {name}\n\n{caption_text}",
+                    reply_markup=get_movie_options_keyboard(name, url),
+                    parse_mode='HTML'
                 )
         elif url and url.startswith("https://t.me/") and "/c/" not in url:
             try:
@@ -1061,86 +1014,133 @@ async def send_movie_to_user_direct(context: ContextTypes.DEFAULT_TYPE, chat_id:
                 )
             except Exception as e:
                 logger.error(f"Copy public link failed {url}: {e}")
-                await context.bot.send_message(
+                sent_msg = await context.bot.send_message(
                     chat_id=chat_id,
-                    text=f"🎬 Found: {title}\n\nLink: {url}",
-                    reply_markup=get_movie_options_keyboard(title, url)
+                    text=f"🎬 Found: {name}\n\n{caption_text}",
+                    reply_markup=get_movie_options_keyboard(name, url),
+                    parse_mode='HTML'
                 )
         elif url and url.startswith("http"):
             sent_msg = await context.bot.send_message(
                 chat_id=chat_id,
-                text=f"🎉 Found it! '{title}' is available!\n\n{caption_text}",
-                reply_markup=get_movie_options_keyboard(title, url),
+                text=f"🎉 Found it! '{name}' is available!\n\n{caption_text}",
+                reply_markup=get_movie_options_keyboard(name, url),
                 parse_mode='HTML'
             )
         else:
             sent_msg = await context.bot.send_message(
                 chat_id=chat_id,
-                text=f"❌ Sorry, '{title}' found but no valid file or link is attached."
+                text=f"❌ Sorry, '{name}' found but no valid file or link is attached in the database."
             )
 
         if sent_msg:
+            message_ids_to_delete = [warning_msg.message_id, sent_msg.message_id]
             asyncio.create_task(
-                delete_messages_after_delay(context, chat_id, [warning_msg.message_id, sent_msg.message_id], 60)
+                delete_messages_after_delay(
+                    context,
+                    chat_id,
+                    message_ids_to_delete,
+                    60
+                )
             )
 
     except Exception as e:
-        logger.error(f"Error sending movie directly: {e}")
-        await context.bot.send_message(chat_id=chat_id, text="❌ Server failed to send file.")
+        logger.error(f"Error sending movie to user: {e}")
+        try:
+            await context.bot.send_message(chat_id=chat_id, text="❌ Server failed to send file. Please report to Admin.")
+        except Exception as e2:
+            logger.error(f"Secondary send error: {e2}")
 
-async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int, title: str, url: Optional[str] = None, file_id: Optional[str] = None):
-    """Sends the movie file/link to the user with a warning and caption"""
-    chat_id = update.effective_chat.id
-
-    if not url and not file_id:
-        qualities = get_all_movie_qualities(movie_id)
-        if qualities:
-            context.user_data['selected_movie_data'] = {
-                'id': movie_id,
-                'title': title,
-                'qualities': qualities
-            }
-            selection_text = f"✅ We found <b>{escape_html(title)}</b> in multiple qualities.\n\n⬇️ <b>Please choose the file quality:</b>"
-            keyboard = create_quality_selection_keyboard(movie_id, title, qualities)
-            msg = await context.bot.send_message(
-                chat_id=chat_id,
-                text=selection_text,
-                reply_markup=keyboard,
-                parse_mode='HTML'
-            )
-            track_message_for_deletion(chat_id, msg.message_id, 300)
+async def deliver_movie_on_start(context: ContextTypes.DEFAULT_TYPE, movie_id: int, chat_id: int):
+    """Deliver movie when user clicks deep link"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            await context.bot.send_message(chat_id=chat_id, text="❌ Database error.")
             return
-
-    await send_movie_to_user_direct(context, chat_id, movie_id, title, url, file_id)
+        
+        cur = conn.cursor()
+        cur.execute("SELECT id, title, url, file_id FROM movies WHERE id = %s", (movie_id,))
+        movie = cur.fetchone()
+        cur.close()
+        conn.close()
+        
+        if not movie:
+            await context.bot.send_message(chat_id=chat_id, text="❌ Movie not found.")
+            return
+        
+        movie_id, title, url, file_id = movie
+        
+        # Create a dummy update object for send_movie_to_user
+        class DummyUpdate:
+            class DummyChat:
+                id = chat_id
+            effective_chat = DummyChat()
+        
+        await send_movie_to_user(DummyUpdate(), context, movie_id, title, url, file_id)
+        
+    except Exception as e:
+        logger.error(f"Error in deliver_movie_on_start: {e}")
+        await context.bot.send_message(chat_id=chat_id, text="❌ Error delivering movie.")
 
 # ==================== TELEGRAM BOT HANDLERS ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start command handler with deep link support"""
+    """
+    Start command handler. 
+    Handles:
+    1. Normal start (/start)
+    2. Deep links for direct movie delivery (/start movie_123)
+    3. Auto-search deep links from channel (/start q_MovieName)
+    """
     try:
-        if context.args and context.args:
-            payload = context.args
+        # Check for deep link payload
+        if context.args and context.args[0]:
+            payload = context.args[0]
             
-            # CASE 1: DIRECT MOVIE ID (e.g., movie_123)
+            # --- CASE 1: DIRECT MOVIE ID (e.g., movie_123) ---
             if payload.startswith("movie_"):
                 try:
-                    movie_id = int(payload.split('_')<!--citation:1-->)
+                    movie_id = int(payload.split('_')[1])
                     chat_id = update.effective_chat.id
-                    asyncio.create_task(deliver_movie_on_start(context, movie_id, chat_id))
-                    return MAIN_MENU
+                    
+                    # Pehle welcome type message
+                    await update.message.reply_text(
+                        "🎬 Aapka movie link process ho raha hai...\nPlease wait! ⏳"
+                    )
+                    
+                    # Movie deliver karo
+                    await deliver_movie_on_start(context, movie_id, chat_id)
+                    
                 except (IndexError, ValueError) as e:
                     logger.error(f"Error processing movie link: {e}")
                     await update.message.reply_text("❌ Invalid link.")
+                
+                return MAIN_MENU  # ✅ RETURN ADDED!
             
-            # CASE 2: AUTO SEARCH (e.g., q_Family_Man)
+            # --- CASE 2: AUTO SEARCH (e.g., q_Family_Man) ---
             elif payload.startswith("q_"):
-                query_text = payload.replace("q_", "").replace("_", " ")
+                # Decode query: q_Family_Man -> Family Man
+                query_text = payload.replace("q_", "", 1)  # Sirf pehla "q_" remove karo
+                query_text = query_text.replace("_", " ")  # Underscores to spaces
+                query_text = " ".join(query_text.split())  # Multiple spaces fix
+                
+                logger.info(f"Deep link search query: {query_text}")
+                
+                # Safety check
+                if not query_text.strip():
+                    await update.message.reply_text("❌ Invalid search query.")
+                    return MAIN_MENU
+                
+                # Update message text for search
                 update.message.text = query_text
+                
+                # Call search function directly
                 return await search_movies(update, context)
 
     except Exception as e:
         logger.error(f"Error in start: {e}")
 
-    # Normal welcome message
+    # --- NORMAL WELCOME MESSAGE (Fallback) ---
     welcome_text = """
 📨 Sᴇɴᴅ Mᴏᴠɪᴇ Oʀ Sᴇʀɪᴇs Nᴀᴍᴇ ᴀɴᴅ Yᴇᴀʀ Aꜱ Pᴇʀ Gᴏᴏɢʟᴇ Sᴘᴇʟʟɪɴɢ..!! 👍
 
@@ -1154,7 +1154,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 """
     await update.message.reply_text(welcome_text, reply_markup=get_main_keyboard())
     return MAIN_MENU
-
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle main menu options"""
     try:
@@ -1178,14 +1177,10 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if conn:
                     cur = conn.cursor()
                     cur.execute("SELECT COUNT(*) FROM user_requests WHERE user_id = %s", (user_id,))
-                    result = cur.fetchone()
-                    request_count = result if result else 0
+                    request_count = cur.fetchone()
 
                     cur.execute("SELECT COUNT(*) FROM user_requests WHERE user_id = %s AND notified = TRUE", (user_id,))
-                    result = cur.fetchone()
-                    fulfilled_count = result if result else 0
-
-                    cur.close()
+                    fulfilled_count = cur.fetchone()
 
                     stats_text = f"""
 📊 Your Stats:
@@ -1200,7 +1195,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.error(f"Error getting stats: {e}")
                 await update.message.reply_text("Sorry, couldn't retrieve your stats at the moment.")
             finally:
-                return_db_connection(conn)
+                if conn: conn.close()
 
             return MAIN_MENU
 
@@ -1227,17 +1222,22 @@ Just use the buttons below to navigate!
 async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Search for movies in the database"""
     try:
+        # If called from a button click or state transition without message text
         if not update.message or not update.message.text:
             return MAIN_MENU
 
         query = update.message.text.strip()
 
+        # Safety check: if user types a menu command, redirect to main menu
         if query in ['🔍 Search Movies', '🙋 Request Movie', '📊 My Stats', '❓ Help']:
-            return await main_menu(update, context)
+             return await main_menu(update, context)
 
+        # 1. Search in DB
         movies = get_movies_from_db(query)
 
+        # 2. If no movies found
         if not movies:
+            # Send a random "Not Found" GIF if available
             if SEARCH_ERROR_GIFS:
                 try:
                     gif = random.choice(SEARCH_ERROR_GIFS)
@@ -1245,6 +1245,7 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except:
                     pass
 
+            # Send "Not Found" text with Request button
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("🙋 Request This Movie", callback_data=f"request_{query[:20]}")]
             ])
@@ -1256,16 +1257,18 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return MAIN_MENU
 
+        # 3. If movies found
         context.user_data['search_results'] = movies
         context.user_data['search_query'] = query
 
+        # Send selection keyboard (Page 0)
         keyboard = create_movie_selection_keyboard(movies, page=0)
         
         await update.message.reply_text(
-            f"🎬 <b>Found {len(movies)} results for '{escape_html(query)}'</b>\n\n"
+            f"🎬 **Found {len(movies)} results for '{query}'**\n\n"
             "👇 Select your movie below:",
             reply_markup=keyboard,
-            parse_mode='HTML'
+            parse_mode='Markdown'
         )
         return MAIN_MENU
 
@@ -1275,7 +1278,7 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return MAIN_MENU
 
 async def request_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle movie requests with duplicate detection"""
+    """Handle movie requests with duplicate detection, fuzzy matching and cooldowns"""
     try:
         user_message = (update.message.text or "").strip()
         user = update.effective_user
@@ -1287,7 +1290,8 @@ async def request_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         burst = user_burst_count(user.id, window_seconds=60)
         if burst >= MAX_REQUESTS_PER_MINUTE:
             msg = await update.message.reply_text(
-                "🛑 तुम बहुत जल्दी-जल्दी requests भेज रहे हो। कुछ देर रोकें और फिर कोशिश करें।"
+                "🛑 तुम बहुत जल्दी-जल्दी requests भेज रहे हो। कुछ देर रोकें (कुछ मिनट) और फिर कोशिश करें।\n"
+                "बार‑बार भेजने से फ़ायदा नहीं होगा।"
             )
             track_message_for_deletion(update.effective_chat.id, msg.message_id, 120)
             return REQUESTING
@@ -1308,7 +1312,8 @@ async def request_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
             minutes_left = max(0, REQUEST_COOLDOWN_MINUTES - minutes_passed)
             if minutes_left > 0:
                 strict_text = (
-                    f"🛑 Ruk jao! Aapne ye request abhi bheji thi.\n\n"
+                    "🛑 Ruk jao! Aapne ye request abhi bheji thi.\n\n"
+                    "Baar‑baar request karne se movie jaldi nahi aayegi.\n\n"
                     f"Similar previous request: \"{similar.get('stored_title')}\" ({similar.get('score')}% match)\n"
                     f"Kripya {minutes_left} minute baad dobara koshish karein. 🙏"
                 )
@@ -1317,11 +1322,15 @@ async def request_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return REQUESTING
 
         stored = store_user_request(
-            user.id, user.username, user.first_name, movie_title,
+            user.id,
+            user.username,
+            user.first_name,
+            movie_title,
             update.effective_chat.id if update.effective_chat.type != "private" else None,
             update.message.message_id
         )
         if not stored:
+            logger.error("Failed to store user request in DB.")
             await update.message.reply_text("Sorry, आपका request store नहीं हो पाया। बाद में कोशिश करें।")
             return REQUESTING
 
@@ -1346,6 +1355,7 @@ async def request_movie_from_button(update: Update, context: ContextTypes.DEFAUL
     try:
         user_message = (update.message.text or "").strip()
         
+        # Check for Main Menu Buttons (Emergency Exit)
         menu_buttons = ['🔍 Search Movies', '🙋 Request Movie', '📊 My Stats', '❓ Help', '/start']
         if user_message in menu_buttons:
             if 'awaiting_request' in context.user_data:
@@ -1358,6 +1368,7 @@ async def request_movie_from_button(update: Update, context: ContextTypes.DEFAUL
             await update.message.reply_text("कृपया मूवी का नाम भेजें।")
             return REQUESTING_FROM_BUTTON
 
+        # Store movie name
         context.user_data['pending_request'] = user_message
         
         confirm_keyboard = InlineKeyboardMarkup([
@@ -1365,8 +1376,9 @@ async def request_movie_from_button(update: Update, context: ContextTypes.DEFAUL
         ])
         
         msg = await update.message.reply_text(
-            f"✅ आपने '<b>{escape_html(user_message)}</b>' को रिक्वेस्ट करना चाहते हैं?\n\n"
-            f"<b>💫 कृपया कन्फर्म बटन पर क्लिक करें 👇</b>",
+            f"✅ आपने '<b>{user_message}</b>' को रिक्वेस्ट करना चाहते हैं?\n\n"
+            f"<b>💫 अब बस अपनी मूवी या वेब-सीरीज़ का मूल नाम भेजें और कन्फर्म बटन पर क्लिक करें!</b>\n\n"
+            f"कृपया कन्फर्म बटन पर क्लिक करें 👇",
             reply_markup=confirm_keyboard,
             parse_mode='HTML'
         )
@@ -1384,20 +1396,17 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
 
-        # ==================== MOVIE SELECTION ====================
+
+# ==================== MOVIE SELECTION ====================
         if query.data.startswith("movie_"):
             movie_id = int(query.data.replace("movie_", ""))
 
             conn = get_db_connection()
-            if not conn:
-                await query.edit_message_text("❌ Database connection failed.")
-                return
-
             cur = conn.cursor()
             cur.execute("SELECT id, title FROM movies WHERE id = %s", (movie_id,))
             movie = cur.fetchone()
             cur.close()
-            return_db_connection(conn)
+            conn.close()
 
             if not movie:
                 await query.edit_message_text("❌ Movie not found in database.")
@@ -1407,14 +1416,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             qualities = get_all_movie_qualities(movie_id)
 
             if not qualities:
-                await query.edit_message_text(f"✅ You selected: <b>{escape_html(title)}</b>\n\nSending movie...", parse_mode='HTML')
+                await query.edit_message_text(f"✅ You selected: **{title}**\n\nSending movie...", parse_mode='Markdown')
                 conn = get_db_connection()
                 cur = conn.cursor()
                 cur.execute("SELECT url, file_id FROM movies WHERE id = %s", (movie_id,))
-                result = cur.fetchone()
-                url, file_id = result if result else (None, None)
+                url, file_id = cur.fetchone() or (None, None)
                 cur.close()
-                return_db_connection(conn)
+                conn.close()
 
                 await send_movie_to_user(update, context, movie_id, title, url, file_id)
                 return
@@ -1425,20 +1433,19 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 'qualities': qualities
             }
 
-            selection_text = f"✅ You selected: <b>{escape_html(title)}</b>\n\n⬇️ <b>Please choose the file quality:</b>"
+            selection_text = f"✅ You selected: **{title}**\n\n⬇️ **Please choose the file quality:**"
             keyboard = create_quality_selection_keyboard(movie_id, title, qualities)
 
             await query.edit_message_text(
                 selection_text,
                 reply_markup=keyboard,
-                parse_mode='HTML'
+                parse_mode='Markdown'
             )
-
         # ==================== ADMIN ACTIONS ====================
         elif query.data.startswith("admin_fulfill_"):
             parts = query.data.split('_', 3)
-            user_id = int(parts<!--citation:2-->)
-            movie_title = parts<!--citation:3-->
+            user_id = int(parts[2])
+            movie_title = parts[3]
 
             conn = get_db_connection()
             if conn:
@@ -1452,20 +1459,21 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     num_notified = await notify_users_for_movie(context, movie_title, value_to_send)
 
                     await query.edit_message_text(
-                        f"✅ FULFILLED: Movie '{movie_title}' - {num_notified} users notified."
+                        f"✅ FULFILLED: Movie '{movie_title}' updated and user (ID: {user_id}) notified ({num_notified} total users).",
+                        parse_mode='Markdown'
                     )
                 else:
-                    await query.edit_message_text(f"❌ ERROR: Movie '{movie_title}' not found in movies table.")
+                    await query.edit_message_text(f"❌ ERROR: Movie '{movie_title}' not found in the `movies` table. Please add it first.", parse_mode='Markdown')
 
                 cur.close()
-                return_db_connection(conn)
+                conn.close()
             else:
                 await query.edit_message_text("❌ Database error during fulfillment.")
 
         elif query.data.startswith("admin_delete_"):
             parts = query.data.split('_', 3)
-            user_id = int(parts<!--citation:2-->)
-            movie_title = parts<!--citation:3-->
+            user_id = int(parts[2])
+            movie_title = parts[3]
 
             conn = get_db_connection()
             if conn:
@@ -1473,21 +1481,22 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 cur.execute("DELETE FROM user_requests WHERE user_id = %s AND movie_title = %s", (user_id, movie_title))
                 conn.commit()
                 cur.close()
-                return_db_connection(conn)
-                await query.edit_message_text(f"❌ DELETED: Request for '{movie_title}' from User ID {user_id} removed.")
+                conn.close()
+                await query.edit_message_text(f"❌ DELETED: Request for '{movie_title}' from User ID {user_id} removed.", parse_mode='Markdown')
             else:
                 await query.edit_message_text("❌ Database error during deletion.")
 
         # ==================== QUALITY SELECTION ====================
         elif query.data.startswith("quality_"):
             parts = query.data.split('_')
-            movie_id = int(parts<!--citation:1-->)
-            selected_quality = '_'.join(parts[2:])  # Handle quality names with underscores
+            movie_id = int(parts[1])
+            selected_quality = parts[2]
 
             movie_data = context.user_data.get('selected_movie_data')
 
             if not movie_data or movie_data.get('id') != movie_id:
                 qualities = get_all_movie_qualities(movie_id)
+                # Note: qualities now contains (quality, url, file_id, file_size)
                 movie_data = {'id': movie_id, 'title': 'Movie', 'qualities': qualities}
 
             if not movie_data or 'qualities' not in movie_data:
@@ -1495,23 +1504,33 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             chosen_file = None
+            
+            # --- FIX IS BELOW THIS LINE ---
+            # We added 'file_size' to the unpacking because the DB function returns 4 values now
             for quality, url, file_id, file_size in movie_data['qualities']:
                 if quality == selected_quality:
                     chosen_file = {'url': url, 'file_id': file_id}
                     break
+            # -----------------------------
 
             if not chosen_file:
                 await query.edit_message_text("❌ Error fetching the file for that quality.")
                 return
 
             title = movie_data['title']
-            await query.edit_message_text(f"Sending <b>{escape_html(title)}</b>...", parse_mode='HTML')
+            await query.edit_message_text(f"Sending **{title}**...", parse_mode='Markdown')
 
-            await send_movie_to_user(update, context, movie_id, title, chosen_file['url'], chosen_file['file_id'])
+            await send_movie_to_user(
+                update,
+                context,
+                movie_id,
+                title,
+                chosen_file['url'],
+                chosen_file['file_id']
+            )
 
             if 'selected_movie_data' in context.user_data:
                 del context.user_data['selected_movie_data']
-
         # ==================== PAGINATION ====================
         elif query.data.startswith("page_"):
             page = int(query.data.replace("page_", ""))
@@ -1523,13 +1542,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             movies = context.user_data['search_results']
             search_query = context.user_data.get('search_query', 'your search')
 
-            selection_text = f"🎬 <b>Found {len(movies)} movies matching '{escape_html(search_query)}'</b>\n\nPlease select the movie you want:"
+            selection_text = f"🎬 **Found {len(movies)} movies matching '{search_query}'**\n\nPlease select the movie you want:"
             keyboard = create_movie_selection_keyboard(movies, page=page)
 
             await query.edit_message_text(
                 selection_text,
                 reply_markup=keyboard,
-                parse_mode='HTML'
+                parse_mode='Markdown'
             )
 
         elif query.data == "cancel_selection":
@@ -1541,23 +1560,27 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # ==================== REQUEST FLOW ====================
         elif query.data.startswith("request_"):
+            # 1. Delete the large Tips message if it exists
             tip_msg_id = context.user_data.get('tip_message_id')
             if tip_msg_id:
                 try:
                     await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=tip_msg_id)
                 except Exception:
-                    pass
+                    pass 
                 del context.user_data['tip_message_id']
             
+            # 2. Send instructions
             request_instruction_text = """
 <b>🎬 Movie / Web-Series Request System</b>
 
 ठीक है! अब आप अपनी पसंदीदा मूवी या वेब-सीरीज़ रिक्वेस्ट कर सकते हैं।
+रिक्वेस्ट भेजने से पहले एक छोटी-सी बात ध्यान रखें 👇
 
 <b>📌 क्यों सही नाम भेजना ज़रूरी है?</b>
-सिर्फ़ सही नाम भेजेंगे, तो मुझे उसे ढूँढने में आसानी होगी।
+सिर्फ़ सही नाम भेजेंगे, तो मुझे उसे ढूँढने में आसानी होगी
+और जैसे ही वो उपलब्ध होगी, मैं आपको तुरंत सूचित कर दिया जायेगा।
 
-<b>✔️ सही तरीका:</b>
+<b>✔️ सही तरीका: गूगल से स्पेलिंग सर्च कर ले</b>
 • KGF 2
 • Panchayat
 • Mirzapur
@@ -1566,15 +1589,22 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 <b>❌ गलत तरीके (इनसे बचें):</b>
 • KGF 2 movie in hindi download
 • मुझे पंचायत का नया सीज़न चाहिए
+• Animal full HD leaked
 
 ━━━━━━━━━━━━━━
-<b>👉 (Name Only — No extra words)</b>
+<b>👉 (Name Only — No extra words, No details)</b>
 ━━━━━━━━━━━━━━
 """
-            await query.edit_message_text(text=request_instruction_text, parse_mode='HTML')
+            await query.edit_message_text(
+                text=request_instruction_text,
+                parse_mode='HTML'
+            )
+            
+            # 3. Enable Request Mode
             context.user_data['awaiting_request'] = True
 
         elif query.data.startswith("confirm_request_"):
+            # Retrieve pending request name
             movie_title = context.user_data.get('pending_request')
             
             if not movie_title:
@@ -1583,13 +1613,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             user = query.from_user
             
+            # Check burst limit
             burst = user_burst_count(user.id, window_seconds=60)
             if burst >= MAX_REQUESTS_PER_MINUTE:
                 await query.edit_message_text(
-                    "🛑 तुम बहुत जल्दी-जल्दी requests भेज रहे हो। कुछ देर रोकें।"
+                    "🛑 तुम बहुत जल्दी-जल्दी requests भेज रहे हो। कुछ देर रोकें (कुछ मिनट) और फिर कोशिश करें।"
                 )
                 return
             
+            # Check for duplicates/cooldown
             similar = get_last_similar_request_for_user(user.id, movie_title, minutes_window=REQUEST_COOLDOWN_MINUTES)
             if similar:
                 last_time = similar.get("requested_at")
@@ -1599,36 +1631,46 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if minutes_left > 0:
                     await query.edit_message_text(
                         f"🛑 Ruk jao! Aapne ye request abhi bheji thi.\n\n"
+                        f"Baar‑baar request karne se movie jaldi nahi aayegi.\n\n"
                         f"Similar previous request: \"{similar.get('stored_title')}\" ({similar.get('score')}% match)\n"
                         f"Kripya {minutes_left} minute baad dobara koshish karein. 🙏"
                     )
                     return
             
+            # Store request in DB
             stored = store_user_request(
-                user.id, user.username, user.first_name, movie_title,
+                user.id,
+                user.username,
+                user.first_name,
+                movie_title,
                 query.message.chat.id if query.message.chat.type != "private" else None,
                 query.message.message_id
             )
             
             if not stored:
+                logger.error("Failed to store user request in DB.")
                 await query.edit_message_text("Sorry, आपका request store नहीं हो पाया। बाद में कोशिश करें।")
                 return
             
+            # Notify Admin
             group_info = query.message.chat.title if query.message.chat.type != "private" else None
             await send_admin_notification(context, user, movie_title, group_info)
             
             confirmation_text = f"""
 ✅ <b>Request Successfully Submitted!</b>
 
-🎬 Movie: <b>{escape_html(movie_title)}</b>
+🎬 Movie: <b>{movie_title}</b>
 
 📝 आपकी request सफलतापूर्वक दर्ज कर ली गई है!
 
-⏳ जैसे ही यह उपलब्ध होगी, आपको सूचित किया जाएगा।
+⏳ जैसे ही यह उपलब्ध होगी, मैं आपको तुरंत सूचित कर दिया जायेगा।
 
 धन्यवाद! 🙏
 """
-            await query.edit_message_text(confirmation_text, parse_mode='HTML')
+            await query.edit_message_text(
+                confirmation_text,
+                parse_mode='HTML'
+            )
             
             if 'pending_request' in context.user_data:
                 del context.user_data['pending_request']
@@ -1648,7 +1690,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cur.execute("SELECT id, title, url, file_id FROM movies WHERE title ILIKE %s LIMIT 1", (f'%{movie_title}%',))
             movie = cur.fetchone()
             cur.close()
-            return_db_connection(conn)
+            conn.close()
 
             if movie:
                 movie_id, title, url, file_id = movie
@@ -1659,7 +1701,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Error in button callback: {e}")
         try:
-            await query.answer(f"❌ Error occurred", show_alert=True)
+            await query.answer(f"❌ Error: {str(e)}", show_alert=True)
         except:
             pass
 
@@ -1669,51 +1711,72 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     track_message_for_deletion(update.effective_chat.id, msg.message_id, 60)
     return MAIN_MENU
 
+# 👇👇👇 FIXED 3-BOT FUNCTION 👇👇👇
+
 async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Generate 3-bot links from photo with caption"""
+    """
+    Ek command se 3 Bots ke link generate honge.
+    Admin Command: /post_query MovieName
+    """
     try:
         user_id = update.effective_user.id
         if user_id != ADMIN_USER_ID:
             return
 
         if not update.message.photo:
-            await update.message.reply_text("❌ Photo bhejo caption ke sath: `/post_query Name`")
+            await update.message.reply_text("❌ Photo bhejo caption ke sath: `/post_query Name`", parse_mode='Markdown')
             return
 
         caption_text = update.message.caption
         if not caption_text or not caption_text.startswith('/post_query'):
             return
 
+        # 1. Query Clean Karo
         query_text = caption_text.replace('/post_query', '').strip()
         if not query_text:
             await update.message.reply_text("❌ Name missing.")
             return
         
-        safe_query = query_text.replace(" ", "_")
+        # ✅ URL Safe encoding
+        # Method 1: Simple (spaces to underscore, remove special chars)
+        safe_query = re.sub(r'[^\w\s-]', '', query_text)  # Special chars remove
+        safe_query = safe_query.replace(" ", "_")
+        safe_query = re.sub(r'_+', '_', safe_query)  # Multiple underscores fix
+        safe_query = safe_query.strip('_')  # Leading/trailing underscore remove
         
+        # Method 2 (Alternative): URL encoding
+        # safe_query = quote(query_text, safe='')
+        
+        logger.info(f"Creating deep links for: {query_text} -> {safe_query}")
+        
+        # --- BOT USERNAMES (Bina @ ke likhein) ---
         bot1_username = "Ur_Manvi_Bot"
         bot2_username = "urmoviebot"
         bot3_username = "FlimfyBox_Bot"
 
+        # 3 Links banao
         link1 = f"https://t.me/{bot1_username}?start=q_{safe_query}"
         link2 = f"https://t.me/{bot2_username}?start=q_{safe_query}"
         link3 = f"https://t.me/{bot3_username}?start=q_{safe_query}"
 
+        # Keyboard
         keyboard = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("🤖 Manvi Bot", url=link1),
-                InlineKeyboardButton("⚡ Movie Bot", url=link2),
+                InlineKeyboardButton("⚡Movie Bot", url=link2),
             ],
-            [InlineKeyboardButton("🚀 FilmfyBox Bot", url=link3)],
+            [
+                InlineKeyboardButton("🚀 FilmfyBox Bot", url=link3)
+            ],
             [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
         ])
 
         channel_caption = (
-            f"🎬 <b>{escape_html(query_text)}</b> 🎬\n\n"
-            f"✅ <b>File Uploaded Successfully!</b>\n"
+            f"🎬 **{query_text}** 🎬\n\n"
+            f"✅ **File Uploaded Successfully!**\n"
             f"➖➖➖➖➖➖➖➖➖➖\n"
-            f"⚡ <b>Fast Download Links Available</b>\n"
-            f"👇 <b>Download from any Bot:</b>\n"
+            f"⚡ **Fast Download Links Available**\n"
+            f"👇 **Download from any Bot:**\n"
             f"➖➖➖➖➖➖➖➖➖➖"
         )
         
@@ -1723,11 +1786,16 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 photo=update.message.photo[-1].file_id,
                 caption=channel_caption,
                 reply_markup=keyboard,
-                parse_mode='HTML'
+                parse_mode='Markdown'
             )
-            await update.message.reply_text(f"✅ Post Sent with 3 Bot Links!")
+            await update.message.reply_text(
+                f"✅ Post Sent!\n\n"
+                f"Original: `{query_text}`\n"
+                f"Encoded: `{safe_query}`",
+                parse_mode='Markdown'
+            )
         else:
-            await update.message.reply_text("❌ ADMIN_CHANNEL_ID environment variable set nahi hai.")
+            await update.message.reply_text("❌ ADMIN_CHANNEL_ID set nahi hai.")
 
     except Exception as e:
         logger.error(f"Error in admin_post_query: {e}")
@@ -1735,7 +1803,7 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== ADMIN COMMANDS ====================
 async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin command to add a movie manually"""
+    """Admin command to add a movie manually (Supports Unreleased)"""
     if update.effective_user.id != ADMIN_USER_ID:
         await update.message.reply_text("Sorry Darling, sirf Admin hi is command ka istemal kar sakte hain.")
         return
@@ -1747,8 +1815,8 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Galat Format! Aise use karein:\n/addmovie MovieName Link/FileID/unreleased")
             return
 
-        value = parts[-1]
-        title = " ".join(parts[:-1])
+        value = parts[-1]  # Last part is link/id/unreleased
+        title = " ".join(parts[:-1]) # Rest is title
 
         logger.info(f"Adding movie: {title} with value: {value}")
 
@@ -1759,7 +1827,9 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         cur = conn.cursor()
 
+        # CASE 1: UNRELEASED MOVIE
         if value.strip().lower() == "unreleased":
+            # is_unreleased = TRUE set karenge
             cur.execute(
                 """
                 INSERT INTO movies (title, url, file_id, is_unreleased) 
@@ -1771,8 +1841,9 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 """,
                 (title.strip(), "", None, True)
             )
-            message = f"✅ '{title}' ko successfully **Unreleased** mark kar diya gaya hai."
+            message = f"✅ '{title}' ko successfully **Unreleased** mark kar diya gaya hai. (Cute message activate ho gaya ✨)"
 
+        # CASE 2: TELEGRAM FILE ID
         elif any(value.startswith(prefix) for prefix in ["BQAC", "BAAC", "CAAC", "AQAC"]):
             cur.execute(
                 """
@@ -1787,10 +1858,11 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             message = f"✅ '{title}' ko File ID ke sath add kar diya gaya hai."
 
+        # CASE 3: URL LINK
         elif "http" in value or "." in value:
             normalized_url = value.strip()
             if not value.startswith(('http://', 'https://')):
-                await update.message.reply_text("❌ Invalid URL format.")
+                await update.message.reply_text("❌ Invalid URL format. URL must start with http:// or https://")
                 return
 
             cur.execute(
@@ -1807,106 +1879,32 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
             message = f"✅ '{title}' ko URL ke sath add kar diya gaya hai."
 
         else:
-            await update.message.reply_text("❌ Invalid format. Provide valid File ID, URL, or type 'unreleased'.")
+            await update.message.reply_text("❌ Invalid format. Please provide valid File ID, URL, or type 'unreleased'.")
             return
 
         conn.commit()
-        cur.close()
         await update.message.reply_text(message)
 
+        # Notify Users logic (Agar movie sach mein release hui hai to hi notify karein)
         if value.strip().lower() != "unreleased":
-            conn2 = get_db_connection()
-            cur2 = conn2.cursor()
-            cur2.execute("SELECT id, title, url, file_id FROM movies WHERE title = %s", (title.strip(),))
-            movie_found = cur2.fetchone()
-            cur2.close()
-            return_db_connection(conn2)
+            cur.execute("SELECT id, title, url, file_id FROM movies WHERE title = %s", (title.strip(),))
+            movie_found = cur.fetchone()
 
             if movie_found:
                 movie_id, title, url, file_id = movie_found
                 value_to_send = file_id if file_id else url
+
                 num_notified = await notify_users_for_movie(context, title, value_to_send)
+                # Group notification optional
+                # await notify_in_group(context, title)
                 await update.message.reply_text(f"📢 Notification: {num_notified} users notified.")
 
     except Exception as e:
         logger.error(f"Error in add_movie command: {e}")
         await update.message.reply_text(f"Ek error aaya: {e}")
     finally:
-        return_db_connection(conn)
-
-async def add_movie_quality(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin command to add a specific quality file for a movie"""
-    if update.effective_user.id != ADMIN_USER_ID:
-        await update.message.reply_text("⛔ Admin only command.")
-        return
-
-    conn = None
-    try:
-        if len(context.args) < 3:
-            await update.message.reply_text(
-                "Usage: /addquality <MovieTitle> <Quality> <FileID/URL> [Size]\n"
-                "Example: /addquality Jawan HD BQACAgAIAxxxx 1.2GB"
-            )
-            return
-
-        # Parse arguments
-        if len(context.args) >= 4 and not context.args[-1].startswith(('http', 'BQAC', 'BAAC', 'CAAC', 'AQAC')):
-            file_size = context.args[-1]
-            value = context.args[-2]
-            quality = context.args[-3]
-            title = " ".join(context.args[:-3])
-        else:
-            file_size = None
-            value = context.args[-1]
-            quality = context.args[-2]
-            title = " ".join(context.args[:-2])
-
-        conn = get_db_connection()
-        if not conn:
-            await update.message.reply_text("❌ Database connection failed.")
-            return
-
-        cur = conn.cursor()
-        
-        # Get movie ID
-        cur.execute("SELECT id FROM movies WHERE title ILIKE %s", (title,))
-        movie = cur.fetchone()
-        
-        if not movie:
-            await update.message.reply_text(f"❌ Movie '{title}' not found. Add it first with /addmovie")
-            return
-        
-        movie_id = movie
-        
-        # Determine if it's file_id or URL
-        file_id = None
-        url = None
-        if any(value.startswith(prefix) for prefix in ["BQAC", "BAAC", "CAAC", "AQAC"]):
-            file_id = value
-        else:
-            url = value
-        
-        # Insert or update quality
-        cur.execute("""
-            INSERT INTO movie_files (movie_id, quality, url, file_id, file_size)
-            VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT (movie_id, quality) DO UPDATE SET
-                url = EXCLUDED.url,
-                file_id = EXCLUDED.file_id,
-                file_size = EXCLUDED.file_size
-        """, (movie_id, quality, url, file_id, file_size))
-        
-        conn.commit()
-        cur.close()
-        
-        size_text = f" ({file_size})" if file_size else ""
-        await update.message.reply_text(f"✅ Added {quality}{size_text} quality for '{title}'")
-
-    except Exception as e:
-        logger.error(f"Error in add_movie_quality: {e}")
-        await update.message.reply_text(f"❌ Error: {e}")
-    finally:
-        return_db_connection(conn)
+        if conn:
+            conn.close()
 
 async def bulk_add_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Add multiple movies at once"""
@@ -1941,18 +1939,17 @@ Movie3 file_id_here
             parts = line.split()
             if len(parts) < 2:
                 failed_count += 1
-                results.append(f"❌ Invalid line: {line[:30]}")
+                results.append(f"❌ Invalid line format: {line}")
                 continue
 
             url_or_id = parts[-1]
             title = ' '.join(parts[:-1])
 
-            conn = None
             try:
                 conn = get_db_connection()
                 if not conn:
                     failed_count += 1
-                    results.append(f"❌ {title} - DB connection failed")
+                    results.append(f"❌ {title} - Database connection failed")
                     continue
 
                 cur = conn.cursor()
@@ -1970,15 +1967,13 @@ Movie3 file_id_here
                     )
 
                 conn.commit()
-                cur.close()
+                conn.close()
 
                 success_count += 1
                 results.append(f"✅ {title}")
             except Exception as e:
                 failed_count += 1
-                results.append(f"❌ {title} - Error: {str(e)[:30]}")
-            finally:
-                return_db_connection(conn)
+                results.append(f"❌ {title} - Error: {str(e)}")
 
         result_message = f"""
 📊 Bulk Add Results:
@@ -1987,10 +1982,10 @@ Successfully added: {success_count}
 Failed: {failed_count}
 
 Details:
-""" + "\n".join(results[:15])
+""" + "\n".join(results[:10])
 
-        if len(results) > 15:
-            result_message += f"\n\n... और {len(results) - 15} more items"
+        if len(results) > 10:
+            result_message += f"\n\n... और {len(results) - 10} more items"
 
         await update.message.reply_text(result_message)
 
@@ -2036,14 +2031,14 @@ async def add_alias(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         conn.commit()
-        cur.close()
         await update.message.reply_text(f"✅ Alias '{alias}' successfully added for '{movie_title}'")
 
     except Exception as e:
         logger.error(f"Error adding alias: {e}")
         await update.message.reply_text(f"Error: {e}")
     finally:
-        return_db_connection(conn)
+        if conn:
+            conn.close()
 
 async def list_aliases(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """List all aliases for a movie"""
@@ -2071,27 +2066,27 @@ async def list_aliases(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """, (movie_title,))
 
         result = cur.fetchone()
-        cur.close()
 
         if not result:
             await update.message.reply_text(f"'{movie_title}' डेटाबेस में नहीं मिली।")
             return
 
         title, aliases = result
-        aliases_list = "\n".join(f"- {alias}" for alias in aliases if alias) if aliases and aliases else "कोई aliases नहीं हैं"
+        aliases_list = "\n".join(f"- {alias}" for alias in aliases) if aliases else "कोई aliases नहीं हैं"
 
-        await update.message.reply_text(f"🎬 <b>{escape_html(title)}</b>\n\n<b>Aliases:</b>\n{aliases_list}", parse_mode='HTML')
+        await update.message.reply_text(f"🎬 **{title}**\n\n**Aliases:**\n{aliases_list}", parse_mode='Markdown')
 
     except Exception as e:
         logger.error(f"Error listing aliases: {e}")
         await update.message.reply_text(f"Error: {e}")
     finally:
-        return_db_connection(conn)
+        if conn:
+            conn.close()
 
 async def bulk_add_aliases(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Add multiple aliases at once"""
     if update.effective_user.id != ADMIN_USER_ID:
-        await update.message.reply_text("Sry baby 😘 sirf admin hi yeh command use kar sakta hai 💅")
+        await update.message.reply_text("Sorry Darling, सिर्फ एडमिन ही इस कमांड का इस्तेमाल कर सकते हैं।")
         return
 
     conn = None
@@ -2151,7 +2146,6 @@ Movie2: alias4, alias5
                     failed_count += 1
 
         conn.commit()
-        cur.close()
 
         await update.message.reply_text(f"""
 📊 Alias Bulk Add Results:
@@ -2164,7 +2158,8 @@ Failed: {failed_count}
         logger.error(f"Error in bulk alias add: {e}")
         await update.message.reply_text(f"Error: {e}")
     finally:
-        return_db_connection(conn)
+        if conn:
+            conn.close()
 
 async def notify_manually(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Manually notify users about a movie"""
@@ -2188,7 +2183,7 @@ async def notify_manually(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur.execute("SELECT id, title, url, file_id FROM movies WHERE title ILIKE %s LIMIT 1", (f'%{movie_title}%',))
         movie_found = cur.fetchone()
         cur.close()
-        return_db_connection(conn)
+        conn.close()
 
         if movie_found:
             movie_id, title, url, file_id = movie_found
@@ -2213,7 +2208,7 @@ async def notify_user_by_username(update: Update, context: ContextTypes.DEFAULT_
             await update.message.reply_text("Usage: /notifyuser @username Your message here")
             return
 
-        target_username = context.args.replace('@', '')
+        target_username = context.args[0].replace('@', '')
         message_text = ' '.join(context.args[1:])
 
         conn = get_db_connection()
@@ -2227,25 +2222,30 @@ async def notify_user_by_username(update: Update, context: ContextTypes.DEFAULT_
             (target_username,)
         )
         user = cur.fetchone()
-        cur.close()
 
         if not user:
-            await update.message.reply_text(f"❌ User @{target_username} not found in database.")
-            return_db_connection(conn)
+            await update.message.reply_text(f"❌ User `@{target_username}` not found in database.", parse_mode='Markdown')
+            cur.close()
+            conn.close()
             return
 
         user_id, first_name = user
 
-        await context.bot.send_message(chat_id=user_id, text=message_text)
-        await update.message.reply_text(f"✅ Message sent to @{target_username} ({first_name})")
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=message_text
+        )
+
+        await update.message.reply_text(f"✅ Message sent to `@{target_username}` ({first_name})", parse_mode='Markdown')
+
+        cur.close()
+        conn.close()
 
     except telegram.error.Forbidden:
         await update.message.reply_text(f"❌ User blocked the bot.")
     except Exception as e:
         logger.error(f"Error in notify_user_by_username: {e}")
         await update.message.reply_text(f"❌ Error: {e}")
-    finally:
-        return_db_connection(conn)
 
 async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Broadcast text message to all users"""
@@ -2268,11 +2268,11 @@ async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur = conn.cursor()
         cur.execute("SELECT DISTINCT user_id, first_name, username FROM user_requests")
         all_users = cur.fetchall()
-        cur.close()
-        return_db_connection(conn)
 
         if not all_users:
             await update.message.reply_text("No users found in database.")
+            cur.close()
+            conn.close()
             return
 
         status_msg = await update.message.reply_text(
@@ -2284,7 +2284,10 @@ async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         for user_id, first_name, username in all_users:
             try:
-                await context.bot.send_message(chat_id=user_id, text=message_text)
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=message_text
+                )
                 success_count += 1
                 await asyncio.sleep(0.05)
             except telegram.error.Forbidden:
@@ -2294,15 +2297,85 @@ async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.error(f"Failed broadcast to {user_id}: {e}")
 
         await status_msg.edit_text(
-            f"📊 <b>Broadcast Complete</b>\n\n"
+            f"📊 **Broadcast Complete**\n\n"
             f"✅ Sent: {success_count}\n"
             f"❌ Failed: {failed_count}\n"
-            f"📝 Total: {len(all_users)}",
-            parse_mode='HTML'
+            f"📝 Total: {len(all_users)}"
         )
+
+        cur.close()
+        conn.close()
 
     except Exception as e:
         logger.error(f"Error in broadcast_message: {e}")
+        await update.message.reply_text(f"❌ Error: {e}")
+
+async def schedule_notification(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Schedule a notification for later"""
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("⛔ Admin only command.")
+        return
+
+    try:
+        if not context.args or len(context.args) < 3:
+            await update.message.reply_text(
+                "Usage: /schedulenotify <minutes> <@username> <message>\n"
+                "Example: /schedulenotify 30 @john New movie arriving soon!"
+            )
+            return
+
+        delay_minutes = int(context.args[0])
+        target_username = context.args[1].replace('@', '')
+        message_text = ' '.join(context.args[2:])
+
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Database connection failed.")
+            return
+
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT DISTINCT user_id, first_name FROM user_requests WHERE username ILIKE %s LIMIT 1",
+            (target_username,)
+        )
+        user = cur.fetchone()
+
+        if not user:
+            await update.message.reply_text(f"❌ User `@{target_username}` not found.", parse_mode='Markdown')
+            cur.close()
+            conn.close()
+            return
+
+        user_id, first_name = user
+
+        async def send_scheduled_notification():
+            await asyncio.sleep(delay_minutes * 60)
+            try:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=message_text
+                )
+                logger.info(f"Scheduled notification sent to {user_id}")
+            except Exception as e:
+                logger.error(f"Failed to send scheduled notification to {user_id}: {e}")
+
+        asyncio.create_task(send_scheduled_notification())
+
+        await update.message.reply_text(
+            f"⏰ Notification scheduled!\n\n"
+            f"To: `@{target_username}` ({first_name})\n"
+            f"Delay: {delay_minutes} minutes\n"
+            f"Message: {message_text[:50]}...",
+            parse_mode='Markdown'
+        )
+
+        cur.close()
+        conn.close()
+
+    except ValueError:
+        await update.message.reply_text("❌ Invalid delay. Please provide number of minutes.")
+    except Exception as e:
+        logger.error(f"Error in schedule_notification: {e}")
         await update.message.reply_text(f"❌ Error: {e}")
 
 async def notify_user_with_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2321,11 +2394,12 @@ async def notify_user_with_media(update: Update, context: ContextTypes.DEFAULT_T
 
         if not context.args:
             await update.message.reply_text(
-                "Usage: /notifyuserwithmedia @username [optional message]"
+                "Usage: /notifyuserwithmedia @username [optional message]\n"
+                "Example: /notifyuserwithmedia @amit002 Here's your requested movie!"
             )
             return
 
-        target_username = context.args.replace('@', '')
+        target_username = context.args[0].replace('@', '')
         optional_message = ' '.join(context.args[1:]) if len(context.args) > 1 else None
 
         replied_message = update.message.reply_to_message
@@ -2341,18 +2415,23 @@ async def notify_user_with_media(update: Update, context: ContextTypes.DEFAULT_T
             (target_username,)
         )
         user = cur.fetchone()
-        cur.close()
-        return_db_connection(conn)
 
         if not user:
-            await update.message.reply_text(f"❌ User @{target_username} not found in database.")
+            await update.message.reply_text(f"❌ User `@{target_username}` not found in database.", parse_mode='Markdown')
+            cur.close()
+            conn.close()
             return
 
         user_id, first_name = user
 
+        notification_header = ""
+        if optional_message:
+            notification_header = optional_message
+
         warning_msg = await context.bot.send_message(
             chat_id=user_id,
-            text="⚠️ ❌👉This file automatically❗️deletes after 1 minute❗️so please forward it to another chat👈❌"
+            text="⚠️ ❌👉This file automatically❗️deletes after 1 minute❗️so please forward it to another chat👈❌",
+            parse_mode='Markdown'
         )
 
         sent_msg = None
@@ -2364,7 +2443,7 @@ async def notify_user_with_media(update: Update, context: ContextTypes.DEFAULT_T
             sent_msg = await context.bot.send_document(
                 chat_id=user_id,
                 document=replied_message.document.file_id,
-                caption=optional_message if optional_message else None,
+                caption=notification_header if notification_header else None,
                 reply_markup=join_keyboard
             )
         elif replied_message.video:
@@ -2372,7 +2451,7 @@ async def notify_user_with_media(update: Update, context: ContextTypes.DEFAULT_T
             sent_msg = await context.bot.send_video(
                 chat_id=user_id,
                 video=replied_message.video.file_id,
-                caption=optional_message if optional_message else None,
+                caption=notification_header if notification_header else None,
                 reply_markup=join_keyboard
             )
         elif replied_message.audio:
@@ -2380,7 +2459,7 @@ async def notify_user_with_media(update: Update, context: ContextTypes.DEFAULT_T
             sent_msg = await context.bot.send_audio(
                 chat_id=user_id,
                 audio=replied_message.audio.file_id,
-                caption=optional_message if optional_message else None,
+                caption=notification_header if notification_header else None,
                 reply_markup=join_keyboard
             )
         elif replied_message.photo:
@@ -2389,7 +2468,7 @@ async def notify_user_with_media(update: Update, context: ContextTypes.DEFAULT_T
             sent_msg = await context.bot.send_photo(
                 chat_id=user_id,
                 photo=photo.file_id,
-                caption=optional_message if optional_message else None,
+                caption=notification_header if notification_header else None,
                 reply_markup=join_keyboard
             )
         elif replied_message.text:
@@ -2397,22 +2476,133 @@ async def notify_user_with_media(update: Update, context: ContextTypes.DEFAULT_T
             text_to_send = replied_message.text
             if optional_message:
                 text_to_send = f"{optional_message}\n\n{text_to_send}"
-            sent_msg = await context.bot.send_message(chat_id=user_id, text=text_to_send)
+            sent_msg = await context.bot.send_message(
+                chat_id=user_id,
+                text=text_to_send
+            )
         else:
             await update.message.reply_text("❌ Unsupported media type.")
+            cur.close()
+            conn.close()
             return
 
         if sent_msg and media_type != "text":
             asyncio.create_task(
-                delete_messages_after_delay(context, user_id, [sent_msg.message_id, warning_msg.message_id], 60)
+                delete_messages_after_delay(
+                    context,
+                    user_id,
+                    [sent_msg.message_id, warning_msg.message_id],
+                    60
+                )
             )
 
-        await update.message.reply_text(f"✅ <b>Notification Sent!</b>\n\nTo: @{target_username} ({first_name})\nMedia Type: {media_type.capitalize()}", parse_mode='HTML')
+        confirmation = f"✅ **Notification Sent!**\n\n"
+        confirmation += f"To: `@{target_username}` ({first_name})\n"
+        confirmation += f"Media Type: {media_type.capitalize()}"
+
+        await update.message.reply_text(confirmation, parse_mode='Markdown')
+
+        cur.close()
+        conn.close()
 
     except telegram.error.Forbidden:
         await update.message.reply_text(f"❌ User blocked the bot.")
     except Exception as e:
         logger.error(f"Error in notify_user_with_media: {e}")
+        await update.message.reply_text(f"❌ Error: {e}")
+
+async def broadcast_with_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Broadcast media to all users"""
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("⛔ Admin only command.")
+        return
+
+    replied_message = update.message.reply_to_message
+    if not replied_message:
+        await update.message.reply_text("❌ Please reply to a media message to broadcast it.")
+        return
+
+    try:
+        optional_message = ' '.join(context.args) if context.args else None
+
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Database connection failed.")
+            return
+
+        cur = conn.cursor()
+        cur.execute("SELECT DISTINCT user_id, first_name, username FROM user_requests")
+        all_users = cur.fetchall()
+
+        if not all_users:
+            await update.message.reply_text("No users found in database.")
+            cur.close()
+            conn.close()
+            return
+
+        status_msg = await update.message.reply_text(
+            f"📤 Broadcasting media to {len(all_users)} users...\n⏳ Please wait..."
+        )
+
+        success_count = 0
+        failed_count = 0
+        join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url="https://t.me/FilmFyBoxMoviesHD")]])
+
+        for user_id, first_name, username in all_users:
+            try:
+                if optional_message:
+                    await context.bot.send_message(
+                        chat_id=user_id,
+                        text=optional_message
+                    )
+
+                if replied_message.document:
+                    await context.bot.send_document(
+                        chat_id=user_id,
+                        document=replied_message.document.file_id,
+                        reply_markup=join_keyboard
+                    )
+                elif replied_message.video:
+                    await context.bot.send_video(
+                        chat_id=user_id,
+                        video=replied_message.video.file_id,
+                        reply_markup=join_keyboard
+                    )
+                elif replied_message.audio:
+                    await context.bot.send_audio(
+                        chat_id=user_id,
+                        audio=replied_message.audio.file_id,
+                        reply_markup=join_keyboard
+                    )
+                elif replied_message.photo:
+                    photo = replied_message.photo[-1]
+                    await context.bot.send_photo(
+                        chat_id=user_id,
+                        photo=photo.file_id,
+                        reply_markup=join_keyboard
+                    )
+
+                success_count += 1
+                await asyncio.sleep(0.1)
+
+            except telegram.error.Forbidden:
+                failed_count += 1
+            except Exception as e:
+                failed_count += 1
+                logger.error(f"Failed broadcast to {user_id}: {e}")
+
+        await status_msg.edit_text(
+            f"📊 **Broadcast Complete**\n\n"
+            f"✅ Sent: {success_count}\n"
+            f"❌ Failed: {failed_count}\n"
+            f"📝 Total: {len(all_users)}"
+        )
+
+        cur.close()
+        conn.close()
+
+    except Exception as e:
+        logger.error(f"Error in broadcast_with_media: {e}")
         await update.message.reply_text(f"❌ Error: {e}")
 
 async def quick_notify(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2439,6 +2629,7 @@ async def quick_notify(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         cur = conn.cursor()
+
         target_users = []
 
         if query.startswith('@'):
@@ -2458,7 +2649,7 @@ async def quick_notify(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not target_users:
             await update.message.reply_text(f"❌ No users found for '{query}'")
             cur.close()
-            return_db_connection(conn)
+            conn.close()
             return
 
         success_count = 0
@@ -2505,10 +2696,59 @@ async def quick_notify(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         cur.close()
-        return_db_connection(conn)
+        conn.close()
 
     except Exception as e:
         logger.error(f"Error in quick_notify: {e}")
+        await update.message.reply_text(f"❌ Error: {e}")
+
+async def forward_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Forward message from channel to user"""
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("⛔ Admin only command.")
+        return
+
+    replied_message = update.message.reply_to_message
+    if not replied_message:
+        await update.message.reply_text("❌ Reply to a message first!")
+        return
+
+    if not context.args:
+        await update.message.reply_text("Usage: /forwardto @username_or_userid")
+        return
+
+    try:
+        target_username = context.args[0].replace('@', '')
+
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Database connection failed.")
+            return
+
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT DISTINCT user_id, first_name FROM user_requests WHERE username ILIKE %s LIMIT 1",
+            (target_username,)
+        )
+        user = cur.fetchone()
+
+        if not user:
+            await update.message.reply_text(f"❌ User `@{target_username}` not found.", parse_mode='Markdown')
+            cur.close()
+            conn.close()
+            return
+
+        user_id, first_name = user
+
+        await replied_message.forward(chat_id=user_id)
+
+        await update.message.reply_text(f"✅ Forwarded to `@{target_username}` ({first_name})", parse_mode='Markdown')
+
+        cur.close()
+        conn.close()
+
+    except Exception as e:
+        logger.error(f"Error in forward_to_user: {e}")
         await update.message.reply_text(f"❌ Error: {e}")
 
 async def get_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2522,7 +2762,7 @@ async def get_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        target_username = context.args.replace('@', '')
+        target_username = context.args[0].replace('@', '')
 
         conn = get_db_connection()
         if not conn:
@@ -2533,7 +2773,9 @@ async def get_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         cur.execute("""
             SELECT
-                user_id, username, first_name,
+                user_id,
+                username,
+                first_name,
                 COUNT(*) as total_requests,
                 SUM(CASE WHEN notified = TRUE THEN 1 ELSE 0 END) as fulfilled,
                 MAX(requested_at) as last_request
@@ -2545,9 +2787,9 @@ async def get_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_info = cur.fetchone()
 
         if not user_info:
-            await update.message.reply_text(f"❌ No data found for @{target_username}")
+            await update.message.reply_text(f"❌ No data found for `@{target_username}`", parse_mode='Markdown')
             cur.close()
-            return_db_connection(conn)
+            conn.close()
             return
 
         user_id, username, first_name, total, fulfilled, last_request = user_info
@@ -2561,36 +2803,37 @@ async def get_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
             LIMIT 5
         """, (user_id,))
         recent_requests = cur.fetchall()
-        cur.close()
-        return_db_connection(conn)
 
-        username_str = f"@{username}" if username else "N/A"
+        username_str = f"`@{username}`" if username else "N/A"
 
         info_text = f"""
-👤 <b>User Information</b>
+👤 **User Information**
 
-<b>Basic Info:</b>
-• Name: {escape_html(first_name or 'Unknown')}
+**Basic Info:**
+• Name: {first_name}
 • Username: {username_str}
-• User ID: <code>{user_id}</code>
+• User ID: `{user_id}`
 
-<b>Statistics:</b>
+**Statistics:**
 • Total Requests: {total}
 • Fulfilled: {fulfilled}
 • Pending: {total - fulfilled}
 • Last Request: {last_request.strftime('%Y-%m-%d %H:%M') if last_request else 'N/A'}
 
-<b>Recent Requests:</b>
+**Recent Requests:**
 """
 
         if recent_requests:
             for movie, req_time, notified in recent_requests:
                 status = "✅" if notified else "⏳"
-                info_text += f"{status} {escape_html(movie)} - {req_time.strftime('%m/%d %H:%M')}\n"
+                info_text += f"{status} {movie} - {req_time.strftime('%m/%d %H:%M')}\n"
         else:
             info_text += "No recent requests."
 
-        await update.message.reply_text(info_text, parse_mode='HTML')
+        await update.message.reply_text(info_text, parse_mode='Markdown')
+
+        cur.close()
+        conn.close()
 
     except Exception as e:
         logger.error(f"Error in get_user_info: {e}")
@@ -2604,8 +2847,8 @@ async def list_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         page = 1
-        if context.args and context.args.isdigit():
-            page = int(context.args)
+        if context.args and context.args[0].isdigit():
+            page = int(context.args[0])
 
         per_page = 10
         offset = (page - 1) * per_page
@@ -2618,11 +2861,17 @@ async def list_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur = conn.cursor()
 
         cur.execute("SELECT COUNT(DISTINCT user_id) FROM user_requests")
+        
         result = cur.fetchone()
-        total_users = result if result else 0
+total_users = result[0] if result else 0
 
         cur.execute("""
-            SELECT user_id, username, first_name, COUNT(*) as requests, MAX(requested_at) as last_seen
+            SELECT
+                user_id,
+                username,
+                first_name,
+                COUNT(*) as requests,
+                MAX(requested_at) as last_seen
             FROM user_requests
             GROUP BY user_id, username, first_name
             ORDER BY MAX(requested_at) DESC
@@ -2630,25 +2879,26 @@ async def list_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """, (per_page, offset))
 
         users = cur.fetchall()
-        cur.close()
-        return_db_connection(conn)
 
         total_pages = (total_users + per_page - 1) // per_page if total_users > 0 else 1
 
-        users_text = f"👥 <b>Bot Users</b> (Page {page}/{total_pages})\n\n"
+        users_text = f"👥 **Bot Users** (Page {page}/{total_pages})\n\n"
 
         if not users:
             users_text += "No users found on this page."
         else:
             for idx, (user_id, username, first_name, req_count, last_seen) in enumerate(users, start=offset+1):
-                username_str = f"@{username}" if username else "N/A"
-                users_text += f"{idx}. {escape_html(first_name or 'Unknown')} ({username_str})\n"
-                users_text += f"   ID: <code>{user_id}</code> | Requests: {req_count}\n"
+                username_str = f"`@{username}`" if username else "N/A"
+                users_text += f"{idx}. {first_name} ({username_str})\n"
+                users_text += f"   ID: `{user_id}` | Requests: {req_count}\n"
                 users_text += f"   Last seen: {last_seen.strftime('%Y-%m-%d %H:%M')}\n\n"
 
         users_text += f"\n📊 Total Users: {total_users}"
 
-        await update.message.reply_text(users_text, parse_mode='HTML')
+        await update.message.reply_text(users_text, parse_mode='Markdown')
+
+        cur.close()
+        conn.close()
 
     except Exception as e:
         logger.error(f"Error in list_all_users: {e}")
@@ -2661,6 +2911,8 @@ async def get_bot_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     conn = None
+    cur = None
+
     try:
         conn = get_db_connection()
         if not conn:
@@ -2670,19 +2922,19 @@ async def get_bot_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur = conn.cursor()
         
         cur.execute("SELECT COUNT(*) FROM movies")
-        total_movies = cur.fetchone()
+        total_movies = cur.fetchone()[0]
         
         cur.execute("SELECT COUNT(DISTINCT user_id) FROM user_requests")
-        total_users = cur.fetchone()
+        total_users = cur.fetchone()[0]
 
         cur.execute("SELECT COUNT(*) FROM user_requests")
-        total_requests = cur.fetchone()
+        total_requests = cur.fetchone()[0]
 
         cur.execute("SELECT COUNT(*) FROM user_requests WHERE notified = TRUE")
-        fulfilled = cur.fetchone()
+        fulfilled = cur.fetchone()[0]
 
         cur.execute("SELECT COUNT(*) FROM user_requests WHERE DATE(requested_at) = CURRENT_DATE")
-        today_requests = cur.fetchone()
+        today_requests = cur.fetchone()[0]
 
         cur.execute("""
             SELECT first_name, username, COUNT(*) as req_count
@@ -2692,40 +2944,41 @@ async def get_bot_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             LIMIT 5
         """)
         top_users = cur.fetchall()
-        cur.close()
 
         fulfillment_rate = (fulfilled / total_requests * 100) if total_requests > 0 else 0
 
         stats_text = f"""
-📊 <b>Bot Statistics</b>
+📊 **Bot Statistics**
 
-<b>Database:</b>
+**Database:**
 • Movies: {total_movies}
 • Users: {total_users}
 • Total Requests: {total_requests}
 • Fulfilled: {fulfilled}
 • Pending: {total_requests - fulfilled}
 
-<b>Activity:</b>
+**Activity:**
 • Today's Requests: {today_requests}
 • Fulfillment Rate: {fulfillment_rate:.1f}%
 
-<b>Top Requesters:</b>
+**Top Requesters:**
 """
         if top_users:
             for name, username, count in top_users:
-                username_str = f"@{username}" if username else "N/A"
-                stats_text += f"• {escape_html(name or 'Unknown')} ({username_str}): {count} requests\n"
+                username_str = f"`@{username}`" if username else "N/A"
+                stats_text += f"• {name} ({username_str}): {count} requests\n"
         else:
             stats_text += "No user data available."
             
-        await update.message.reply_text(stats_text, parse_mode='HTML')
+        await update.message.reply_text(stats_text, parse_mode='Markdown')
         
     except Exception as e:
         logger.error(f"Error in get_bot_stats: {e}")
         await update.message.reply_text(f"❌ Error while fetching stats: {e}")
+        
     finally:
-        return_db_connection(conn)
+        if cur: cur.close()
+        if conn: conn.close()
 
 async def admin_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show admin commands help"""
@@ -2734,35 +2987,37 @@ async def admin_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     help_text = """
-👑 <b>Admin Commands Guide</b>
+👑 **Admin Commands Guide**
 
-<b>Media Notifications:</b>
-• /notifyuserwithmedia @user [msg] - Reply to media + send to user
-• /qnotify &lt;@user|MovieTitle&gt; - Quick notify (reply to media)
-• /broadcastmedia [msg] - Broadcast media to all (reply to media)
+**Media Notifications:**
+• `/notifyuserwithmedia @user [msg]` - Reply to media + send to user
+• `/qnotify <@user|MovieTitle>` - Quick notify (reply to media)
+• `/forwardto @user` - Forward channel message (reply to msg)
+• `/broadcastmedia [msg]` - Broadcast media to all (reply to media)
 
-<b>Text Notifications:</b>
-• /notifyuser @user &lt;msg&gt; - Send text message
-• /broadcast &lt;msg&gt; - Text broadcast to all
+**Text Notifications:**
+• `/notifyuser @user <msg>` - Send text message
+• `/broadcast <msg>` - Text broadcast to all
+• `/schedulenotify <min> @user <msg>` - Schedule notification
 
-<b>User Management:</b>
-• /userinfo @username - Get user stats
-• /listusers [page] - List all users
+**User Management:**
+• `/userinfo @username` - Get user stats
+• `/listusers [page]` - List all users
 
-<b>Movie Management:</b>
-• /addmovie &lt;Title&gt; &lt;URL|FileID|unreleased&gt; - Add movie
-• /addquality &lt;Title&gt; &lt;Quality&gt; &lt;FileID/URL&gt; [Size] - Add quality
-• /bulkadd - Bulk add movies (multi-line)
-• /addalias &lt;Title&gt; &lt;alias&gt; - Add alias
-• /aliasbulk - Bulk add aliases (multi-line)
-• /aliases &lt;MovieTitle&gt; - List aliases
-• /notify &lt;MovieTitle&gt; - Auto-notify requesters
+**Movie Management:**
+• `/addmovie <Title> <URL|FileID>` - Add movie
+• `/bulkadd` - Bulk add movies (multi-line)
+• `/addalias <Title> <alias>` - Add alias
+• `/aliasbulk` - Bulk add aliases (multi-line)
+• `/aliases <MovieTitle>` - List aliases
+• `/notify <MovieTitle>` - Auto-notify requesters
 
-<b>Stats & Help:</b>
-• /stats - Bot statistics
-• /adminhelp - This help message
+**Stats & Help:**
+• `/stats` - Bot statistics
+• `/adminhelp` - This help message
 """
-    await update.message.reply_text(help_text, parse_mode='HTML')
+
+    await update.message.reply_text(help_text, parse_mode='Markdown')
 
 # ==================== ERROR HANDLER ====================
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
@@ -2818,12 +3073,12 @@ def main():
 
     try:
         setup_database()
-        init_connection_pool()
     except Exception as e:
         logger.error(f"Database setup failed but continuing: {e}")
 
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).read_timeout(30).write_timeout(30).build()
 
+    # Custom handler for request flow
     async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle text messages based on context"""
         if context.user_data.get('awaiting_request'):
@@ -2831,6 +3086,7 @@ def main():
         else:
             return await main_menu(update, context)
 
+    # Conversation handler for user interaction flow
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start)],
         states={
@@ -2844,13 +3100,12 @@ def main():
         per_chat=True,
     )
 
-    # Register handlers
+    # Register callback handler FIRST
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(conv_handler)
 
     # Admin commands
     application.add_handler(CommandHandler("addmovie", add_movie))
-    application.add_handler(CommandHandler("addquality", add_movie_quality))
     application.add_handler(CommandHandler("bulkadd", bulk_add_movies))
     application.add_handler(CommandHandler("notify", notify_manually))
     application.add_handler(CommandHandler("addalias", add_alias))
@@ -2858,11 +3113,14 @@ def main():
     application.add_handler(CommandHandler("aliasbulk", bulk_add_aliases))
     application.add_handler(MessageHandler(filters.PHOTO & filters.CaptionRegex(r'^/post_query'), admin_post_query))
 
-    # Notification commands
+    # Advanced notification commands
     application.add_handler(CommandHandler("notifyuser", notify_user_by_username))
     application.add_handler(CommandHandler("broadcast", broadcast_message))
+    application.add_handler(CommandHandler("schedulenotify", schedule_notification))
     application.add_handler(CommandHandler("notifyuserwithmedia", notify_user_with_media))
     application.add_handler(CommandHandler("qnotify", quick_notify))
+    application.add_handler(CommandHandler("forwardto", forward_to_user))
+    application.add_handler(CommandHandler("broadcastmedia", broadcast_with_media))
 
     # User management commands
     application.add_handler(CommandHandler("userinfo", get_user_info))
@@ -2874,13 +3132,13 @@ def main():
 
     application.add_error_handler(error_handler)
 
-    # Start Flask in background
+    # Start Flask in a separate thread
     flask_thread = threading.Thread(target=run_flask)
     flask_thread.daemon = True
     flask_thread.start()
-    logger.info("Flask server started in background thread.")
+    logger.info("Flask server started in a background thread.")
 
-    # Run bot
+    # Run the bot
     logger.info("Starting bot polling...")
     application.run_polling()
 
