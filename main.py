@@ -2862,9 +2862,8 @@ async def list_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur = conn.cursor()
 
         cur.execute("SELECT COUNT(DISTINCT user_id) FROM user_requests")
-        
         result = cur.fetchone()
-total_users = result[0] if result else 0
+        total_users = result[0] if result else 0    # ✅ 8 SPACES INDENTATION
 
         cur.execute("""
             SELECT
