@@ -1039,29 +1039,59 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
 # ==================== TELEGRAM BOT HANDLERS ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start command handler"""
+    """
+    Start command handler. 
+    Handles:
+    1. Normal start (/start)
+    2. Deep links for direct movie delivery (/start movie_123)
+    3. Auto-search deep links from channel (/start q_MovieName)
+    """
     try:
-        welcome_text = """
+        # Check for deep link payload
+        if context.args and context.args[0]:
+            payload = context.args[0]
+            
+            # --- CASE 1: DIRECT MOVIE ID (e.g., movie_123) ---
+            if payload.startswith("movie_"):
+                try:
+                    movie_id = int(payload.split('_')[1])
+                    chat_id = update.effective_chat.id
+                    # Background task to deliver movie
+                    asyncio.create_task(deliver_movie_on_start(context, movie_id, chat_id))
+                except (IndexError, ValueError) as e:
+                    logger.error(f"Error processing movie link: {e}")
+                    await update.message.reply_text("❌ Invalid link.")
+            
+            # --- CASE 2: AUTO SEARCH (e.g., q_Family_Man) ---
+            # 👇 YAHI WALA MISSING THA 👇
+            elif payload.startswith("q_"):
+                # Decode query: q_Family_Man -> Family Man
+                query_text = payload.replace("q_", "").replace("_", " ")
+                
+                # Update user message object to simulate text input
+                # This makes search_movies() think the user typed the name
+                update.message.text = query_text
+                
+                # Call search function directly
+                return await search_movies(update, context)
+
+    except Exception as e:
+        logger.error(f"Error in start: {e}")
+
+    # --- NORMAL WELCOME MESSAGE (Fallback) ---
+    welcome_text = """
 📨 Sᴇɴᴅ Mᴏᴠɪᴇ Oʀ Sᴇʀɪᴇs Nᴀᴍᴇ ᴀɴᴅ Yᴇᴀʀ Aꜱ Pᴇʀ Gᴏᴏɢʟᴇ Sᴘᴇʟʟɪɴɢ..!! 👍
 
 ⚠️ Exᴀᴍᴘʟᴇ Fᴏʀ Mᴏᴠɪᴇ 👇
-
-👉 Jailer
 👉 Jailer 2023
 
 ⚠️ Exᴀᴍᴘʟᴇ Fᴏʀ WᴇʙSᴇʀɪᴇs 👇
-
-👉 Stranger Things
-👉 Stranger Things S02 E04
+👉 Stranger Things S02
 
 ⚠️ ᴅᴏɴ'ᴛ ᴀᴅᴅ ᴇᴍᴏᴊɪꜱ ᴀɴᴅ ꜱʏᴍʙᴏʟꜱ ɪɴ ᴍᴏᴠɪᴇ ɴᴀᴍᴇ, ᴜꜱᴇ ʟᴇᴛᴛᴇʀꜱ ᴏɴʟʏ..!! ❌
 """
-        msg = await update.message.reply_text(welcome_text, reply_markup=get_main_keyboard())
-        track_message_for_deletion(update.effective_chat.id, msg.message_id, 300)
-        return MAIN_MENU
-    except Exception as e:
-        logger.error(f"Error in start command: {e}")
-
+    await update.message.reply_text(welcome_text, reply_markup=get_main_keyboard())
+    return MAIN_MENU
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle main menu options"""
     try:
@@ -1671,10 +1701,12 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
 
         channel_caption = (
-            f"🎬 **{query_text}**\n"
-            f"━━━━━━━━━━━━━━━━━\n"
+            f"🎬 **{query_text}** 🎬\n\n"
+            f"✅ **File Uploaded Successfully!**\n"
+            f"➖➖➖➖➖➖➖➖➖➖\n"
+            f"⚡ **Fast Download Links Available**\n"
             f"👇 **Download from any Bot:**\n"
-            f"━━━━━━━━━━━━━━━━━"
+            f"➖➖➖➖➖➖➖➖➖➖"
         )
         
         # Channel par bhejo (ADMIN_CHANNEL_ID use karein jo env me set hai)
