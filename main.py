@@ -1095,7 +1095,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     try:
         # Check for deep link payload
-        if context.args and context.args[0]:
+        if context.args and len(context.args) > 0 and context.args[0]:
             payload = context.args[0]
             
             # --- CASE 1: DIRECT MOVIE ID (e.g., movie_123) ---
@@ -1104,44 +1104,68 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     movie_id = int(payload.split('_')[1])
                     chat_id = update.effective_chat.id
                     
-                    # Pehle welcome type message
-                    await update.message.reply_text(
-                        "🎬 Aapka movie link process ho raha hai...\nPlease wait! ⏳"
-                    )
-                    
-                    # Movie deliver karo
+                    await update.message.reply_text("🎬 Movie load ho rahi hai... Please wait! ⏳")
                     await deliver_movie_on_start(context, movie_id, chat_id)
+                    return MAIN_MENU
                     
                 except (IndexError, ValueError) as e:
                     logger.error(f"Error processing movie link: {e}")
                     await update.message.reply_text("❌ Invalid link.")
-                
-                return MAIN_MENU  # ✅ RETURN ADDED!
+                    return MAIN_MENU
             
             # --- CASE 2: AUTO SEARCH (e.g., q_Family_Man) ---
             elif payload.startswith("q_"):
-                # Decode query: q_Family_Man -> Family Man
-                query_text = payload.replace("q_", "", 1)  # Sirf pehla "q_" remove karo
-                query_text = query_text.replace("_", " ")  # Underscores to spaces
-                query_text = " ".join(query_text.split())  # Multiple spaces fix
-                
-                logger.info(f"Deep link search query: {query_text}")
-                
-                # Safety check
-                if not query_text.strip():
-                    await update.message.reply_text("❌ Invalid search query.")
+                try:
+                    # Decode query
+                    query_text = payload.replace("q_", "", 1)
+                    query_text = query_text.replace("_", " ")
+                    query_text = " ".join(query_text.split())
+                    
+                    logger.info(f"Deep link search query: {query_text}")
+                    
+                    if not query_text or not query_text.strip():
+                        await update.message.reply_text("❌ Invalid search query.")
+                        return MAIN_MENU
+                    
+                    # ✅ FIXED: Direct search
+                    movies_found = get_movies_from_db(query_text, limit=10)
+                    
+                    if not movies_found:
+                        keyboard = InlineKeyboardMarkup([
+                            [InlineKeyboardButton("🙋 Request This Movie", callback_data=f"request_{query_text[:50]}")]
+                        ])
+                        await update.message.reply_text(
+                            f"😕 Sorry, '{query_text}' not found.\n\nWould you like to request it?",
+                            reply_markup=keyboard
+                        )
+                        return MAIN_MENU
+                    
+                    elif len(movies_found) == 1:
+                        movie_id, title, url, file_id = movies_found[0]
+                        await send_movie_to_user(update, context, movie_id, title, url, file_id)
+                        return MAIN_MENU
+                    
+                    else:
+                        context.user_data['search_results'] = movies_found
+                        context.user_data['search_query'] = query_text
+                        
+                        keyboard = create_movie_selection_keyboard(movies_found, page=0)
+                        await update.message.reply_text(
+                            f"🎬 **Found {len(movies_found)} results for '{query_text}'**\n\nPlease select:",
+                            reply_markup=keyboard,
+                            parse_mode='Markdown'
+                        )
+                        return MAIN_MENU
+                    
+                except Exception as e:
+                    logger.error(f"Error in q_ deep link: {e}")
+                    await update.message.reply_text("❌ Search error. Please type movie name manually.")
                     return MAIN_MENU
-                
-                # Update message text for search
-                update.message.text = query_text
-                
-                # Call search function directly
-                return await search_movies(update, context)
 
     except Exception as e:
         logger.error(f"Error in start: {e}")
 
-    # --- NORMAL WELCOME MESSAGE (Fallback) ---
+    # --- NORMAL WELCOME MESSAGE ---
     welcome_text = """
 📨 Sᴇɴᴅ Mᴏᴠɪᴇ Oʀ Sᴇʀɪᴇs Nᴀᴍᴇ ᴀɴᴅ Yᴇᴀʀ Aꜱ Pᴇʀ Gᴏᴏɢʟᴇ Sᴘᴇʟʟɪɴɢ..!! 👍
 
