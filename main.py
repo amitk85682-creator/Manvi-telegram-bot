@@ -1055,9 +1055,11 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
 async def deliver_movie_on_start(context: ContextTypes.DEFAULT_TYPE, movie_id: int, chat_id: int):
     """Deliver movie when user clicks deep link"""
     try:
+        logger.info(f"Delivering movie {movie_id} to chat {chat_id}")
+        
         conn = get_db_connection()
         if not conn:
-            await context.bot.send_message(chat_id=chat_id, text="❌ Database error.")
+            await context.bot.send_message(chat_id=chat_id, text="❌ Database connection failed.")
             return
         
         cur = conn.cursor()
@@ -1067,105 +1069,251 @@ async def deliver_movie_on_start(context: ContextTypes.DEFAULT_TYPE, movie_id: i
         conn.close()
         
         if not movie:
-            await context.bot.send_message(chat_id=chat_id, text="❌ Movie not found.")
+            await context.bot.send_message(chat_id=chat_id, text="❌ Movie not found in database.")
             return
         
         movie_id, title, url, file_id = movie
+        logger.info(f"Found movie: {title}, URL: {url}, FileID: {file_id}")
         
-        # Create a dummy update object for send_movie_to_user
-        class DummyUpdate:
-            class DummyChat:
-                id = chat_id
-            effective_chat = DummyChat()
+        # Check for multiple qualities
+        qualities = get_all_movie_qualities(movie_id)
         
-        await send_movie_to_user(DummyUpdate(), context, movie_id, title, url, file_id)
+        if qualities and len(qualities) > 1:
+            # Multiple qualities available - show selection
+            keyboard = create_quality_selection_keyboard(movie_id, title, qualities)
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"🎬 **{title}**\n\n⬇️ Please choose quality:",
+                reply_markup=keyboard,
+                parse_mode='Markdown'
+            )
+            return
         
+        # Single file - send directly
+        caption_text = (
+            f"🎬 <b>{title}</b>\n\n"
+            "🔗 <b>JOIN »</b> <a href='https://t.me/FilmFyBoxMoviesHD'>FilmfyBox</a>\n\n"
+            "🔹 <b>Enjoy your movie! 🎬✨</b>"
+        )
+        join_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("➡️ Join Channel", url="https://t.me/FilmFyBoxMoviesHD")]
+        ])
+        
+        # Warning message
+        warning_msg = await context.bot.send_message(
+            chat_id=chat_id,
+            text="⚠️ ❌👉This file automatically❗️deletes after 1 minute❗️so please forward it to another chat👈❌"
+        )
+        
+        sent_msg = None
+        
+        # Send based on available data
+        if file_id:
+            logger.info(f"Sending via file_id: {file_id[:20]}...")
+            sent_msg = await context.bot.send_document(
+                chat_id=chat_id,
+                document=file_id,
+                caption=caption_text,
+                parse_mode='HTML',
+                reply_markup=join_keyboard
+            )
+        elif url and url.startswith("https://t.me/c/"):
+            # Private channel link
+            try:
+                parts = url.rstrip('/').split('/')
+                from_chat_id = int("-100" + parts[-2])
+                message_id = int(parts[-1])
+                logger.info(f"Copying from private channel: {from_chat_id}/{message_id}")
+                sent_msg = await context.bot.copy_message(
+                    chat_id=chat_id,
+                    from_chat_id=from_chat_id,
+                    message_id=message_id,
+                    caption=caption_text,
+                    parse_mode='HTML',
+                    reply_markup=join_keyboard
+                )
+            except Exception as e:
+                logger.error(f"Failed to copy from private link: {e}")
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"🎬 Found: {title}\n\n❌ Could not fetch file. Please try normal search."
+                )
+        elif url and url.startswith("https://t.me/"):
+            # Public channel link
+            try:
+                parts = url.rstrip('/').split('/')
+                username = parts[-2].lstrip("@")
+                message_id = int(parts[-1])
+                logger.info(f"Copying from public channel: @{username}/{message_id}")
+                sent_msg = await context.bot.copy_message(
+                    chat_id=chat_id,
+                    from_chat_id=f"@{username}",
+                    message_id=message_id,
+                    caption=caption_text,
+                    parse_mode='HTML',
+                    reply_markup=join_keyboard
+                )
+            except Exception as e:
+                logger.error(f"Failed to copy from public link: {e}")
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"🎬 Found: {title}\n\n❌ Could not fetch file."
+                )
+        elif url and url.startswith("http"):
+            # External URL
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"🎬 {title}\n\n🔗 Watch here: {url}",
+                reply_markup=join_keyboard
+            )
+        else:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"❌ No file available for: {title}"
+            )
+        
+        # Schedule auto-delete
+        if sent_msg:
+            asyncio.create_task(
+                delete_messages_after_delay(
+                    context,
+                    chat_id,
+                    [sent_msg.message_id, warning_msg.message_id],
+                    60
+                )
+            )
+            
     except Exception as e:
-        logger.error(f"Error in deliver_movie_on_start: {e}")
-        await context.bot.send_message(chat_id=chat_id, text="❌ Error delivering movie.")
+        logger.error(f"Error in deliver_movie_on_start: {e}", exc_info=True)
+        try:
+            await context.bot.send_message(chat_id=chat_id, text="❌ Error delivering movie. Please try again.")
+        except:
+            pass
 
 # ==================== TELEGRAM BOT HANDLERS ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Start command handler. 
-    Handles:
-    1. Normal start (/start)
-    2. Deep links for direct movie delivery (/start movie_123)
-    3. Auto-search deep links from channel (/start q_MovieName)
+    Start command handler with PROPER deep link handling
     """
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    
+    logger.info(f"START called by user {user_id}, args: {context.args}")
+    
     try:
-        # Check for deep link payload
-        if context.args and len(context.args) > 0 and context.args[0]:
+        # ========== DEEP LINK HANDLING ==========
+        if context.args and len(context.args) > 0:
             payload = context.args[0]
+            logger.info(f"Deep link payload received: '{payload}'")
             
-            # --- CASE 1: DIRECT MOVIE ID (e.g., movie_123) ---
+            # --- CASE 1: DIRECT MOVIE ID (movie_123) ---
             if payload.startswith("movie_"):
                 try:
                     movie_id = int(payload.split('_')[1])
-                    chat_id = update.effective_chat.id
+                    logger.info(f"Movie ID extracted: {movie_id}")
                     
-                    await update.message.reply_text("🎬 Movie load ho rahi hai... Please wait! ⏳")
+                    loading_msg = await update.message.reply_text("🎬 Movie load ho rahi hai... Please wait! ⏳")
+                    
                     await deliver_movie_on_start(context, movie_id, chat_id)
+                    
+                    # Delete loading message
+                    try:
+                        await loading_msg.delete()
+                    except:
+                        pass
+                    
                     return MAIN_MENU
                     
                 except (IndexError, ValueError) as e:
-                    logger.error(f"Error processing movie link: {e}")
-                    await update.message.reply_text("❌ Invalid link.")
+                    logger.error(f"Invalid movie link format: {e}")
+                    await update.message.reply_text("❌ Invalid movie link.", reply_markup=get_main_keyboard())
+                    return MAIN_MENU
+                except Exception as e:
+                    logger.error(f"Error delivering movie: {e}")
+                    await update.message.reply_text("❌ Error loading movie. Try again.", reply_markup=get_main_keyboard())
                     return MAIN_MENU
             
-            # --- CASE 2: AUTO SEARCH (e.g., q_Family_Man) ---
+            # --- CASE 2: AUTO SEARCH (q_Movie_Name) ---
             elif payload.startswith("q_"):
                 try:
-                    # Decode query
-                    query_text = payload.replace("q_", "", 1)
+                    # Decode query: q_Family_Man_S02 → Family Man S02
+                    query_text = payload[2:]  # Remove 'q_'
                     query_text = query_text.replace("_", " ")
-                    query_text = " ".join(query_text.split())
+                    query_text = " ".join(query_text.split()).strip()
                     
-                    logger.info(f"Deep link search query: {query_text}")
+                    logger.info(f"Deep link search query decoded: '{query_text}'")
                     
-                    if not query_text or not query_text.strip():
-                        await update.message.reply_text("❌ Invalid search query.")
+                    if not query_text:
+                        await update.message.reply_text("❌ Empty search query.", reply_markup=get_main_keyboard())
                         return MAIN_MENU
                     
-                    # ✅ FIXED: Direct search
+                    # Show searching message
+                    searching_msg = await update.message.reply_text(f"🔍 Searching for '{query_text}'...")
+                    
+                    # Search database
                     movies_found = get_movies_from_db(query_text, limit=10)
                     
+                    logger.info(f"Search results: {len(movies_found)} movies found")
+                    
+                    # Delete searching message
+                    try:
+                        await searching_msg.delete()
+                    except:
+                        pass
+                    
+                    # --- NO RESULTS ---
                     if not movies_found:
                         keyboard = InlineKeyboardMarkup([
-                            [InlineKeyboardButton("🙋 Request This Movie", callback_data=f"request_{query_text[:50]}")]
+                            [InlineKeyboardButton("🙋 Request This Movie", callback_data=f"request_{query_text[:40]}")]
                         ])
                         await update.message.reply_text(
-                            f"😕 Sorry, '{query_text}' not found.\n\nWould you like to request it?",
+                            f"😕 Sorry, '{query_text}' not found in database.\n\n"
+                            "Would you like to request it?",
                             reply_markup=keyboard
                         )
                         return MAIN_MENU
                     
+                    # --- SINGLE RESULT ---
                     elif len(movies_found) == 1:
                         movie_id, title, url, file_id = movies_found[0]
+                        logger.info(f"Single result found: {title}")
                         await send_movie_to_user(update, context, movie_id, title, url, file_id)
                         return MAIN_MENU
                     
+                    # --- MULTIPLE RESULTS ---
                     else:
                         context.user_data['search_results'] = movies_found
                         context.user_data['search_query'] = query_text
                         
                         keyboard = create_movie_selection_keyboard(movies_found, page=0)
                         await update.message.reply_text(
-                            f"🎬 **Found {len(movies_found)} results for '{query_text}'**\n\nPlease select:",
+                            f"🎬 Found {len(movies_found)} results for '{query_text}'\n\n"
+                            "👇 Please select your movie:",
                             reply_markup=keyboard,
                             parse_mode='Markdown'
                         )
                         return MAIN_MENU
                     
                 except Exception as e:
-                    logger.error(f"Error in q_ deep link: {e}")
-                    await update.message.reply_text("❌ Search error. Please type movie name manually.")
+                    logger.error(f"Error in q_ deep link processing: {e}", exc_info=True)
+                    await update.message.reply_text(
+                        "❌ Search error occurred. Please type movie name manually.",
+                        reply_markup=get_main_keyboard()
+                    )
                     return MAIN_MENU
-
+            
+            # --- UNKNOWN PAYLOAD ---
+            else:
+                logger.warning(f"Unknown deep link payload: {payload}")
+                # Fall through to normal welcome
+        
     except Exception as e:
-        logger.error(f"Error in start: {e}")
-
-    # --- NORMAL WELCOME MESSAGE ---
+        logger.error(f"Critical error in start deep link: {e}", exc_info=True)
+        # Don't return here - show welcome message as fallback
+    
+    # ========== NORMAL WELCOME MESSAGE ==========
+    logger.info(f"Showing normal welcome to user {user_id}")
+    
     welcome_text = """
 📨 Sᴇɴᴅ Mᴏᴠɪᴇ Oʀ Sᴇʀɪᴇs Nᴀᴍᴇ ᴀɴᴅ Yᴇᴀʀ Aꜱ Pᴇʀ Gᴏᴏɢʟᴇ Sᴘᴇʟʟɪɴɢ..!! 👍
 
