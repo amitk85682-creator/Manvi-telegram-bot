@@ -79,6 +79,7 @@ GROUP_CHAT_ID = os.environ.get('GROUP_CHAT_ID')
 ADMIN_CHANNEL_ID = os.environ.get('ADMIN_CHANNEL_ID')
 REQUIRED_CHANNEL_ID = os.environ.get('REQUIRED_CHANNEL_ID', '-1003330141433')
 FILMFYBOX_CHANNEL_URL = 'https://t.me/FilmFyBoxMoviesHD'  # Yahan apna Channel Link dalein
+REQUEST_CHANNEL_ID = os.environ.get('REQUEST_CHANNEL_ID', '-1003078990647')
 
 # --- Random GIF IDs for Search Failure ---
 SEARCH_ERROR_GIFS = [
@@ -612,7 +613,7 @@ async def analyze_intent(message_text):
 # ==================== NOTIFICATION FUNCTIONS ====================
 async def send_admin_notification(context, user, movie_title, group_info=None):
     """Send notification to admin channel about a new request"""
-    if not ADMIN_CHANNEL_ID:
+    if not REQUEST_CHANNEL_ID:
         return
 
     try:
@@ -638,7 +639,7 @@ Time: {datetime.now().strftime('%Y-%m-%d %I:%M %p')}
 """
 
         await context.bot.send_message(
-            chat_id=ADMIN_CHANNEL_ID, 
+            chat_id=REQUEST_CHANNEL_ID, 
             text=message, 
             parse_mode='HTML'
         )
