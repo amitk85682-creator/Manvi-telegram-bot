@@ -1192,129 +1192,117 @@ async def deliver_movie_on_start(context: ContextTypes.DEFAULT_TYPE, movie_id: i
             pass
 
 # ==================== TELEGRAM BOT HANDLERS ====================
+# ============================================================================
+# NEW BACKGROUND SEARCH & START LOGIC
+# ============================================================================
+
+async def background_search_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE, query_text: str, status_msg):
+    """
+    Runs database search in background to prevent blocking the bot.
+    """
+    chat_id = update.effective_chat.id
+    try:
+        # 1. PEHLE EXACT MATCH CHECK KAREIN (Ye FAST hai - 0.1 sec)
+        # This saves resources if the user clicked a precise link
+        conn = get_db_connection()
+        exact_movie = None
+        if conn:
+            try:
+                cur = conn.cursor()
+                # Use ILIKE for case-insensitive exact match
+                cur.execute("SELECT id, title, url, file_id FROM movies WHERE title ILIKE %s LIMIT 1", (query_text.strip(),))
+                exact_movie = cur.fetchone()
+            except Exception as db_e:
+                logger.error(f"Database error in exact match: {db_e}")
+            finally:
+                if conn: conn.close()
+
+        movies_found = []
+        if exact_movie:
+            movies_found = [exact_movie] # Exact match found, skip fuzzy search
+        else:
+            # Agar exact nahi mila to hi Fuzzy Search karein (Slower process)
+            # Assuming get_movies_from_db is your existing function
+            movies_found = get_movies_from_db(query_text, limit=1)
+
+        # 2. Result Handle karein
+        if not movies_found:
+            # Delete loading msg
+            try: await status_msg.delete() 
+            except: pass
+            
+            # Create request button
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🙋 Request This Movie", callback_data=f"request_{query_text[:40]}")]
+            ])
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"😕 Sorry, '{query_text}' not found.\nWould you like to request it?",
+                reply_markup=keyboard
+            )
+            return
+
+        # 3. Movie Mil gayi - Send karein
+        movie_id, title, url, file_id = movies_found[0]
+        
+        # Loading msg delete karein
+        try: await status_msg.delete() 
+        except: pass
+
+        # Send the movie using your existing helper function
+        await send_movie_to_user(update, context, movie_id, title, url, file_id)
+
+    except Exception as e:
+        logger.error(f"Background Search Error: {e}")
+        try: 
+            await status_msg.edit_text("❌ Error fetching movie. Please try again.")
+        except: 
+            pass
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Start command handler with PROPER deep link handling
+    Start command handler with NON-BLOCKING Deep Link & Asyncio Task.
+    Now supports instant response even during heavy database loads.
     """
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
     
-    logger.info(f"START called by user {user_id}, args: {context.args}")
-    
-    try:
-        # ========== DEEP LINK HANDLING ==========
-        if context.args and len(context.args) > 0:
-            payload = context.args[0]
-            logger.info(f"Deep link payload received: '{payload}'")
-            
-            # --- CASE 1: DIRECT MOVIE ID (movie_123) ---
-            if payload.startswith("movie_"):
-                try:
-                    movie_id = int(payload.split('_')[1])
-                    logger.info(f"Movie ID extracted: {movie_id}")
-                    
-                    loading_msg = await update.message.reply_text("🎬 Movie load ho rahi hai... Please wait! ⏳")
-                    
-                    await deliver_movie_on_start(context, movie_id, chat_id)
-                    
-                    # Delete loading message
-                    try:
-                        await loading_msg.delete()
-                    except:
-                        pass
-                    
-                    return MAIN_MENU
-                    
-                except (IndexError, ValueError) as e:
-                    logger.error(f"Invalid movie link format: {e}")
-                    await update.message.reply_text("❌ Invalid movie link.", reply_markup=get_main_keyboard())
-                    return MAIN_MENU
-                except Exception as e:
-                    logger.error(f"Error delivering movie: {e}")
-                    await update.message.reply_text("❌ Error loading movie. Try again.", reply_markup=get_main_keyboard())
-                    return MAIN_MENU
-            
-            # --- CASE 2: AUTO SEARCH (q_Movie_Name) ---
-            elif payload.startswith("q_"):
-                try:
-                    # Decode query: q_Family_Man_S02 → Family Man S02
-                    query_text = payload[2:]  # Remove 'q_'
-                    query_text = query_text.replace("_", " ")
-                    query_text = " ".join(query_text.split()).strip()
-                    
-                    logger.info(f"Deep link search query decoded: '{query_text}'")
-                    
-                    if not query_text:
-                        await update.message.reply_text("❌ Empty search query.", reply_markup=get_main_keyboard())
-                        return MAIN_MENU
-                    
-                    # Show searching message
-                    searching_msg = await update.message.reply_text(f"🔍 Searching for '{query_text}'...")
-                    
-                    # Search database
-                    movies_found = get_movies_from_db(query_text, limit=10)
-                    
-                    logger.info(f"Search results: {len(movies_found)} movies found")
-                    
-                    # Delete searching message
-                    try:
-                        await searching_msg.delete()
-                    except:
-                        pass
-                    
-                    # --- NO RESULTS ---
-                    if not movies_found:
-                        keyboard = InlineKeyboardMarkup([
-                            [InlineKeyboardButton("🙋 Request This Movie", callback_data=f"request_{query_text[:40]}")]
-                        ])
-                        await update.message.reply_text(
-                            f"😕 Sorry, '{query_text}' not found in database.\n\n"
-                            "Would you like to request it?",
-                            reply_markup=keyboard
-                        )
-                        return MAIN_MENU
-                    
-                    # --- SINGLE RESULT ---
-                    elif len(movies_found) == 1:
-                        movie_id, title, url, file_id = movies_found[0]
-                        logger.info(f"Single result found: {title}")
-                        await send_movie_to_user(update, context, movie_id, title, url, file_id)
-                        return MAIN_MENU
-                    
-                    # --- MULTIPLE RESULTS ---
-                    else:
-                        context.user_data['search_results'] = movies_found
-                        context.user_data['search_query'] = query_text
-                        
-                        keyboard = create_movie_selection_keyboard(movies_found, page=0)
-                        await update.message.reply_text(
-                            f"🎬 Found {len(movies_found)} results for '{query_text}'\n\n"
-                            "👇 Please select your movie:",
-                            reply_markup=keyboard,
-                            parse_mode='Markdown'
-                        )
-                        return MAIN_MENU
-                    
-                except Exception as e:
-                    logger.error(f"Error in q_ deep link processing: {e}", exc_info=True)
-                    await update.message.reply_text(
-                        "❌ Search error occurred. Please type movie name manually.",
-                        reply_markup=get_main_keyboard()
-                    )
-                    return MAIN_MENU
-            
-            # --- UNKNOWN PAYLOAD ---
-            else:
-                logger.warning(f"Unknown deep link payload: {payload}")
-                # Fall through to normal welcome
+    logger.info(f"START called by user {user_id}")
+
+    # Deep link payload check
+    if context.args and len(context.args) > 0:
+        payload = context.args[0]
         
-    except Exception as e:
-        logger.error(f"Critical error in start deep link: {e}", exc_info=True)
-        # Don't return here - show welcome message as fallback
-    
-    # ========== NORMAL WELCOME MESSAGE ==========
-    logger.info(f"Showing normal welcome to user {user_id}")
-    
+        # --- CASE 1: DIRECT MOVIE ID (Sabse Fast) ---
+        if payload.startswith("movie_"):
+            try:
+                movie_id = int(payload.split('_')[1])
+                # Background task create karein (Non-blocking)
+                asyncio.create_task(deliver_movie_on_start(context, movie_id, chat_id))
+                return MAIN_MENU
+            except Exception as e:
+                logger.error(f"Error parsing movie_id in start: {e}")
+
+        # --- CASE 2: AUTO SEARCH (Ab Fast Hoga) ---
+        elif payload.startswith("q_"):
+            try:
+                # Query decode
+                query_text = payload[2:] # Remove 'q_'
+                query_text = query_text.replace("_", " ") # Replace underscores
+                query_text = " ".join(query_text.split()).strip() # Clean extra spaces
+                
+                # 1. Turant message bhej do (Instant Feedback)
+                status_msg = await update.message.reply_text(f"🔎 Checking for '{query_text}'... ⚡")
+
+                # 2. Asli kaam background me daal do (asyncio.create_task)
+                asyncio.create_task(background_search_and_send(update, context, query_text, status_msg))
+                
+                return MAIN_MENU
+                
+            except Exception as e:
+                logger.error(f"Deep link error: {e}")
+
+    # --- NORMAL WELCOME MESSAGE (No Deep Link) ---
     welcome_text = """
 📨 Sᴇɴᴅ Mᴏᴠɪᴇ Oʀ Sᴇʀɪᴇs Nᴀᴍᴇ ᴀɴᴅ Yᴇᴀʀ Aꜱ Pᴇʀ Gᴏᴏɢʟᴇ Sᴘᴇʟʟɪɴɢ..!! 👍
 
@@ -1323,8 +1311,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 ⚠️ Exᴀᴍᴘʟᴇ Fᴏʀ WᴇʙSᴇʀɪᴇs 👇
 👉 Stranger Things S02
-
-⚠️ ᴅᴏɴ'ᴛ ᴀᴅᴅ ᴇᴍᴏᴊɪꜱ ᴀɴᴅ ꜱʏᴍʙᴏʟꜱ ɪɴ ᴍᴏᴠɪᴇ ɴᴀᴍᴇ, ᴜꜱᴇ ʟᴇᴛᴛᴇʀꜱ ᴏɴʟʏ..!! ❌
 """
     await update.message.reply_text(welcome_text, reply_markup=get_main_keyboard())
     return MAIN_MENU
@@ -1889,14 +1875,18 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Ek command se 3 Bots ke link generate honge.
-    Admin Command: /post_query MovieName
+    Smart Post Generator: 
+    - Checks Main Title AND Aliases in Database.
+    - Generates FAST Links (movie_ID) if found.
+    - Fallback to SLOW Links (q_Name) if not found.
     """
     try:
+        # 1. Permission Check
         user_id = update.effective_user.id
         if user_id != ADMIN_USER_ID:
             return
 
+        # 2. Input Validation (Photo & Caption)
         if not update.message.photo:
             await update.message.reply_text("❌ Photo bhejo caption ke sath: `/post_query Name`", parse_mode='Markdown')
             return
@@ -1905,35 +1895,78 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not caption_text or not caption_text.startswith('/post_query'):
             return
 
-        # 1. Query Clean Karo
+        # 3. Clean Query (Movie Name nikalo)
         query_text = caption_text.replace('/post_query', '').strip()
         if not query_text:
             await update.message.reply_text("❌ Name missing.")
             return
+
+        # =========================================================
+        # 🧠 SMART DATABASE CHECK (Main Title + Aliases)
+        # =========================================================
+        movie_id = None
+        conn = get_db_connection()
+
+        if conn:
+            try:
+                cur = conn.cursor()
+                # Query: Movies table OR Aliases table me dhoondo
+                sql = """
+                    SELECT m.id 
+                    FROM movies m
+                    LEFT JOIN movie_aliases ma ON m.id = ma.movie_id
+                    WHERE m.title ILIKE %s OR ma.alias ILIKE %s
+                    LIMIT 1
+                """
+                cur.execute(sql, (query_text.strip(), query_text.strip()))
+                
+                row = cur.fetchone()
+                if row:
+                    movie_id = row[0] # ID mil gayi!
+                
+                cur.close()
+                conn.close()
+            except Exception as e:
+                logger.error(f"Error finding movie ID: {e}")
+                if conn: conn.close()
+
+        # =========================================================
+        # 🔗 LINK GENERATION STRATEGY
+        # =========================================================
         
-        # ✅ URL Safe encoding
-        # Method 1: Simple (spaces to underscore, remove special chars)
-        safe_query = re.sub(r'[^\w\s-]', '', query_text)  # Special chars remove
-        safe_query = safe_query.replace(" ", "_")
-        safe_query = re.sub(r'_+', '_', safe_query)  # Multiple underscores fix
-        safe_query = safe_query.strip('_')  # Leading/trailing underscore remove
-        
-        # Method 2 (Alternative): URL encoding
-        # safe_query = quote(query_text, safe='')
-        
-        logger.info(f"Creating deep links for: {query_text} -> {safe_query}")
-        
-        # --- BOT USERNAMES (Bina @ ke likhein) ---
+        # Bots Usernames
         bot1_username = "Ur_Manvi_Bot"
         bot2_username = "urmoviebot"
         bot3_username = "FlimfyBox_Bot"
+        
+        link_param = ""
+        log_message = ""
 
-        # 3 Links banao
-        link1 = f"https://t.me/{bot1_username}?start=q_{safe_query}"
-        link2 = f"https://t.me/{bot2_username}?start=q_{safe_query}"
-        link3 = f"https://t.me/{bot3_username}?start=q_{safe_query}"
+        if movie_id:
+            # 🚀 FAST MODE (ID Based)
+            # Use this when movie/alias is found in DB
+            link_param = f"movie_{movie_id}"
+            log_message = f"✅ **FAST MODE (ID Found: {movie_id})**"
+        else:
+            # 🐢 SLOW MODE (Search Based)
+            # Use this when movie is NOT in DB (New request/upload)
+            safe_query = re.sub(r'[^\w\s-]', '', query_text) # Special chars remove
+            safe_query = safe_query.replace(" ", "_")
+            safe_query = re.sub(r'_+', '_', safe_query).strip('_')
+            
+            link_param = f"q_{safe_query}"
+            log_message = f"⚠️ **SLOW MODE (Name Search)**\n(Movie DB me nahi mili)"
 
-        # Keyboard
+        # Generate Full Links 
+        link1 = f"https://t.me/{bot1_username}?start={link_param}"
+        link2 = f"https://t.me/{bot2_username}?start={link_param}"
+        link3 = f"https://t.me/{bot3_username}?start={link_param}"
+
+        # =========================================================
+        # 📤 SENDING POST
+        # =========================================================
+
+        # Keyboard Layout
         keyboard = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("🤖 Manvi Bot", url=link1),
@@ -1945,6 +1978,7 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
         ])
 
+        # Channel Caption
         channel_caption = (
             f"🎬 **{query_text}** 🎬\n\n"
             f"✅ **File Uploaded Successfully!**\n"
@@ -1953,8 +1987,9 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"👇 **Download from any Bot:**\n"
             f"➖➖➖➖➖➖➖➖➖➖"
         )
-        
+
         if ADMIN_CHANNEL_ID:
+            # Post to Channel
             await context.bot.send_photo(
                 chat_id=ADMIN_CHANNEL_ID,
                 photo=update.message.photo[-1].file_id,
@@ -1962,14 +1997,15 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=keyboard,
                 parse_mode='Markdown'
             )
+            # Reply to Admin (Confirmation)
             await update.message.reply_text(
-                f"✅ Post Sent!\n\n"
-                f"Original: `{query_text}`\n"
-                f"Encoded: `{safe_query}`",
+                f"✅ Post Sent Successfully!\n\n"
+                f"{log_message}\n"
+                f"Query: `{query_text}`",
                 parse_mode='Markdown'
             )
         else:
-            await update.message.reply_text("❌ ADMIN_CHANNEL_ID set nahi hai.")
+            await update.message.reply_text("❌ ADMIN_CHANNEL_ID environment variable set nahi hai.")
 
     except Exception as e:
         logger.error(f"Error in admin_post_query: {e}")
