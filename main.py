@@ -80,6 +80,7 @@ ADMIN_CHANNEL_ID = os.environ.get('ADMIN_CHANNEL_ID')
 REQUIRED_CHANNEL_ID = os.environ.get('REQUIRED_CHANNEL_ID', '-1003330141433')
 FILMFYBOX_CHANNEL_URL = 'https://t.me/FilmFyBoxMoviesHD'  # Yahan apna Channel Link dalein
 REQUEST_CHANNEL_ID = os.environ.get('REQUEST_CHANNEL_ID', '-1003078990647')
+DUMP_CHANNEL_ID = os.environ.get('DUMP_CHANNEL_ID', '-1002683355160')
 
 # --- Random GIF IDs for Search Failure ---
 SEARCH_ERROR_GIFS = [
@@ -913,16 +914,23 @@ def create_quality_selection_keyboard(movie_id, title, qualities):
     """Create inline keyboard with quality selection buttons showing SIZE"""
     keyboard = []
 
-    # Note: qualities tuple ab 4 items ka hai -> (quality, url, file_id, file_size)
+    # Note: qualities tuple contains (quality, url, file_id, file_size)
     for quality, url, file_id, file_size in qualities:
         callback_data = f"quality_{movie_id}_{quality}"
         
-        # Agar size available hai to dikhayein, nahi to sirf Quality dikhayein
-        size_text = f" - {file_size}" if file_size else ""
+        # 👇 FIX: Check if size is already in the label (quality string)
+        # Agar label me pehle se '[' aur ']' hai, iska matlab Batch ne size add kar diya hai
+        if "[" in quality and "]" in quality:
+            display_text = quality # Size dubara mat jodo
+        else:
+            # Old/Manual entry ke liye size jodo
+            size_part = f" - {file_size}" if file_size else ""
+            display_text = f"{quality}{size_part}"
+            
         link_type = "File" if file_id else "Link"
         
-        # Button text example: "🎬 720p - 1.4GB (Link)"
-        button_text = f"🎬 {quality}{size_text} ({link_type})"
+        # Final Button Text
+        button_text = f"🎬 {display_text} ({link_type})"
         
         keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
 
@@ -3271,6 +3279,241 @@ def run_flask():
 
     flask_app.run(host='0.0.0.0', port=port)
 
+# ==================== BATCH UPLOAD HANDLERS ====================
+
+async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Command: /batch MovieName
+    Starts a listening session in the Dump Channel.
+    """
+    user_id = update.effective_user.id
+    if user_id != ADMIN_USER_ID:
+        return
+
+    if not context.args:
+        await update.message.reply_text("❌ Usage: `/batch Movie Name`\n(Use this in Dump Channel or PM)")
+        return
+
+    movie_title = " ".join(context.args).strip()
+    
+    # 1. Find or Create Movie in DB
+    conn = get_db_connection()
+    if not conn:
+        await update.message.reply_text("❌ DB Connection Failed")
+        return
+        
+    try:
+        cur = conn.cursor()
+        # Check if exists
+        cur.execute("SELECT id FROM movies WHERE title = %s", (movie_title,))
+        row = cur.fetchone()
+        
+        if row:
+            movie_id = row[0]
+            msg = f"✅ **Movie Found:** `{movie_title}` (ID: {movie_id})"
+        else:
+            # Create new
+            cur.execute("INSERT INTO movies (title, url) VALUES (%s, '') RETURNING id", (movie_title,))
+            movie_id = cur.fetchone()[0]
+            conn.commit()
+            msg = f"🆕 **New Movie Created:** `{movie_title}` (ID: {movie_id})"
+            
+        cur.close()
+        conn.close()
+        
+        # 2. Activate Batch Session
+        BATCH_SESSION['active'] = True
+        BATCH_SESSION['admin_id'] = user_id
+        BATCH_SESSION['movie_id'] = movie_id
+        BATCH_SESSION['movie_title'] = movie_title
+        BATCH_SESSION['count'] = 0
+        
+        await update.message.reply_text(
+            f"{msg}\n\n"
+            f"🚀 **Batch Mode ON!**\n"
+            f"Now forward/upload files to the **Dump Channel**.\n"
+            f"Bot will auto-save them.\n\n"
+            f"Type `/done` when finished.",
+            parse_mode='Markdown'
+        )
+        
+    except Exception as e:
+        logger.error(f"Batch Error: {e}")
+        await update.message.reply_text(f"❌ Error: {e}")
+
+async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Stops the batch session"""
+    if update.effective_user.id != ADMIN_USER_ID:
+        return
+        
+    if not BATCH_SESSION['active']:
+        await update.message.reply_text("⚠️ No active batch session.")
+        return
+        
+    count = BATCH_SESSION['count']
+    title = BATCH_SESSION['movie_title']
+    
+    # Reset Session
+    BATCH_SESSION['active'] = False
+    BATCH_SESSION['movie_id'] = None
+    
+    await update.message.reply_text(
+        f"🎉 **Batch Completed!**\n\n"
+        f"🎬 Movie: **{title}**\n"
+        f"✅ Files Saved: **{count}**\n\n"
+        f"You can now search this movie in the bot.",
+        parse_mode='Markdown'
+    )
+
+async def channel_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Listens to files in Dump Channel and saves them if Batch Mode is ON.
+    """
+    # 1. Check if Batch is Active
+    if not BATCH_SESSION.get('active'):
+        return
+
+    # 2. Check if update is from Dump Channel (Security)
+    # Agar DUMP_CHANNEL_ID set nahi hai to koi bhi channel se accept karega (Not recommended)
+    current_chat_id = str(update.effective_chat.id)
+    if DUMP_CHANNEL_ID and current_chat_id != str(DUMP_CHANNEL_ID):
+        return
+
+    # 3. Get File Details
+    message = update.effective_message
+    file_id = None
+    file_name = "Unknown"
+    file_size_bytes = 0
+    
+    if message.document:
+        file_id = message.document.file_id
+        file_name = message.document.file_name or "Unknown"
+        file_size_bytes = message.document.file_size
+    elif message.video:
+        file_id = message.video.file_id
+        file_name = message.video.file_name or f"Video {BATCH_SESSION['count']+1}"
+        file_size_bytes = message.video.file_size
+    else:
+        return # Not a file
+
+    # 4. Generate Smart Label (Quality + Size)
+    file_size_str = get_readable_file_size(file_size_bytes)
+    label = generate_quality_label(file_name, file_size_str)
+    
+    # 5. Save to Database (Silent Operation)
+    conn = get_db_connection()
+    if conn:
+        try:
+            cur = conn.cursor()
+            # movie_files table me insert karo
+            # Note: 'quality' column ab 'label' ki tarah use hoga
+            cur.execute(
+                "INSERT INTO movie_files (movie_id, file_id, quality, file_size) VALUES (%s, %s, %s, %s)",
+                (BATCH_SESSION['movie_id'], file_id, label, file_size_str)
+            )
+            conn.commit()
+            cur.close()
+            conn.close()
+            
+            # Increment Count
+            BATCH_SESSION['count'] += 1
+            logger.info(f"Batch Auto-Save: {file_name} -> {label}")
+            
+        except Exception as e:
+            logger.error(f"Failed to auto-save file: {e}")
+
+# ==================== BATCH UPLOAD HELPERS ====================
+
+# Global variable to track batch session
+# Format: {'active': False, 'admin_id': None, 'movie_id': None, 'movie_title': None, 'count': 0}
+BATCH_SESSION = {'active': False}
+
+def get_readable_file_size(size_in_bytes):
+    """Converts bytes to readable format (MB, GB)"""
+    try:
+        if not size_in_bytes: return "N/A"
+        size = int(size_in_bytes)
+        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+            if size < 1024:
+                return f"{size:.2f} {unit}"
+            size /= 1024
+    except Exception:
+        return "Unknown"
+    return "Unknown"
+
+def generate_quality_label(file_name, file_size_str):
+    """
+    Smart Logic to generate button label from filename
+    Example: "Thamma.2025.1080p.mkv" -> "1080p [1.2GB]"
+    """
+    name_lower = file_name.lower()
+    quality = "HD" # Default
+    
+    # 1. Detect Quality
+    if "4k" in name_lower or "2160p" in name_lower: quality = "4K"
+    elif "1080p" in name_lower: quality = "1080p"
+    elif "720p" in name_lower: quality = "720p"
+    elif "480p" in name_lower: quality = "480p"
+    elif "360p" in name_lower: quality = "360p"
+    elif "cam" in name_lower or "rip" in name_lower: quality = "CamRip"
+    
+    # 2. Detect Series (S01E01)
+    season_match = re.search(r'(s\d+e\d+|ep\s?\d+|season\s?\d+)', name_lower)
+    if season_match:
+        episode_tag = season_match.group(0).upper()
+        # Format: S01E01 - 720p [200MB]
+        return f"{episode_tag} - {quality} [{file_size_str}]"
+        
+    # 3. Default Movie Format: 720p [1.2GB]
+    return f"{quality} [{file_size_str}]"
+
+def fix_database_constraints():
+    """Removes the UNIQUE constraint from movie_files to allow multiple files"""
+    try:
+        conn = get_db_connection()
+        if conn:
+            cur = conn.cursor()
+            # Drop the constraint that prevents duplicate qualities
+            cur.execute("ALTER TABLE movie_files DROP CONSTRAINT IF EXISTS movie_files_movie_id_quality_key;")
+            conn.commit()
+            cur.close()
+            conn.close()
+            logger.info("✅ Database constraints fixed for Batch Upload.")
+    except Exception as e:
+        logger.error(f"Error fixing DB constraints: {e}")
+
+# Call this once
+fix_database_constraints()
+
+# ==================== MAIN BOT FUNCTION ====================
+# 👇 PASTE THIS FUNCTION BEFORE 'def main():' 👇
+
+def fix_db_column_issue():
+    """Fixes the database column name mismatch automatically"""
+    conn = None
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return
+        
+        cur = conn.cursor()
+        
+        # Check agar 'label' naam ka column mojood hai
+        cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name='movie_files' AND column_name='label'")
+        if cur.fetchone():
+            logger.info("🔧 Fixing Database: Renaming column 'label' back to 'quality'...")
+            # Use wapas 'quality' rename kar do taaki code chal sake
+            cur.execute("ALTER TABLE movie_files RENAME COLUMN label TO quality;")
+            conn.commit()
+            logger.info("✅ Database Fixed Successfully!")
+            
+        cur.close()
+    except Exception as e:
+        logger.error(f"DB Fix Error: {e}")
+        if conn: conn.rollback()
+    finally:
+        if conn: conn.close()
+
 # ==================== MAIN BOT FUNCTION ====================
 def main():
     """Run the Telegram bot"""
@@ -3281,7 +3524,10 @@ def main():
         return
 
     try:
+        # 1. Setup tables
         setup_database()
+        # 2. Fix column names (Auto-repair 'label' -> 'quality')
+        fix_db_column_issue()
     except Exception as e:
         logger.error(f"Database setup failed but continuing: {e}")
 
@@ -3321,6 +3567,14 @@ def main():
     application.add_handler(CommandHandler("aliases", list_aliases))
     application.add_handler(CommandHandler("aliasbulk", bulk_add_aliases))
     application.add_handler(MessageHandler(filters.PHOTO & filters.CaptionRegex(r'^/post_query'), admin_post_query))
+
+    # 👇 NEW BATCH COMMANDS 👇
+    application.add_handler(CommandHandler("batch", batch_add_command))
+    application.add_handler(CommandHandler("done", batch_done_command))
+
+    # 👇 NEW CHANNEL LISTENER (To catch files) 👇
+    # Ye handler sirf tab chalega jab Document ya Video aaye
+    application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.VIDEO), channel_file_listener))
 
     # Advanced notification commands
     application.add_handler(CommandHandler("notifyuser", notify_user_by_username))
