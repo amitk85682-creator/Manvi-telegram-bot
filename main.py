@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 import os
 import logging
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
@@ -9,7 +11,25 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 
 # Token
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+PORT = int(os.environ.get("PORT", 8080))
 
+# ============ DUMMY WEB SERVER ============
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/html')
+        self.end_headers()
+        self.wfile.write(b"Bot is running! Redirecting users to new bots.")
+    
+    def log_message(self, format, *args):
+        pass  # Silence logs
+
+def run_health_server():
+    server = HTTPServer(('0.0.0.0', PORT), HealthCheckHandler)
+    print(f"Health server running on port {PORT}")
+    server.serve_forever()
+
+# ============ BOT FUNCTIONS ============
 async def redirect_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """User kuch bhi kare, usse ye hi message milega"""
     
@@ -26,28 +46,35 @@ async def redirect_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("⚡ Go to Movie Bot", url="https://t.me/urmoviebot?start=start")]
     ])
 
-    if update.message:
-        await update.message.reply_text(offline_text, reply_markup=keyboard, parse_mode='Markdown')
-    elif update.callback_query:
-        await update.callback_query.answer()
-        await update.callback_query.edit_message_text(offline_text, reply_markup=keyboard, parse_mode='Markdown')
+    try:
+        if update.message:
+            await update.message.reply_text(offline_text, reply_markup=keyboard, parse_mode='Markdown')
+        elif update.callback_query:
+            await update.callback_query.answer()
+            await update.callback_query.edit_message_text(offline_text, reply_markup=keyboard, parse_mode='Markdown')
+    except Exception as e:
+        logging.error(f"Error: {e}")
 
 def main():
     if not TELEGRAM_BOT_TOKEN:
         print("Error: TELEGRAM_BOT_TOKEN not found!")
         return
 
+    # Start health check server in background thread
+    health_thread = threading.Thread(target=run_health_server, daemon=True)
+    health_thread.start()
+
     # Bot setup
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # Sirf 3 handlers jo sab kuch redirect karenge
+    # Handlers
     application.add_handler(CommandHandler("start", redirect_user))
     application.add_handler(MessageHandler(filters.ALL, redirect_user))
     application.add_handler(CallbackQueryHandler(redirect_user))
 
     # Bot Start
     print("Bot is running in Redirect-Only mode...")
-    application.run_polling()
+    application.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
     main()
