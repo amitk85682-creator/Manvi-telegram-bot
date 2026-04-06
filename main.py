@@ -4288,7 +4288,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             # Naya keyboard generate karo view ke hisaab se
             if view_type == "main":
-                keyboard = create_quality_selection_keyboard(movie_id, view="main", page=1, total_pages=2)
+                keyboard = create_quality_selection_keyboard(movie_id, view="main")
             elif view_type == "lang":
                 keyboard = create_quality_selection_keyboard(movie_id, view="language")
             elif view_type == "qual":
