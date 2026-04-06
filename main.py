@@ -3117,6 +3117,41 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     close_db_connection(conn)
 
                     
+            # --- CASE NAYA: DIRECT FILE CLICK FROM TEXT LINK ---
+            if payload.startswith("file_"):
+                try:
+                    parts = payload.split('_')
+                    movie_id = int(parts[1])
+                    file_index = int(parts[2])
+                    
+                    status_msg = await context.bot.send_message(chat_id=chat_id, text="⏳ <b>Fetching file...</b>", parse_mode='HTML')
+                    
+                    qualities = get_all_movie_qualities(movie_id)
+                    if qualities and len(qualities) > file_index:
+                        file_data = qualities[file_index]
+                        url = file_data[1]
+                        file_id = file_data[2]
+                        
+                        conn = get_db_connection()
+                        cur = conn.cursor()
+                        cur.execute("SELECT title FROM movies WHERE id = %s", (movie_id,))
+                        res = cur.fetchone()
+                        cur.close()
+                        close_db_connection(conn)
+                        title = res[0] if res else "Requested File"
+                        
+                        await send_movie_to_user(update, context, movie_id, title, url, file_id, send_warning=False)
+                        
+                        try: await status_msg.delete() 
+                        except: pass
+                    else:
+                        await status_msg.edit_text("❌ File not found or expired.")
+                    return
+                except Exception as e:
+                    logger.error(f"File click error: {e}")
+                    await context.bot.send_message(chat_id=chat_id, text="❌ Invalid File Link")
+                    return
+                    
             # --- CASE 1: DIRECT MOVIE ID (movie_123) ---
             
             # --- CASE NAYA: DIRECT FILE CLICK FROM TEXT LINK ---
@@ -3694,14 +3729,17 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if active_filter: text += f"🔍 Filter: **{active_filter['value']}**\n"
             text += f"\n👇 **Your Requested Files Are Here**\n\n"
             
-            if not filtered_qualities: text += "❌ No files found for this filter.\n"
-            else:
-                for idx, f_data in enumerate(current_page_files, start=start_idx + 1):
-                    q_name = f_data[0]
-                    f_size = f_data[3] if len(f_data) > 3 else "Unknown"
-                    e_info = f_data[5] if len(f_data) > 5 else ""
-                    ep_tag = f"[{e_info}] " if e_info else ""
-                    text += f"**{idx}.** 💾 {f_size} | {title} {ep_tag}{q_name}\n\n"
+            if not filtered_qualities:
+                    text += "❌ No files found for this filter.\n"
+                else:
+                    bot_username = context.bot.username
+                    for idx, file_data in enumerate(current_page_files, start=start_idx + 1):
+                        quality = file_data[0]
+                        file_size = file_data[3] if len(file_data) > 3 else "Unknown"
+                        extra_info = file_data[5] if len(file_data) > 5 else ""
+                        ep_tag = f"[{extra_info}] " if extra_info else ""
+                        # ✅ CLEAN HTML LINK: Brackets link ko todenge nahi
+                        text += f"<b>{idx}.</b> <a href='https://t.me/{bot_username}?start=file_{movie_id}_{idx-1}'>💾 {file_size} | {title} {ep_tag}{quality}</a>\n\n"
                     
             is_season = True if selected_season else False
             keyboard = create_quality_selection_keyboard(movie_id, "main", page, total_pages, current_page_files, is_season)
@@ -4419,18 +4457,17 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     return
 
             # Agar normal Movie hai (ya Series ka season logic fail hua), toh direct qualities dikhao
-            # Video jaisa Text List format banana
-            file_list_text = f"📁 **{title}**\n\n👇 **Your Requested Files Are Here**\n\n"
-            
             bot_username = context.bot.username
+            file_list_text = f"📁 <b>{title}</b>\n\n👇 <b>Your Requested Files Are Here</b>\n\n"
+            
             for idx, file_data in enumerate(qualities[:10], start=1):
                 quality = file_data[0]
                 file_size = file_data[3] if len(file_data) > 3 else "Unknown Size"
                 extra_info = file_data[5] if len(file_data) > 5 else ""
                 
                 ep_tag = f"[{extra_info}] " if extra_info else ""
-                # ✅ NAYA: Text directly clickable ban gaya Deep Link ke zariye!
-                file_list_text += f"**{idx}.** [💾 {file_size} | {title} {ep_tag}{quality}](https://t.me/{bot_username}?start=file_{movie_id}_{idx-1})\n\n"
+                # ✅ CLEAN HTML LINK: Naruto bot jaisa neela text!
+                file_list_text += f"<b>{idx}.</b> <a href='https://t.me/{bot_username}?start=file_{movie_id}_{idx-1}'>💾 {file_size} | {title} {ep_tag}{quality}</a>\n\n"
 
             selection_text = file_list_text
             
@@ -4454,14 +4491,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(
                 selection_text,
                 reply_markup=keyboard_markup,
-                parse_mode='Markdown'
+                parse_mode='HTML'
             )
             return
 
             await query.edit_message_text(
                 selection_text,
                 reply_markup=keyboard,
-                parse_mode='Markdown'
+                parse_mode='HTML'
             )
             
             track_message_for_deletion(context, update.effective_chat.id, query.message.message_id, 60)
