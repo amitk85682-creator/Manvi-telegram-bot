@@ -4528,15 +4528,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # UI Text Banana
             if view_type == "main" or view_type == "seas":
-                text = f"📁 **{title}**\n"
+                text = f"📁 <b>{title}</b>\n"
                 
                 # Agar koi season select kiya hua hai, to wo upar dikhega
                 if 'selected_season' in context.user_data and context.user_data['selected_season']:
-                    text += f"📺 Season: **{context.user_data['selected_season']}**\n"
+                    text += f"📺 Season: <b>{context.user_data['selected_season']}</b>\n"
                     
                 if active_filter:
-                    text += f"🔍 Filter: **{active_filter['value']}**\n"
-                text += f"\n👇 **Your Requested Files Are Here**\n\n"
+                    text += f"🔍 Filter: <b>{active_filter['value']}</b>\n"
+                text += f"\n👇 <b>Your Requested Files Are Here</b>\n\n"
                 
                 if not filtered_qualities:
                     text += "❌ No files found for this filter.\n"
@@ -4547,10 +4547,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         file_size = file_data[3] if len(file_data) > 3 else "Unknown"
                         extra_info = file_data[5] if len(file_data) > 5 else ""
                         ep_tag = f"[{extra_info}] " if extra_info else ""
-                        text += f"**{idx}.** [💾 {file_size} | {title} {ep_tag}{quality}](https://t.me/{bot_username}?start=file_{movie_id}_{idx-1})\n\n"
+                        # ✅ FIXED: Markdown ki jagah HTML <a> tag use kiya hai
+                        text += f"<b>{idx}.</b> <a href='https://t.me/{bot_username}?start=file_{movie_id}_{idx-1}'>💾 {file_size} | {title} {ep_tag}{quality}</a>\n\n"
 
             elif view_type in ["lang", "qual"]:
-                text = f"📁 **{title}**\n\n👇 **Select {view_type.upper()} Filter:**\n\n"
+                text = f"📁 <b>{title}</b>\n\n👇 <b>Select {view_type.upper()} Filter:</b>\n\n"
 
             # Keyboard Banana
             keyboard = []
@@ -4613,7 +4614,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 keyboard.append([InlineKeyboardButton("4K", callback_data=f"fl_qual_{movie_id}_4K")])
                 keyboard.append([InlineKeyboardButton("<< BACK TO FILES >>", callback_data=f"v_main_{movie_id}")])
 
-            await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+            await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
             return
         
         # ==================== QUALITY PAGINATION (NEXT/BACK) ====================
