@@ -4530,6 +4530,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         if f_val in combined_text:
                             temp_list.append(f)
                             
+                # ✅ NAYA POP-UP LOGIC: Agar is filter ki koi file nahi mili
+                if not temp_list:
+                    # 1. Telegram ka in-built Popup dikhao
+                    await query.answer(f"❌ {active_filter['value'].upper()} format me file abhi available nahi hai!", show_alert=True)
+                    # 2. Galat filter ko history se uda do taaki bot aage na atke
+                    context.user_data['active_filter'] = None 
+                    # 3. Yahi se waapis bhej do (UI change nahi hoga, waisa hi rahega)
+                    return
+                            
                 filtered_qualities = temp_list
 
             # ==========================================
@@ -4560,13 +4569,27 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     text += "❌ No files found for this filter.\n"
                 else:
                     bot_username = context.bot.username
+                    import re # Text clean karne ke liye tool
+                    
                     for idx, file_data in enumerate(current_page_files, start=start_idx + 1):
-                        quality = file_data[0]
+                        quality = str(file_data[0])
+                        
+                        # 🚀 NAYA FIX: Doosre Bot (Manvi Bot) ke links ko hamesha ke liye uda do
+                        quality = re.sub(r'\[([^\]]+)\]\(https?://[^\)]+\)', r'\1', quality)
+                        quality = re.sub(r'\(https?://[^\)]+\)', '', quality)
+                        quality = re.sub(r'https?://[^\s]+', '', quality)
+                        
                         file_size = file_data[3] if len(file_data) > 3 else "Unknown"
-                        extra_info = file_data[5] if len(file_data) > 5 else ""
-                        ep_tag = f"[{extra_info}] " if extra_info else ""
-                        # ✅ FIXED: Markdown ki jagah HTML <a> tag use kiya hai
-                        text += f"<b>{idx}.</b> <a href='https://t.me/{bot_username}?start=file_{movie_id}_{idx-1}'>💾 {file_size} | {title} {ep_tag}{quality}</a>\n\n"
+                        
+                        # Extra Info (Episodes) se bhi link saaf karo
+                        extra_info = str(file_data[5]) if len(file_data) > 5 else ""
+                        extra_info = re.sub(r'\[([^\]]+)\]\(https?://[^\)]+\)', r'\1', extra_info)
+                        extra_info = re.sub(r'\(https?://[^\)]+\)', '', extra_info)
+                        extra_info = re.sub(r'https?://[^\s]+', '', extra_info)
+                        
+                        ep_tag = f"[{extra_info.strip()}] " if extra_info.strip() else ""
+                        
+                        text += f"<b>{idx}.</b> <a href='https://t.me/{bot_username}?start=file_{movie_id}_{idx-1}'>💾 {file_size} | {title} {ep_tag}{quality.strip()}</a>\n\n"
 
             elif view_type in ["lang", "qual"]:
                 text = f"📁 <b>{title}</b>\n\n👇 <b>Select {view_type.upper()} Filter:</b>\n\n"
