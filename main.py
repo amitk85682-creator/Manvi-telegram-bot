@@ -4640,6 +4640,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # UI Text Banana
             if view_type == "main" or view_type == "seas":
                 text = f"📁 **{title}**\n"
+                
+                # Agar koi season select kiya hua hai, to wo upar dikhega
+                if 'selected_season' in context.user_data and context.user_data['selected_season']:
+                    text += f"📺 Season: **{context.user_data['selected_season']}**\n"
+                    
                 if active_filter:
                     text += f"🔍 Filter: **{active_filter['value']}**\n"
                 text += f"\n👇 **Your Requested Files Are Here**\n\n"
@@ -4657,21 +4662,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             elif view_type in ["lang", "qual"]:
                 text = f"📁 **{title}**\n\n👇 **Select {view_type.upper()} Filter:**\n\n"
-                
-                # Check agar season view me hain
-                is_season = False
-                if 'selected_season' in context.user_data:
-                    is_season = True
-
-                # Naya Keyboard (with file buttons)
-                keyboard_markup = create_quality_selection_keyboard(
-                    movie_id=movie_id, 
-                    view="main", 
-                    page=page, 
-                    total_pages=total_pages, 
-                    current_files=current_page_files,
-                    season_view=is_season
-                )
 
             # Keyboard Banana
             keyboard = []
@@ -4691,21 +4681,19 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 nav_buttons.append(InlineKeyboardButton("NEXT ▶️" if page < total_pages else "NEXT >", callback_data=f"vpage_{movie_id}_{page+1}" if page < total_pages else "ignore"))
                 keyboard.append(nav_buttons)
 
-                # NAYA: Naruto Bot jaisa Inline Season Selection 👇
+                # 🚀 NAYA FIX: Accordion Style Season List (Naruto Bot jaisa)
                 if view_type == "seas":
                     keyboard.append([InlineKeyboardButton("⬇ SELECT SEASON ⬇", callback_data="ignore")])
-                    
                     seasons = set()
                     for f in all_qualities:
                         extra = f[5] if len(f) > 5 else ""
                         if extra:
                             s = extract_season_name(extra)
                             if s != "Extra Files": seasons.add(s)
-                            
                     s_list = sorted(list(seasons))
                     row = []
                     for s in s_list:
-                        # SEASON 1 ko SEASON 01 me convert karna premium look ke liye
+                        # Premium formatting (SEASON 1 -> SEASON 01)
                         btn_text = s.upper()
                         if btn_text.startswith("SEASON ") and len(btn_text.split(" ")[1]) == 1:
                             btn_text = btn_text.replace("SEASON ", "SEASON 0")
@@ -4734,24 +4722,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 keyboard.append([InlineKeyboardButton("720P", callback_data=f"fl_qual_{movie_id}_720p"), InlineKeyboardButton("1080P", callback_data=f"fl_qual_{movie_id}_1080p")])
                 keyboard.append([InlineKeyboardButton("1440P", callback_data=f"fl_qual_{movie_id}_1440p"), InlineKeyboardButton("2160P", callback_data=f"fl_qual_{movie_id}_2160p")])
                 keyboard.append([InlineKeyboardButton("4K", callback_data=f"fl_qual_{movie_id}_4K")])
-                keyboard.append([InlineKeyboardButton("<< BACK TO FILES >>", callback_data=f"v_main_{movie_id}")])
-
-            elif view_type == "seas":
-                seasons = set()
-                for f in all_qualities:
-                    extra = f[5] if len(f) > 5 else ""
-                    if extra:
-                        s = extract_season_name(extra)
-                        if s != "Extra Files": seasons.add(s)
-                s_list = sorted(list(seasons))
-                row = []
-                for s in s_list:
-                    row.append(InlineKeyboardButton(s, callback_data=f"fl_seas_{movie_id}_{s}"))
-                    if len(row) == 2:
-                        keyboard.append(row)
-                        row = []
-                if row: keyboard.append(row)
-                keyboard.append([InlineKeyboardButton("🔄 CLEAR FILTER", callback_data=f"fl_clear_{movie_id}_all")])
                 keyboard.append([InlineKeyboardButton("<< BACK TO FILES >>", callback_data=f"v_main_{movie_id}")])
 
             await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
