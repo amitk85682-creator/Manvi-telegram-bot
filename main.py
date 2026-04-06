@@ -4421,44 +4421,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 'qualities': qualities
             }
 
-            # 🚀 NAYA LOGIC: Agar Series/Anime hai, YA ek hi movie me Season+Movie dono upload hue hain!
-            seasons_set = set()
-            for file_data in qualities:
-                extra_info = file_data[5] if len(file_data) > 5 else ""
-                s_name = extract_season_name(extra_info)
-                seasons_set.add(s_name)
-
-            # Agar category Series/Anime hai, ya humein "Extra Files" (Movie) aur "Season 2" dono mile hain
-            is_series = category and ("Series" in category or "Anime" in category)
-            has_multiple_groups = len(seasons_set) > 1
-
-            if is_series or has_multiple_groups:
-                # Agar sirf "Extra Files" hi hai (Yani proper single movie), toh menu mat dikhao
-                if len(seasons_set) > 0 and not (len(seasons_set) == 1 and "Extra Files" in seasons_set):
-                    sorted_seasons = sorted(list(seasons_set))
-                    season_keyboard = []
-                    
-                    # 2 Buttons per row
-                    row = []
-                    for s_name in sorted_seasons:
-                        # Extra Files ko "Movie" likh dete hain taaki user ko saaf samajh aaye
-                        display_name = "🎬 Movie" if s_name == "Extra Files" else f"📁 {s_name}"
-                        row.append(InlineKeyboardButton(display_name, callback_data=f"showseason_{movie_id}_{s_name}"))
-                        
-                        if len(row) == 2:
-                            season_keyboard.append(row)
-                            row = []
-                    if row:
-                        season_keyboard.append(row)
-                        
-                    season_keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_selection")])
-                    
-                    await query.edit_message_text(
-                        f"📺 **{title}**\n\n👇 **Select Option:**",
-                        reply_markup=InlineKeyboardMarkup(season_keyboard),
-                        parse_mode='Markdown'
-                    )
-                    return
 
             # Agar normal Movie hai (ya Series ka season logic fail hua), toh direct qualities dikhao
             bot_username = context.bot.username
@@ -4518,9 +4480,28 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['selected_season'] = selected_season
             context.user_data['active_filter'] = None
             
-            # Naye UI logic ki taraf redirect kar do
-            query.data = f"v_main_{movie_id}"
-            await button_callback(update, context) 
+            # 🚀 FIX: `query.data` read-only hai, usko badalna allowed nahi hai. 
+            # Iski jagah sidha update.callback_query_data object modify nahi karke
+            # manually call karte hain ya redirect code yahi execute karte hain.
+            
+            # Naye UI logic ki taraf redirect
+            # Hum data ko sidha bhej rahe hain taaki button_callback khud ise handle kare, bina modify kiye
+            class FakeQuery:
+                def __init__(self, from_user, message, data):
+                    self.from_user = from_user
+                    self.message = message
+                    self.data = data
+                    
+                async def answer(self, *args, **kwargs):
+                    pass # Silent ignore
+                    
+                async def edit_message_text(self, *args, **kwargs):
+                    return await query.edit_message_text(*args, **kwargs)
+
+            # Ek naya fake query object banaya taki read-only error na aaye
+            update._callback_query = FakeQuery(query.from_user, query.message, f"v_main_{movie_id}")
+            
+            await button_callback(update, context)
             return
                 
             title = movie_data['title']
