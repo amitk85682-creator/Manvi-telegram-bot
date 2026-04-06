@@ -2678,7 +2678,7 @@ def create_quality_selection_keyboard(movie_id, view="main", page=1, total_pages
                 keyboard.append([InlineKeyboardButton("🔄 CLEAR FILTER", callback_data=f"fl_clear_{movie_id}_all")])
                 keyboard.append([InlineKeyboardButton("<< BACK TO FILES >>", callback_data=f"v_main_{movie_id}")])
 
-            elif view == "quality":
+    elif view == "quality":
                 keyboard.append([InlineKeyboardButton("360P", callback_data=f"fl_qual_{movie_id}_360p"), InlineKeyboardButton("480P", callback_data=f"fl_qual_{movie_id}_480p")])
                 keyboard.append([InlineKeyboardButton("720P", callback_data=f"fl_qual_{movie_id}_720p"), InlineKeyboardButton("1080P", callback_data=f"fl_qual_{movie_id}_1080p")])
                 # ✅ NAYA: 1440P aur 2160P (Premium Quality) add ho gaye
