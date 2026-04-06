@@ -3539,6 +3539,149 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = query.message.chat.id
     data = query.data
 
+    # ==================== NAYA UI VIEWS, FILTERS & SINGLE FILE ====================
+    if data.startswith("send_single_"):
+        parts = data.split('_')
+        file_id_to_send = parts[2]
+        try:
+            await context.bot.send_document(chat_id=chat_id, document=file_id_to_send, caption="✅ Here is your file!")
+            await query.answer("File Sent!", show_alert=False)
+        except Exception as e:
+            await query.answer("❌ Error sending file.", show_alert=True)
+        return
+
+    elif data.startswith("back_to_seasons_"):
+        movie_id = int(data.split('_')[3])
+        context.user_data.pop('active_filter', None)
+        context.user_data.pop('selected_season', None)
+        movie_data = context.user_data.get('selected_movie_data')
+        if not movie_data:
+            await query.answer("❌ Session expired.", show_alert=True)
+            return
+        title = movie_data['title']
+        qualities = movie_data['qualities']
+        seasons = set()
+        for f in qualities:
+            extra = f[5] if len(f) > 5 else ""
+            if extra:
+                s_name = extract_season_name(extra)
+                if s_name != "Extra Files": seasons.add(s_name)
+        
+        keyboard = []
+        keyboard.append([InlineKeyboardButton("🎬 Movie", callback_data=f"showseason_{movie_id}_Extra Files")])
+        for s in sorted(list(seasons)):
+            keyboard.append([InlineKeyboardButton(f"📁 {s}", callback_data=f"showseason_{movie_id}_{s}")])
+        keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_selection")])
+        
+        await query.edit_message_text(f"📺 **{title}**\n\n👇 **Select Option:**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        return
+
+    elif data.startswith("v_") or data.startswith("fl_") or data.startswith("vpage_"):
+        movie_data = context.user_data.get('selected_movie_data')
+        if not movie_data:
+            await query.answer("❌ Session expired.", show_alert=True)
+            return
+        movie_id = movie_data['id']
+        title = movie_data['title']
+        all_qualities = movie_data['qualities']
+
+        if 'active_filter' not in context.user_data: context.user_data['active_filter'] = None
+
+        if data.startswith("fl_"):
+            parts = data.split('_', 3)
+            f_type = parts[1]
+            if f_type == "clear":
+                context.user_data['active_filter'] = None
+                await query.answer("✅ Filters Cleared!")
+            else:
+                f_val = parts[3]
+                context.user_data['active_filter'] = {'type': f_type, 'value': f_val}
+                await query.answer(f"✅ Filter Applied: {f_val}")
+            view_type = "main"
+            page = 1
+        elif data.startswith("vpage_"):
+            parts = data.split('_')
+            page = int(parts[2])
+            view_type = "main"
+        else:
+            parts = data.split('_')
+            view_type = parts[1]
+            page = 1 
+
+        filtered_qualities = all_qualities
+        selected_season = context.user_data.get('selected_season')
+        
+        if selected_season:
+            temp = []
+            for q in filtered_qualities:
+                ex = q[5] if len(q)>5 else ""
+                if extract_season_name(ex) == selected_season: temp.append(q)
+            filtered_qualities = temp
+
+        active_filter = context.user_data['active_filter']
+        if active_filter:
+            f_type = active_filter['type']
+            f_val = active_filter['value'].lower()
+            temp_list = []
+            for q in filtered_qualities:
+                q_name = str(q[0]).lower()
+                lang_name = str(q[4]).lower() if len(q) > 4 else ""
+                if f_type == "lang" and f_val in lang_name: temp_list.append(q)
+                elif f_type == "qual" and f_val in q_name: temp_list.append(q)
+            filtered_qualities = temp_list
+
+        limit = 10
+        total_pages = (len(filtered_qualities) + limit - 1) // limit if filtered_qualities else 1
+        if page > total_pages: page = total_pages
+        if page < 1: page = 1
+        
+        start_idx = (page - 1) * limit
+        end_idx = start_idx + limit
+        current_page_files = filtered_qualities[start_idx:end_idx]
+
+        if view_type == "main":
+            text = f"📁 **{title}**\n"
+            if selected_season: text += f"📺 Season: **{selected_season}**\n"
+            if active_filter: text += f"🔍 Filter: **{active_filter['value']}**\n"
+            text += f"\n👇 **Your Requested Files Are Here**\n\n"
+            
+            if not filtered_qualities: text += "❌ No files found for this filter.\n"
+            else:
+                for idx, f_data in enumerate(current_page_files, start=start_idx + 1):
+                    q_name = f_data[0]
+                    f_size = f_data[3] if len(f_data) > 3 else "Unknown"
+                    e_info = f_data[5] if len(f_data) > 5 else ""
+                    ep_tag = f"[{e_info}] " if e_info else ""
+                    text += f"**{idx}.** 💾 {f_size} | {title} {ep_tag}{q_name}\n\n"
+                    
+            is_season = True if selected_season else False
+            keyboard = create_quality_selection_keyboard(movie_id, "main", page, total_pages, current_page_files, is_season)
+        else:
+            text = f"📁 **{title}**\n\n👇 **Select {view_type.upper()} Filter:**\n\n"
+            if view_type == "seas":
+                seasons = set()
+                for f in all_qualities:
+                    extra = f[5] if len(f) > 5 else ""
+                    if extra:
+                        s = extract_season_name(extra)
+                        if s != "Extra Files": seasons.add(s)
+                keyboard_arr = []
+                row = []
+                for s in sorted(list(seasons)):
+                    row.append(InlineKeyboardButton(s, callback_data=f"fl_seas_{movie_id}_{s}"))
+                    if len(row) == 2:
+                        keyboard_arr.append(row)
+                        row = []
+                if row: keyboard_arr.append(row)
+                keyboard_arr.append([InlineKeyboardButton("🔄 CLEAR FILTER", callback_data=f"fl_clear_{movie_id}_all")])
+                keyboard_arr.append([InlineKeyboardButton("<< BACK TO FILES >>", callback_data=f"v_main_{movie_id}")])
+                keyboard = InlineKeyboardMarkup(keyboard_arr)
+            else:
+                keyboard = create_quality_selection_keyboard(movie_id, view_type)
+
+        await query.edit_message_text(text=text, reply_markup=keyboard, parse_mode='Markdown')
+        return
+    
     # === START MENU BUTTONS LOGIC ===
     if data.startswith("start_"):
         await query.answer()
@@ -4283,14 +4426,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # ==================== SEASON SELECTION (NEW) ====================
         elif query.data.startswith("showseason_"):
-            parts = query.data.split('_', 2) # Format: showseason_123_Season 1
+            parts = query.data.split('_', 2)
             movie_id = int(parts[1])
             selected_season = parts[2]
             
-            movie_data = context.user_data.get('selected_movie_data')
-            if not movie_data or movie_data.get('id') != movie_id:
-                await query.edit_message_text("❌ Session expired. Please search again.")
-                return
+            # Context me season save karo
+            context.user_data['selected_season'] = selected_season
+            context.user_data['active_filter'] = None
+            
+            # Naye UI logic ki taraf redirect kar do
+            query.data = f"v_main_{movie_id}"
+            await button_callback(update, context) 
+            return
                 
             title = movie_data['title']
             all_qualities = movie_data['qualities']
