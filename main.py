@@ -8554,12 +8554,6 @@ def get_movies():
     """
     Return list of movies with pagination (Infinite Scroll).
     """
-
-@flask_app.route('/api/movies', methods=['GET'])
-def get_movies():
-    """
-    Return list of movies with pagination (Infinite Scroll).
-    """
     # Pagination Logic
     page = int(request.args.get('page', 1))
     limit = int(request.args.get('limit', 40)) # Ek baar mein 40 movies bhejo
