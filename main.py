@@ -3724,10 +3724,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         current_page_files = filtered_qualities[start_idx:end_idx]
 
         if view_type == "main":
-            text = f"📁 **{title}**\n"
-            if selected_season: text += f"📺 Season: **{selected_season}**\n"
-            if active_filter: text += f"🔍 Filter: **{active_filter['value']}**\n"
-            text += f"\n👇 **Your Requested Files Are Here**\n\n"
+            # ✅ Markdown (**) ko HTML (<b>) mein badla taaki link ke sath conflict na ho
+            text = f"📁 <b>{title}</b>\n"
+            if selected_season: text += f"📺 Season: <b>{selected_season}</b>\n"
+            if active_filter: text += f"🔍 Filter: <b>{active_filter['value']}</b>\n"
+            text += f"\n👇 <b>Your Requested Files Are Here</b>\n\n"
             
             if not filtered_qualities:
                 text += "❌ No files found for this filter.\n"
@@ -3738,13 +3739,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     file_size = file_data[3] if len(file_data) > 3 else "Unknown"
                     extra_info = file_data[5] if len(file_data) > 5 else ""
                     ep_tag = f"[{extra_info}] " if extra_info else ""
-                    # ✅ CLEAN HTML LINK: Brackets link ko todenge nahi
+                    # ✅ CLEAN HTML LINK
                     text += f"<b>{idx}.</b> <a href='https://t.me/{bot_username}?start=file_{movie_id}_{idx-1}'>💾 {file_size} | {title} {ep_tag}{quality}</a>\n\n"
             
-        is_season = True if selected_season else False
+            is_season = True if selected_season else False
+            # ✅ INDENTATION FIX: Ise exactly 'is_season' ke neeche align kar diya hai
             keyboard = create_quality_selection_keyboard(movie_id, "main", page, total_pages, current_page_files, is_season)
+            
         else:
-            text = f"📁 **{title}**\n\n👇 **Select {view_type.upper()} Filter:**\n\n"
+            text = f"📁 <b>{title}</b>\n\n👇 <b>Select {view_type.upper()} Filter:</b>\n\n"
             if view_type == "seas":
                 seasons = set()
                 for f in all_qualities:
@@ -3766,7 +3769,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 keyboard = create_quality_selection_keyboard(movie_id, view_type)
 
-        await query.edit_message_text(text=text, reply_markup=keyboard, parse_mode='Markdown')
+        # ✅ CRITICAL FIX: parse_mode='Markdown' ko 'HTML' kar diya!
+        await query.edit_message_text(text=text, reply_markup=keyboard, parse_mode='HTML')
         return
     
     # === START MENU BUTTONS LOGIC ===
