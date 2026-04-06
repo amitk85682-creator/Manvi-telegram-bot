@@ -3730,18 +3730,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text += f"\n👇 **Your Requested Files Are Here**\n\n"
             
             if not filtered_qualities:
-                    text += "❌ No files found for this filter.\n"
-                else:
-                    bot_username = context.bot.username
-                    for idx, file_data in enumerate(current_page_files, start=start_idx + 1):
-                        quality = file_data[0]
-                        file_size = file_data[3] if len(file_data) > 3 else "Unknown"
-                        extra_info = file_data[5] if len(file_data) > 5 else ""
-                        ep_tag = f"[{extra_info}] " if extra_info else ""
-                        # ✅ CLEAN HTML LINK: Brackets link ko todenge nahi
-                        text += f"<b>{idx}.</b> <a href='https://t.me/{bot_username}?start=file_{movie_id}_{idx-1}'>💾 {file_size} | {title} {ep_tag}{quality}</a>\n\n"
-                    
-            is_season = True if selected_season else False
+                text += "❌ No files found for this filter.\n"
+            else:
+                bot_username = context.bot.username
+                for idx, file_data in enumerate(current_page_files, start=start_idx + 1):
+                    quality = file_data[0]
+                    file_size = file_data[3] if len(file_data) > 3 else "Unknown"
+                    extra_info = file_data[5] if len(file_data) > 5 else ""
+                    ep_tag = f"[{extra_info}] " if extra_info else ""
+                    # ✅ CLEAN HTML LINK: Brackets link ko todenge nahi
+                    text += f"<b>{idx}.</b> <a href='https://t.me/{bot_username}?start=file_{movie_id}_{idx-1}'>💾 {file_size} | {title} {ep_tag}{quality}</a>\n\n"
+            
+        is_season = True if selected_season else False
             keyboard = create_quality_selection_keyboard(movie_id, "main", page, total_pages, current_page_files, is_season)
         else:
             text = f"📁 **{title}**\n\n👇 **Select {view_type.upper()} Filter:**\n\n"
