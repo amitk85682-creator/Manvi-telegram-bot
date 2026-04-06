@@ -2669,18 +2669,23 @@ def create_quality_selection_keyboard(movie_id, view="main", page=1, total_pages
 
     # ... (बाकी व्यूज जैसे language, quality, season पहले जैसे ही रहेंगे)
     elif view == "language":
-        keyboard.append([InlineKeyboardButton("MALAYALAM", callback_data=f"fl_lang_{movie_id}_Malayalam"), InlineKeyboardButton("TAMIL", callback_data=f"fl_lang_{movie_id}_Tamil")])
-        keyboard.append([InlineKeyboardButton("ENGLISH", callback_data=f"fl_lang_{movie_id}_English"), InlineKeyboardButton("HINDI", callback_data=f"fl_lang_{movie_id}_Hindi")])
-        keyboard.append([InlineKeyboardButton("TELUGU", callback_data=f"fl_lang_{movie_id}_Telugu"), InlineKeyboardButton("KANNADA", callback_data=f"fl_lang_{movie_id}_Kannada")])
-        keyboard.append([InlineKeyboardButton("🔄 CLEAR FILTER", callback_data=f"fl_clear_{movie_id}_all")])
-        keyboard.append([InlineKeyboardButton("<< BACK TO FILES >>", callback_data=f"v_main_{movie_id}")])
+                keyboard.append([InlineKeyboardButton("MALAYALAM", callback_data=f"fl_lang_{movie_id}_Malayalam"), InlineKeyboardButton("TAMIL", callback_data=f"fl_lang_{movie_id}_Tamil")])
+                keyboard.append([InlineKeyboardButton("ENGLISH", callback_data=f"fl_lang_{movie_id}_English"), InlineKeyboardButton("HINDI", callback_data=f"fl_lang_{movie_id}_Hindi")])
+                keyboard.append([InlineKeyboardButton("TELUGU", callback_data=f"fl_lang_{movie_id}_Telugu"), InlineKeyboardButton("KANNADA", callback_data=f"fl_lang_{movie_id}_Kannada")])
+                # ✅ NAYA: Gujarati, Marathi aur Punjabi add ho gaye
+                keyboard.append([InlineKeyboardButton("GUJARATI", callback_data=f"fl_lang_{movie_id}_Gujarati"), InlineKeyboardButton("MARATHI", callback_data=f"fl_lang_{movie_id}_Marathi")])
+                keyboard.append([InlineKeyboardButton("PUNJABI", callback_data=f"fl_lang_{movie_id}_Punjabi")])
+                keyboard.append([InlineKeyboardButton("🔄 CLEAR FILTER", callback_data=f"fl_clear_{movie_id}_all")])
+                keyboard.append([InlineKeyboardButton("<< BACK TO FILES >>", callback_data=f"v_main_{movie_id}")])
 
-    elif view == "quality":
-        keyboard.append([InlineKeyboardButton("360P", callback_data=f"fl_qual_{movie_id}_360p"), InlineKeyboardButton("480P", callback_data=f"fl_qual_{movie_id}_480p")])
-        keyboard.append([InlineKeyboardButton("720P", callback_data=f"fl_qual_{movie_id}_720p"), InlineKeyboardButton("1080P", callback_data=f"fl_qual_{movie_id}_1080p")])
-        keyboard.append([InlineKeyboardButton("4K", callback_data=f"fl_qual_{movie_id}_4K")])
-        keyboard.append([InlineKeyboardButton("🔄 CLEAR FILTER", callback_data=f"fl_clear_{movie_id}_all")])
-        keyboard.append([InlineKeyboardButton("<< BACK TO FILES >>", callback_data=f"v_main_{movie_id}")])
+            elif view == "quality":
+                keyboard.append([InlineKeyboardButton("360P", callback_data=f"fl_qual_{movie_id}_360p"), InlineKeyboardButton("480P", callback_data=f"fl_qual_{movie_id}_480p")])
+                keyboard.append([InlineKeyboardButton("720P", callback_data=f"fl_qual_{movie_id}_720p"), InlineKeyboardButton("1080P", callback_data=f"fl_qual_{movie_id}_1080p")])
+                # ✅ NAYA: 1440P aur 2160P (Premium Quality) add ho gaye
+                keyboard.append([InlineKeyboardButton("1440P", callback_data=f"fl_qual_{movie_id}_1440p"), InlineKeyboardButton("2160P", callback_data=f"fl_qual_{movie_id}_2160p")])
+                keyboard.append([InlineKeyboardButton("4K", callback_data=f"fl_qual_{movie_id}_4K")])
+                keyboard.append([InlineKeyboardButton("🔄 CLEAR FILTER", callback_data=f"fl_clear_{movie_id}_all")])
+                keyboard.append([InlineKeyboardButton("<< BACK TO FILES >>", callback_data=f"v_main_{movie_id}")])
 
     elif view == "season":
         # ये डमी है, असली सीजन्स डायनामिकली बनते हैं
@@ -3537,20 +3542,36 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = query.message.chat.id
     data = query.data
 
+    # ✅ NAYA: Video wala Pages Button Popup
+    if data == "ignore":
+        await query.answer("THIS IS PAGES BUTTON 🔴", show_alert=False)
+        return
+
     # ==================== NAYA: SINGLE FILE SEND ====================
     if data.startswith("send_single_"):
+        # Telegram File IDs mein underscores (_) ho sakte hain, isliye safai se nikalenge
         parts = data.split('_')
-        file_id_to_send = parts[2]
+        movie_id = int(parts[-1]) # Aakhri hissa hamesha movie_id hota hai
+        file_id_to_send = data.replace("send_single_", "").replace(f"_{movie_id}", "")
+        
+        # Memory se movie ka naam nikal lo
+        movie_data = context.user_data.get('selected_movie_data')
+        title = movie_data['title'] if movie_data else "Requested Movie"
+
         try:
-            # फाइल सेंड करने का कोड
-            await context.bot.send_document(
-                chat_id=chat_id, 
-                document=file_id_to_send, 
-                caption="✅ Here is your file!"
+            # 🚀 NAYA: Ab simple text ki jagah tera Premium function use hoga!
+            await send_movie_to_user(
+                update=update, 
+                context=context, 
+                movie_id=movie_id, 
+                title=title, 
+                url=None, 
+                file_id=file_id_to_send, 
+                send_warning=False # Har single file ke sath auto-delete warning baar-baar na bheje
             )
-            await query.answer("File Sent!", show_alert=False)
+            await query.answer("✅ File Sent!", show_alert=False)
         except Exception as e:
-            await query.answer("❌ Error sending file. ID invalid.", show_alert=True)
+            await query.answer("❌ Error sending file.", show_alert=True)
             logger.error(f"Single file send error: {e}")
         return
 
@@ -4391,30 +4412,22 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             limit = 10
             total_pages = (len(qualities) + limit - 1) // limit if qualities else 1
             
-            # Keyboard banana Video jaisa
-            keyboard = []
-            keyboard.append([InlineKeyboardButton("🚀 SEND ALL", callback_data=f"sendall_{movie_id}")])
-            keyboard.append([
-                InlineKeyboardButton("QUALITY", callback_data=f"v_qual_{movie_id}"),
-                InlineKeyboardButton("LANGUAGE", callback_data=f"v_lang_{movie_id}"),
-                InlineKeyboardButton("SEASON", callback_data=f"v_seas_{movie_id}")
-            ])
-            
-            nav_buttons = []
-            nav_buttons.append(InlineKeyboardButton("PAGE", callback_data="ignore"))
-            nav_buttons.append(InlineKeyboardButton(f"1/{total_pages}", callback_data="ignore"))
-            if 1 < total_pages:
-                nav_buttons.append(InlineKeyboardButton("NEXT ▶️", callback_data=f"vpage_{movie_id}_2"))
-            else:
-                nav_buttons.append(InlineKeyboardButton("NEXT >", callback_data="ignore"))
-            keyboard.append(nav_buttons)
-            
             # CLEAR PREVIOUS FILTERS
             context.user_data['active_filter'] = None
             
+            # ✅ NAYA: Function ko call karo taaki 1, 2, 3 wale buttons aa jayein!
+            current_files = qualities[:limit]
+            keyboard_markup = create_quality_selection_keyboard(
+                movie_id=movie_id, 
+                view="main", 
+                page=1, 
+                total_pages=total_pages, 
+                current_files=current_files
+            )
+            
             await query.edit_message_text(
                 selection_text,
-                reply_markup=InlineKeyboardMarkup(keyboard),
+                reply_markup=keyboard_markup,
                 parse_mode='Markdown'
             )
             return
@@ -4536,6 +4549,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parts = query.data.split('_')
                 view_type = parts[1]
                 page = 1 
+                
+                # ✅ NAYA: Video wale cool popups!
+                if view_type in ["lang", "qual", "seas"]:
+                    await query.answer("Share & Support Us ❤️", show_alert=False)
 
             # Filter Apply Karna
             filtered_qualities = all_qualities
@@ -4619,14 +4636,17 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 keyboard.append([InlineKeyboardButton("MALAYALAM", callback_data=f"fl_lang_{movie_id}_Malayalam"), InlineKeyboardButton("TAMIL", callback_data=f"fl_lang_{movie_id}_Tamil")])
                 keyboard.append([InlineKeyboardButton("ENGLISH", callback_data=f"fl_lang_{movie_id}_English"), InlineKeyboardButton("HINDI", callback_data=f"fl_lang_{movie_id}_Hindi")])
                 keyboard.append([InlineKeyboardButton("TELUGU", callback_data=f"fl_lang_{movie_id}_Telugu"), InlineKeyboardButton("KANNADA", callback_data=f"fl_lang_{movie_id}_Kannada")])
-                keyboard.append([InlineKeyboardButton("🔄 CLEAR FILTER", callback_data=f"fl_clear_{movie_id}_all")])
+                # ✅ NAYA: Missing Indian Languages
+                keyboard.append([InlineKeyboardButton("GUJARATI", callback_data=f"fl_lang_{movie_id}_Gujarati"), InlineKeyboardButton("MARATHI", callback_data=f"fl_lang_{movie_id}_Marathi")])
+                keyboard.append([InlineKeyboardButton("PUNJABI", callback_data=f"fl_lang_{movie_id}_Punjabi")])
                 keyboard.append([InlineKeyboardButton("<< BACK TO FILES >>", callback_data=f"v_main_{movie_id}")])
 
             elif view_type == "qual":
                 keyboard.append([InlineKeyboardButton("360P", callback_data=f"fl_qual_{movie_id}_360p"), InlineKeyboardButton("480P", callback_data=f"fl_qual_{movie_id}_480p")])
                 keyboard.append([InlineKeyboardButton("720P", callback_data=f"fl_qual_{movie_id}_720p"), InlineKeyboardButton("1080P", callback_data=f"fl_qual_{movie_id}_1080p")])
+                # ✅ NAYA: Extra High-Res Options
+                keyboard.append([InlineKeyboardButton("1440P", callback_data=f"fl_qual_{movie_id}_1440p"), InlineKeyboardButton("2160P", callback_data=f"fl_qual_{movie_id}_2160p")])
                 keyboard.append([InlineKeyboardButton("4K", callback_data=f"fl_qual_{movie_id}_4K")])
-                keyboard.append([InlineKeyboardButton("🔄 CLEAR FILTER", callback_data=f"fl_clear_{movie_id}_all")])
                 keyboard.append([InlineKeyboardButton("<< BACK TO FILES >>", callback_data=f"v_main_{movie_id}")])
 
             elif view_type == "seas":
