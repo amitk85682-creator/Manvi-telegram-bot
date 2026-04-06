@@ -2626,7 +2626,7 @@ def get_all_movie_qualities(movie_id):
 
 # create_quality_selection_keyboard function ko isse replace karein ya modify karein:
 
-def create_quality_selection_keyboard(movie_id, view="main", page=1, total_pages=1):
+def create_quality_selection_keyboard(movie_id, title="", qualities=None, page=0, season=None, view="main"):
     """Naya UI Video jaisa: Send All, Filters aur Pagination"""
     keyboard = []
     
@@ -2644,13 +2644,8 @@ def create_quality_selection_keyboard(movie_id, view="main", page=1, total_pages
         # Neeche Pagination
         nav_buttons = []
         nav_buttons.append(InlineKeyboardButton("PAGE", callback_data="ignore"))
-        nav_buttons.append(InlineKeyboardButton(f"{page}/{total_pages}", callback_data="ignore"))
-        
-        # Next Button (abhi basic next page handle karega)
-        if page < total_pages:
-            nav_buttons.append(InlineKeyboardButton("NEXT >", callback_data=f"page_{page+1}"))
-        else:
-            nav_buttons.append(InlineKeyboardButton("NEXT >", callback_data="ignore"))
+        nav_buttons.append(InlineKeyboardButton("1/1", callback_data="ignore"))
+        nav_buttons.append(InlineKeyboardButton("NEXT >", callback_data="ignore"))
             
         keyboard.append(nav_buttons)
 
@@ -4197,8 +4192,19 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     return
 
             # Agar normal Movie hai (ya Series ka season logic fail hua), toh direct qualities dikhao
-            selection_text = f"✅ You selected: **{title}**\n\n⬇️ **Please choose the file quality:**"
-            keyboard = create_quality_selection_keyboard(movie_id, title, qualities)
+            # Video jaisa Text List format banana
+            file_list_text = f"📁 **{title}**\n\n👇 **Your Requested Files Are Here**\n\n"
+            
+            for idx, file_data in enumerate(qualities[:10], start=1):
+                quality = file_data[0]
+                file_size = file_data[3] if len(file_data) > 3 else "Unknown Size"
+                extra_info = file_data[5] if len(file_data) > 5 else ""
+                
+                ep_tag = f"[{extra_info}] " if extra_info else ""
+                file_list_text += f"**{idx}.** 💾 {file_size} | {title} {ep_tag}{quality}\n\n"
+
+            selection_text = file_list_text
+            keyboard = create_quality_selection_keyboard(movie_id, title, qualities, view="main")
 
             await query.edit_message_text(
                 selection_text,
@@ -4235,7 +4241,19 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
                 
             # Ab sirf is Season ki files list karo
-            selection_text = f"📺 **{title} - {selected_season}**\n\n⬇️ **Please choose the file:**"
+            # Video jaisa Text List format banana
+            file_list_text = f"📺 **{title} - {selected_season}**\n\n👇 **Your Requested Files Are Here**\n\n"
+            
+            for idx, file_data in enumerate(filtered_qualities[:10], start=1):
+                quality = file_data[0]
+                file_size = file_data[3] if len(file_data) > 3 else "Unknown Size"
+                extra_info = file_data[5] if len(file_data) > 5 else ""
+                
+                ep_tag = f"[{extra_info}] " if extra_info else ""
+                file_list_text += f"**{idx}.** 💾 {file_size} | {title} {ep_tag}{quality}\n\n"
+
+            selection_text = file_list_text
+            keyboard_markup = create_quality_selection_keyboard(movie_id, title, filtered_qualities, page=0, season=selected_season, view="main")
             
             # Hum wahi purana keyboard function use kar rahe hain, bas list chhoti bhej rahe hain
             keyboard_markup = create_quality_selection_keyboard(movie_id, title, filtered_qualities, page=0, season=selected_season)
