@@ -2631,20 +2631,6 @@ def create_quality_selection_keyboard(movie_id, view="main", page=1, total_pages
     keyboard = []
     
     if view == "main":
-        # 1. फाइल्स के लिए बटन्स बनाना (अगर फाइल्स हैं)
-        if current_files:
-            file_buttons = []
-            for idx, file_data in enumerate(current_files, start=1):
-                # file_data[2] में file_id होता है (तुम्हारे get_all_movie_qualities फंक्शन के हिसाब से)
-                file_id = file_data[2]
-                file_buttons.append(InlineKeyboardButton(str(idx), callback_data=f"send_single_{file_id}_{movie_id}"))
-                
-                # एक लाइन में 5 बटन्स दिखाना
-                if len(file_buttons) == 5:
-                    keyboard.append(file_buttons)
-                    file_buttons = []
-            if file_buttons: # बची हुई फाइल्स
-                keyboard.append(file_buttons)
 
         # 2. अगर सीजन के अंदर हैं, तो बैक बटन दिखाओ
         if season_view:
@@ -3132,6 +3118,44 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                     
             # --- CASE 1: DIRECT MOVIE ID (movie_123) ---
+            
+            # --- CASE NAYA: DIRECT FILE CLICK FROM TEXT LINK ---
+            if payload.startswith("file_"):
+                try:
+                    parts = payload.split('_')
+                    movie_id = int(parts[1])
+                    file_index = int(parts[2])
+                    
+                    status_msg = await context.bot.send_message(chat_id=chat_id, text="⏳ **Fetching file...**", parse_mode='Markdown')
+                    
+                    # File ka data nikalo
+                    qualities = get_all_movie_qualities(movie_id)
+                    if qualities and len(qualities) > file_index:
+                        file_data = qualities[file_index]
+                        url = file_data[1]
+                        file_id = file_data[2]
+                        
+                        # Movie ka naam nikalo
+                        conn = get_db_connection()
+                        cur = conn.cursor()
+                        cur.execute("SELECT title FROM movies WHERE id = %s", (movie_id,))
+                        res = cur.fetchone()
+                        cur.close()
+                        close_db_connection(conn)
+                        title = res[0] if res else "Requested File"
+                        
+                        # Tera premium thumbnail wala function!
+                        await send_movie_to_user(update, context, movie_id, title, url, file_id, send_warning=False)
+                        
+                        try: await status_msg.delete() 
+                        except: pass
+                    else:
+                        await status_msg.edit_text("❌ File not found or expired.")
+                    return
+                except Exception as e:
+                    logger.error(f"File click error: {e}")
+                    await context.bot.send_message(chat_id=chat_id, text="❌ Invalid File Link")
+                    return
             
             if payload.startswith("movie_"):
                 try:
@@ -4398,13 +4422,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Video jaisa Text List format banana
             file_list_text = f"📁 **{title}**\n\n👇 **Your Requested Files Are Here**\n\n"
             
+            bot_username = context.bot.username
             for idx, file_data in enumerate(qualities[:10], start=1):
                 quality = file_data[0]
                 file_size = file_data[3] if len(file_data) > 3 else "Unknown Size"
                 extra_info = file_data[5] if len(file_data) > 5 else ""
                 
                 ep_tag = f"[{extra_info}] " if extra_info else ""
-                file_list_text += f"**{idx}.** 💾 {file_size} | {title} {ep_tag}{quality}\n\n"
+                # ✅ NAYA: Text directly clickable ban gaya Deep Link ke zariye!
+                file_list_text += f"**{idx}.** [💾 {file_size} | {title} {ep_tag}{quality}](https://t.me/{bot_username}?start=file_{movie_id}_{idx-1})\n\n"
 
             selection_text = file_list_text
             
@@ -4591,13 +4617,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if not filtered_qualities:
                     text += "❌ No files found for this filter.\n"
                 else:
-                    for idx, file_data in enumerate(current_page_files, start=1):
+                    bot_username = context.bot.username
+                    for idx, file_data in enumerate(current_page_files, start=start_idx + 1):
                         quality = file_data[0]
                         file_size = file_data[3] if len(file_data) > 3 else "Unknown"
                         extra_info = file_data[5] if len(file_data) > 5 else ""
                         ep_tag = f"[{extra_info}] " if extra_info else ""
-                        # Text mein sirf numbers dikhayenge, buttons niche honge
-                        text += f"**{idx}.** 💾 {file_size} | {title} {ep_tag}{quality}\n\n"
+                        # ✅ NAYA: Text directly clickable ban gaya Deep Link ke zariye!
+                        text += f"**{idx}.** [💾 {file_size} | {title} {ep_tag}{quality}](https://t.me/{bot_username}?start=file_{movie_id}_{idx-1})\n\n"
                 
                 # Check agar season view me hain
                 is_season = False
