@@ -2754,26 +2754,24 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
         all_qualities = get_all_movie_qualities(movie_id)
         if all_qualities:
             context.user_data['selected_movie_data'] = {'id': movie_id, 'title': title, 'qualities': all_qualities}
+            context.user_data['active_filter'] = None
+            context.user_data.pop('selected_season', None)
             
-            # Video jaisa Text List format banana
-            file_list_text = f"📁 **{title}**\n\n👇 **Your Requested Files Are Here**\n\n"
+            limit = 10
+            total_pages = (len(all_qualities) + limit - 1) // limit if all_qualities else 1
+            current_files = all_qualities[0:limit]
             
-            # Har file ko list mein add karna (Max 10 ek page par)
-            for idx, file_data in enumerate(all_qualities[:10], start=1):
-                quality = file_data[0]
-                file_size = file_data[3] if len(file_data) > 3 else "Unknown Size"
-                extra_info = file_data[5] if len(file_data) > 5 else ""
+            text = f"📁 **{title}**\n\n👇 **Your Requested Files Are Here**\n\n"
+            for idx, f_data in enumerate(current_files, start=1):
+                q_name = f_data[0]
+                f_size = f_data[3] if len(f_data)>3 else "Unknown"
+                e_info = f_data[5] if len(f_data)>5 else ""
+                ep_tag = f"[{e_info}] " if e_info else ""
+                text += f"**{idx}.** 💾 {f_size} | {title} {ep_tag}{q_name}\n\n"
                 
-                # Agar extra info (season/episode) hai toh add karo
-                ep_tag = f"{extra_info} " if extra_info else ""
-                file_list_text += f"**{idx}.** [{file_size}] {title} {ep_tag}{quality} mkv\n\n"
-
-            selection_text = file_list_text
+            keyboard = create_quality_selection_keyboard(movie_id, view="main", page=1, total_pages=total_pages, current_files=current_files)
             
-            # Naya UI function call karna
-            keyboard = create_quality_selection_keyboard(movie_id, view="main", page=1, total_pages=2)
-            
-            msg = await context.bot.send_message(chat_id=chat_id, text=selection_text, reply_markup=keyboard, parse_mode='Markdown')
+            msg = await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard, parse_mode='Markdown')
             track_message_for_deletion(context, chat_id, msg.message_id, 60)
             return
 
@@ -3539,15 +3537,21 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = query.message.chat.id
     data = query.data
 
-    # ==================== NAYA UI VIEWS, FILTERS & SINGLE FILE ====================
+    # ==================== NAYA: SINGLE FILE SEND ====================
     if data.startswith("send_single_"):
         parts = data.split('_')
         file_id_to_send = parts[2]
         try:
-            await context.bot.send_document(chat_id=chat_id, document=file_id_to_send, caption="✅ Here is your file!")
+            # फाइल सेंड करने का कोड
+            await context.bot.send_document(
+                chat_id=chat_id, 
+                document=file_id_to_send, 
+                caption="✅ Here is your file!"
+            )
             await query.answer("File Sent!", show_alert=False)
         except Exception as e:
-            await query.answer("❌ Error sending file.", show_alert=True)
+            await query.answer("❌ Error sending file. ID invalid.", show_alert=True)
+            logger.error(f"Single file send error: {e}")
         return
 
     elif data.startswith("back_to_seasons_"):
