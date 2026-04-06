@@ -6199,7 +6199,7 @@ async def handle_admin_poster(update: Update, context: ContextTypes.DEFAULT_TYPE
             # Restore Feature ke liye DB me save karo
             if sent_msg:
                 save_post_to_db(
-                    movie_id, chat_id, sent_msg.message_id, bot3, 
+                    movie_id, chat_id, sent_msg.message_id, "FlimfyBox_Bot",  # ✅ NAYA: bot3 hat gaya!
                     channel_caption, file_id, "photo", keyboard.to_dict(), None, "movies"
                 )
                 sent_count += 1
