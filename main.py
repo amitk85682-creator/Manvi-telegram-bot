@@ -4499,24 +4499,42 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if view_type in ["lang", "qual", "seas"]:
                     await query.answer("Share & Support Us ❤️", show_alert=False)
 
-            # Filter Apply Karna
+            # ==========================================
+            # 🚀 SMART FILTER LOGIC (Seasons + Lang + Qual)
+            # ==========================================
             filtered_qualities = all_qualities
-            active_filter = context.user_data['active_filter']
+            active_filter = context.user_data.get('active_filter')
+            
             if active_filter:
-                f_type = active_filter['type']
-                f_val = active_filter['value'].lower()
+                f_type = active_filter.get('type')
+                f_val = active_filter.get('value').lower()
                 temp_list = []
-                for q in all_qualities:
-                    q_name = str(q[0]).lower()
-                    lang_name = str(q[4]).lower() if len(q) > 4 else ""
-                    extra = str(q[5]).lower() if len(q) > 5 else ""
+                
+                for f in all_qualities:
+                    # File ki saari details combine kar rahe hain
+                    quality_str = str(f[0]).lower()
+                    lang_name = str(f[4]).lower() if len(f) > 4 else ""
+                    extra_info = str(f[5]).lower() if len(f) > 5 else ""
+                    combined_text = f"{quality_str} {lang_name} {extra_info}"
                     
-                    if f_type == "lang" and f_val in lang_name: temp_list.append(q)
-                    elif f_type == "qual" and f_val in q_name: temp_list.append(q)
-                    elif f_type == "seas" and f_val in extract_season_name(extra).lower(): temp_list.append(q)
+                    if f_type == 'seas':
+                        s_name = extract_season_name(f[5] if len(f) > 5 else "").lower()
+                        if s_name == f_val:
+                            temp_list.append(f)
+                            
+                    elif f_type == 'lang':
+                        if f_val in combined_text:
+                            temp_list.append(f)
+                            
+                    elif f_type == 'qual':
+                        if f_val in combined_text:
+                            temp_list.append(f)
+                            
                 filtered_qualities = temp_list
 
+            # ==========================================
             # Pagination Logic (10 files per page)
+            # ==========================================
             limit = 10
             total_pages = (len(filtered_qualities) + limit - 1) // limit if filtered_qualities else 1
             if page > total_pages: page = total_pages
