@@ -13,7 +13,7 @@ redis
 python-telegram-bot
 psycopg2-binary
 Flask
-google-generativeai
+google-generativeai>=0.8.6
 redis
 aiohttp
 waitress
@@ -21,3 +21,9 @@ result
 citation
 packaging>=24.0
 python-telegram-bot[job-queue]
+anthropic
+cinemagoer
+Pillow
+Flask-Cors
+groq
+qrcode
