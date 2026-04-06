@@ -2626,46 +2626,65 @@ def get_all_movie_qualities(movie_id):
 
 # create_quality_selection_keyboard function ko isse replace karein ya modify karein:
 
-def create_quality_selection_keyboard(movie_id, title="", qualities=None, page=0, season=None, view="main"):
-    """Naya UI Video jaisa: Send All, Filters aur Pagination"""
+def create_quality_selection_keyboard(movie_id, view="main", page=1, total_pages=1, current_files=None, season_view=False):
+    """नया UI: फाइल्स के लिए बटन्स, फिल्टर्स और पेजिनेशन"""
     keyboard = []
     
     if view == "main":
-        # Upar Send All ka button
+        # 1. फाइल्स के लिए बटन्स बनाना (अगर फाइल्स हैं)
+        if current_files:
+            file_buttons = []
+            for idx, file_data in enumerate(current_files, start=1):
+                # file_data[2] में file_id होता है (तुम्हारे get_all_movie_qualities फंक्शन के हिसाब से)
+                file_id = file_data[2]
+                file_buttons.append(InlineKeyboardButton(str(idx), callback_data=f"send_single_{file_id}_{movie_id}"))
+                
+                # एक लाइन में 5 बटन्स दिखाना
+                if len(file_buttons) == 5:
+                    keyboard.append(file_buttons)
+                    file_buttons = []
+            if file_buttons: # बची हुई फाइल्स
+                keyboard.append(file_buttons)
+
+        # 2. अगर सीजन के अंदर हैं, तो बैक बटन दिखाओ
+        if season_view:
+            keyboard.append([InlineKeyboardButton("🔙 Back to Seasons", callback_data=f"back_to_seasons_{movie_id}")])
+
+        # 3. Send All बटन
         keyboard.append([InlineKeyboardButton("🚀 SEND ALL", callback_data=f"sendall_{movie_id}")])
         
-        # Beech mein 3 filter buttons
+        # 4. Filters
         keyboard.append([
             InlineKeyboardButton("QUALITY", callback_data=f"v_qual_{movie_id}"),
             InlineKeyboardButton("LANGUAGE", callback_data=f"v_lang_{movie_id}"),
             InlineKeyboardButton("SEASON", callback_data=f"v_seas_{movie_id}")
         ])
         
-        # Neeche Pagination
+        # 5. Pagination
         nav_buttons = []
-        nav_buttons.append(InlineKeyboardButton("PAGE", callback_data="ignore"))
-        nav_buttons.append(InlineKeyboardButton("1/1", callback_data="ignore"))
-        nav_buttons.append(InlineKeyboardButton("NEXT >", callback_data="ignore"))
-            
+        nav_buttons.append(InlineKeyboardButton("◀️ PREV" if page > 1 else "PAGE", callback_data=f"vpage_{movie_id}_{page-1}" if page > 1 else "ignore"))
+        nav_buttons.append(InlineKeyboardButton(f"{page}/{total_pages}", callback_data="ignore"))
+        nav_buttons.append(InlineKeyboardButton("NEXT ▶️" if page < total_pages else "NEXT >", callback_data=f"vpage_{movie_id}_{page+1}" if page < total_pages else "ignore"))
         keyboard.append(nav_buttons)
 
+    # ... (बाकी व्यूज जैसे language, quality, season पहले जैसे ही रहेंगे)
     elif view == "language":
-        # Language Options
-        keyboard.append([InlineKeyboardButton("MALAYALAM", callback_data="ignore"), InlineKeyboardButton("TAMIL", callback_data="ignore")])
-        keyboard.append([InlineKeyboardButton("ENGLISH", callback_data="ignore"), InlineKeyboardButton("HINDI", callback_data="ignore")])
-        keyboard.append([InlineKeyboardButton("TELUGU", callback_data="ignore"), InlineKeyboardButton("KANNADA", callback_data="ignore")])
+        keyboard.append([InlineKeyboardButton("MALAYALAM", callback_data=f"fl_lang_{movie_id}_Malayalam"), InlineKeyboardButton("TAMIL", callback_data=f"fl_lang_{movie_id}_Tamil")])
+        keyboard.append([InlineKeyboardButton("ENGLISH", callback_data=f"fl_lang_{movie_id}_English"), InlineKeyboardButton("HINDI", callback_data=f"fl_lang_{movie_id}_Hindi")])
+        keyboard.append([InlineKeyboardButton("TELUGU", callback_data=f"fl_lang_{movie_id}_Telugu"), InlineKeyboardButton("KANNADA", callback_data=f"fl_lang_{movie_id}_Kannada")])
+        keyboard.append([InlineKeyboardButton("🔄 CLEAR FILTER", callback_data=f"fl_clear_{movie_id}_all")])
         keyboard.append([InlineKeyboardButton("<< BACK TO FILES >>", callback_data=f"v_main_{movie_id}")])
 
     elif view == "quality":
-        # Quality Options
-        keyboard.append([InlineKeyboardButton("360P", callback_data="ignore"), InlineKeyboardButton("480P", callback_data="ignore")])
-        keyboard.append([InlineKeyboardButton("720P", callback_data="ignore"), InlineKeyboardButton("1080P", callback_data="ignore")])
+        keyboard.append([InlineKeyboardButton("360P", callback_data=f"fl_qual_{movie_id}_360p"), InlineKeyboardButton("480P", callback_data=f"fl_qual_{movie_id}_480p")])
+        keyboard.append([InlineKeyboardButton("720P", callback_data=f"fl_qual_{movie_id}_720p"), InlineKeyboardButton("1080P", callback_data=f"fl_qual_{movie_id}_1080p")])
+        keyboard.append([InlineKeyboardButton("4K", callback_data=f"fl_qual_{movie_id}_4K")])
+        keyboard.append([InlineKeyboardButton("🔄 CLEAR FILTER", callback_data=f"fl_clear_{movie_id}_all")])
         keyboard.append([InlineKeyboardButton("<< BACK TO FILES >>", callback_data=f"v_main_{movie_id}")])
 
     elif view == "season":
-        # Season Options
-        keyboard.append([InlineKeyboardButton("SEASON 01", callback_data="ignore"), InlineKeyboardButton("SEASON 02", callback_data="ignore")])
-        keyboard.append([InlineKeyboardButton("SEASON 03", callback_data="ignore"), InlineKeyboardButton("SEASON 04", callback_data="ignore")])
+        # ये डमी है, असली सीजन्स डायनामिकली बनते हैं
+        keyboard.append([InlineKeyboardButton("🔄 CLEAR FILTER", callback_data=f"fl_clear_{movie_id}_all")])
         keyboard.append([InlineKeyboardButton("<< BACK TO FILES >>", callback_data=f"v_main_{movie_id}")])
 
     return InlineKeyboardMarkup(keyboard)
@@ -3919,6 +3938,22 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pre_fetched_meta = {}
 
         qualities = get_all_movie_qualities(movie_id)
+        
+        # NAYA: Filter apply karo taaki Send All sirf filter ki hui files bheje
+        active_filter = context.user_data.get('active_filter')
+        if active_filter:
+            f_type = active_filter['type']
+            f_val = active_filter['value'].lower()
+            temp_list = []
+            for q in qualities:
+                q_name = str(q[0]).lower()
+                lang_name = str(q[4]).lower() if len(q) > 4 else ""
+                extra = str(q[5]).lower() if len(q) > 5 else ""
+                if f_type == "lang" and f_val in lang_name: temp_list.append(q)
+                elif f_type == "qual" and f_val in q_name: temp_list.append(q)
+                elif f_type == "seas" and f_val in extract_season_name(extra).lower(): temp_list.append(q)
+            qualities = temp_list
+
         if not qualities:
             await query.answer("❌ No files found!", show_alert=True)
             return
@@ -4204,7 +4239,38 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 file_list_text += f"**{idx}.** 💾 {file_size} | {title} {ep_tag}{quality}\n\n"
 
             selection_text = file_list_text
-            keyboard = create_quality_selection_keyboard(movie_id, title, qualities, view="main")
+            
+            # Pagination calculate karo pehli baar ke liye
+            limit = 10
+            total_pages = (len(qualities) + limit - 1) // limit if qualities else 1
+            
+            # Keyboard banana Video jaisa
+            keyboard = []
+            keyboard.append([InlineKeyboardButton("🚀 SEND ALL", callback_data=f"sendall_{movie_id}")])
+            keyboard.append([
+                InlineKeyboardButton("QUALITY", callback_data=f"v_qual_{movie_id}"),
+                InlineKeyboardButton("LANGUAGE", callback_data=f"v_lang_{movie_id}"),
+                InlineKeyboardButton("SEASON", callback_data=f"v_seas_{movie_id}")
+            ])
+            
+            nav_buttons = []
+            nav_buttons.append(InlineKeyboardButton("PAGE", callback_data="ignore"))
+            nav_buttons.append(InlineKeyboardButton(f"1/{total_pages}", callback_data="ignore"))
+            if 1 < total_pages:
+                nav_buttons.append(InlineKeyboardButton("NEXT ▶️", callback_data=f"vpage_{movie_id}_2"))
+            else:
+                nav_buttons.append(InlineKeyboardButton("NEXT >", callback_data="ignore"))
+            keyboard.append(nav_buttons)
+            
+            # CLEAR PREVIOUS FILTERS
+            context.user_data['active_filter'] = None
+            
+            await query.edit_message_text(
+                selection_text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='Markdown'
+            )
+            return
 
             await query.edit_message_text(
                 selection_text,
@@ -4280,23 +4346,157 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         # ==================== ADMIN ACTIONS ====================
         
-        # ==================== NAYA UI VIEWS (Video Jaisa) ====================
-        elif query.data.startswith("v_"):
-            parts = query.data.split('_')
-            view_type = parts[1] # main, lang, qual, seas
-            movie_id = int(parts[2])
-            
-            # Naya keyboard generate karo view ke hisaab se
-            if view_type == "main":
-                keyboard = create_quality_selection_keyboard(movie_id, view="main")
-            elif view_type == "lang":
-                keyboard = create_quality_selection_keyboard(movie_id, view="language")
-            elif view_type == "qual":
-                keyboard = create_quality_selection_keyboard(movie_id, view="quality")
-            elif view_type == "seas":
-                keyboard = create_quality_selection_keyboard(movie_id, view="season")
+        # ==================== NAYA UI VIEWS, FILTERS & PAGINATION ====================
+        elif query.data.startswith("v_") or query.data.startswith("fl_") or query.data.startswith("vpage_"):
+            movie_data = context.user_data.get('selected_movie_data')
+            if not movie_data:
+                await query.answer("❌ Session expired. Search again.", show_alert=True)
+                return
+
+            movie_id = movie_data['id']
+            title = movie_data['title']
+            all_qualities = movie_data['qualities']
+
+            if 'active_filter' not in context.user_data:
+                context.user_data['active_filter'] = None
+
+            # Filter Handle Karna
+            if query.data.startswith("fl_"):
+                parts = query.data.split('_', 3)
+                f_type = parts[1]
+                if f_type == "clear":
+                    context.user_data['active_filter'] = None
+                    await query.answer("✅ Filters Cleared!")
+                else:
+                    f_val = parts[3]
+                    context.user_data['active_filter'] = {'type': f_type, 'value': f_val}
+                    await query.answer(f"✅ Filter Applied: {f_val}")
+                view_type = "main"
+                page = 1
                 
-            await query.edit_message_reply_markup(reply_markup=keyboard)
+            # Pagination Handle Karna
+            elif query.data.startswith("vpage_"):
+                parts = query.data.split('_')
+                page = int(parts[2])
+                view_type = "main"
+                
+            # Menu Navigation
+            else:
+                parts = query.data.split('_')
+                view_type = parts[1]
+                page = 1 
+
+            # Filter Apply Karna
+            filtered_qualities = all_qualities
+            active_filter = context.user_data['active_filter']
+            if active_filter:
+                f_type = active_filter['type']
+                f_val = active_filter['value'].lower()
+                temp_list = []
+                for q in all_qualities:
+                    q_name = str(q[0]).lower()
+                    lang_name = str(q[4]).lower() if len(q) > 4 else ""
+                    extra = str(q[5]).lower() if len(q) > 5 else ""
+                    
+                    if f_type == "lang" and f_val in lang_name: temp_list.append(q)
+                    elif f_type == "qual" and f_val in q_name: temp_list.append(q)
+                    elif f_type == "seas" and f_val in extract_season_name(extra).lower(): temp_list.append(q)
+                filtered_qualities = temp_list
+
+            # Pagination Logic (10 files per page)
+            limit = 10
+            total_pages = (len(filtered_qualities) + limit - 1) // limit if filtered_qualities else 1
+            if page > total_pages: page = total_pages
+            if page < 1: page = 1
+            
+            start_idx = (page - 1) * limit
+            end_idx = start_idx + limit
+            current_page_files = filtered_qualities[start_idx:end_idx]
+
+            # UI Text Banana
+            if view_type == "main":
+                text = f"📁 **{title}**\n"
+                if active_filter:
+                    text += f"🔍 Filter: **{active_filter['value']}**\n"
+                text += f"\n👇 **Your Requested Files Are Here**\n\n"
+                
+                if not filtered_qualities:
+                    text += "❌ No files found for this filter.\n"
+                else:
+                    for idx, file_data in enumerate(current_page_files, start=1):
+                        quality = file_data[0]
+                        file_size = file_data[3] if len(file_data) > 3 else "Unknown"
+                        extra_info = file_data[5] if len(file_data) > 5 else ""
+                        ep_tag = f"[{extra_info}] " if extra_info else ""
+                        # Text mein sirf numbers dikhayenge, buttons niche honge
+                        text += f"**{idx}.** 💾 {file_size} | {title} {ep_tag}{quality}\n\n"
+                
+                # Check agar season view me hain
+                is_season = False
+                if 'selected_season' in context.user_data:
+                    is_season = True
+
+                # Naya Keyboard (with file buttons)
+                keyboard_markup = create_quality_selection_keyboard(
+                    movie_id=movie_id, 
+                    view="main", 
+                    page=page, 
+                    total_pages=total_pages, 
+                    current_files=current_page_files,
+                    season_view=is_season
+                )
+
+            # Keyboard Banana
+            keyboard = []
+            if view_type == "main":
+                if filtered_qualities:
+                    keyboard.append([InlineKeyboardButton("🚀 SEND ALL", callback_data=f"sendall_{movie_id}")])
+                
+                keyboard.append([
+                    InlineKeyboardButton("QUALITY", callback_data=f"v_qual_{movie_id}"),
+                    InlineKeyboardButton("LANGUAGE", callback_data=f"v_lang_{movie_id}"),
+                    InlineKeyboardButton("SEASON", callback_data=f"v_seas_{movie_id}")
+                ])
+                
+                nav_buttons = []
+                nav_buttons.append(InlineKeyboardButton("◀️ PREV" if page > 1 else "PAGE", callback_data=f"vpage_{movie_id}_{page-1}" if page > 1 else "ignore"))
+                nav_buttons.append(InlineKeyboardButton(f"{page}/{total_pages}", callback_data="ignore"))
+                nav_buttons.append(InlineKeyboardButton("NEXT ▶️" if page < total_pages else "NEXT >", callback_data=f"vpage_{movie_id}_{page+1}" if page < total_pages else "ignore"))
+                keyboard.append(nav_buttons)
+
+            elif view_type == "lang":
+                keyboard.append([InlineKeyboardButton("MALAYALAM", callback_data=f"fl_lang_{movie_id}_Malayalam"), InlineKeyboardButton("TAMIL", callback_data=f"fl_lang_{movie_id}_Tamil")])
+                keyboard.append([InlineKeyboardButton("ENGLISH", callback_data=f"fl_lang_{movie_id}_English"), InlineKeyboardButton("HINDI", callback_data=f"fl_lang_{movie_id}_Hindi")])
+                keyboard.append([InlineKeyboardButton("TELUGU", callback_data=f"fl_lang_{movie_id}_Telugu"), InlineKeyboardButton("KANNADA", callback_data=f"fl_lang_{movie_id}_Kannada")])
+                keyboard.append([InlineKeyboardButton("🔄 CLEAR FILTER", callback_data=f"fl_clear_{movie_id}_all")])
+                keyboard.append([InlineKeyboardButton("<< BACK TO FILES >>", callback_data=f"v_main_{movie_id}")])
+
+            elif view_type == "qual":
+                keyboard.append([InlineKeyboardButton("360P", callback_data=f"fl_qual_{movie_id}_360p"), InlineKeyboardButton("480P", callback_data=f"fl_qual_{movie_id}_480p")])
+                keyboard.append([InlineKeyboardButton("720P", callback_data=f"fl_qual_{movie_id}_720p"), InlineKeyboardButton("1080P", callback_data=f"fl_qual_{movie_id}_1080p")])
+                keyboard.append([InlineKeyboardButton("4K", callback_data=f"fl_qual_{movie_id}_4K")])
+                keyboard.append([InlineKeyboardButton("🔄 CLEAR FILTER", callback_data=f"fl_clear_{movie_id}_all")])
+                keyboard.append([InlineKeyboardButton("<< BACK TO FILES >>", callback_data=f"v_main_{movie_id}")])
+
+            elif view_type == "seas":
+                seasons = set()
+                for f in all_qualities:
+                    extra = f[5] if len(f) > 5 else ""
+                    if extra:
+                        s = extract_season_name(extra)
+                        if s != "Extra Files": seasons.add(s)
+                s_list = sorted(list(seasons))
+                row = []
+                for s in s_list:
+                    row.append(InlineKeyboardButton(s, callback_data=f"fl_seas_{movie_id}_{s}"))
+                    if len(row) == 2:
+                        keyboard.append(row)
+                        row = []
+                if row: keyboard.append(row)
+                keyboard.append([InlineKeyboardButton("🔄 CLEAR FILTER", callback_data=f"fl_clear_{movie_id}_all")])
+                keyboard.append([InlineKeyboardButton("<< BACK TO FILES >>", callback_data=f"v_main_{movie_id}")])
+
+            await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
             return
         
         # ==================== QUALITY PAGINATION (NEXT/BACK) ====================
