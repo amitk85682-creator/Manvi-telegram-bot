@@ -3606,6 +3606,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("THIS IS PAGES BUTTON 🔴", show_alert=False)
         return
 
+    if data.startswith("fl_") or data.startswith("v_"):
+        parts = query.data.split('_')
+        view_type = parts[1] if parts[0] == "v" else "main" 
+        
+        # ✅ NAYA: Video wale cool popups!
+        if view_type in ["lang", "qual", "seas"]:
+             await query.answer("Share & Support Us ❤️", show_alert=False)
+
     # ==================== NAYA: SINGLE FILE SEND ====================
     if data.startswith("send_single_"):
         # Telegram File IDs mein underscores (_) ho sakte hain, isliye safai se nikalenge
