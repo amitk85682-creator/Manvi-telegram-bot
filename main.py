@@ -2758,7 +2758,7 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 f_size = f_data[3] if len(f_data)>3 else "Unknown"
                 e_info = f_data[5] if len(f_data)>5 else ""
                 ep_tag = f"[{e_info}] " if e_info else ""
-                text += f"**{idx}.** 💾 {f_size} | {title} {ep_tag}{q_name}\n\n"
+                text += f"**{idx}.** **{f_size} | {title} {ep_tag}{q_name}**\n\n"
                 
             keyboard = create_quality_selection_keyboard(movie_id, view="main", page=1, total_pages=total_pages, current_files=current_files)
             
@@ -4330,7 +4330,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 ep_tag = f"[{extra_info}] " if extra_info else ""
                 # ✅ CLEAN HTML LINK: Naruto bot jaisa neela text!
-                file_list_text += f"<b>{idx}.</b> <a href='https://t.me/{bot_username}?start=file_{movie_id}_{idx-1}'>💾 {file_size} | {title} {ep_tag}{quality}</a>\n\n"
+                file_list_text += f"<b>{idx}.</b> <b><a href='https://t.me/{bot_username}?start=file_{movie_id}_{idx-1}'>{file_size} | {title} {ep_tag}{quality}</a></b>\n\n"
 
             selection_text = file_list_text
             
@@ -4581,6 +4581,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         quality = re.sub(r'\[([^\]]+)\]\(https?://[^\)]+\)', r'\1', quality)
                         quality = re.sub(r'\(https?://[^\)]+\)', '', quality)
                         quality = re.sub(r'https?://[^\s]+', '', quality)
+                        # 👇 Ye 2 lines nayi add karni hain: t.me aur @usernames udane ke liye
+                        quality = re.sub(r'(?i)t\.me/[^\s]+', '', quality)
+                        quality = re.sub(r'@[a-zA-Z0-9_]+', '', quality)
                         
                         file_size = file_data[3] if len(file_data) > 3 else "Unknown"
                         
@@ -4589,10 +4592,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         extra_info = re.sub(r'\[([^\]]+)\]\(https?://[^\)]+\)', r'\1', extra_info)
                         extra_info = re.sub(r'\(https?://[^\)]+\)', '', extra_info)
                         extra_info = re.sub(r'https?://[^\s]+', '', extra_info)
+                        # 👇 Ye 2 lines yahan bhi add karni hain
+                        extra_info = re.sub(r'(?i)t\.me/[^\s]+', '', extra_info)
+                        extra_info = re.sub(r'@[a-zA-Z0-9_]+', '', extra_info)
                         
                         ep_tag = f"[{extra_info.strip()}] " if extra_info.strip() else ""
                         
-                        text += f"<b>{idx}.</b> <a href='https://t.me/{bot_username}?start=file_{movie_id}_{idx-1}'>💾 {file_size} | {title} {ep_tag}{quality.strip()}</a>\n\n"
+                        text += f"<b>{idx}.</b> <b><a href='https://t.me/{bot_username}?start=file_{movie_id}_{idx-1}'>{file_size} | {title} {ep_tag}{quality.strip()}</a></b>\n\n"
 
             elif view_type in ["lang", "qual"]:
                 text = f"📁 <b>{title}</b>\n\n👇 <b>Select {view_type.upper()} Filter:</b>\n\n"
@@ -4663,7 +4669,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 keyboard.append([InlineKeyboardButton("4K", callback_data=f"fl_qual_{movie_id}_4K")])
                 keyboard.append([InlineKeyboardButton("<< BACK TO MENU >>", callback_data=f"v_main_{movie_id}")])
 
-            await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+            # 👇 YAHAN disable_web_page_preview=True ADD KAR DIYA HAI 👇
+            await query.edit_message_text(
+                text=text, 
+                reply_markup=InlineKeyboardMarkup(keyboard), 
+                parse_mode='HTML',
+                disable_web_page_preview=True 
+            )
             return
         
         # ==================== QUALITY PAGINATION (NEXT/BACK) ====================
