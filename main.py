@@ -4557,9 +4557,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if view_type == "main" or view_type == "seas":
                 text = f"📁 <b>{title}</b>\n"
                 
-                # Agar koi season select kiya hua hai, to wo upar dikhega
+                # 🚀 NAYA FIX: Season ko alag se bada aur highlight dikhane ke liye
                 if 'selected_season' in context.user_data and context.user_data['selected_season']:
-                    text += f"📺 Season: <b>{context.user_data['selected_season']}</b>\n"
+                    s_name = context.user_data['selected_season'].upper()
+                    text += f"━━━━━━━━━━━━━━━━━━━━\n"
+                    text += f" <b>[ {s_name} ]</b> \n"
+                    text += f"━━━━━━━━━━━━━━━━━━━━\n"
                     
                 if active_filter:
                     text += f"🔍 Filter: <b>{active_filter['value']}</b>\n"
@@ -4596,7 +4599,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # Keyboard Banana
             keyboard = []
-            if view_type == "main" or view_type == "seas":
+            
+            # 1. MAIN MENU: Yahan normal buttons dikhenge
+            if view_type == "main":
                 if filtered_qualities:
                     keyboard.append([InlineKeyboardButton("🚀 SEND ALL", callback_data=f"sendall_{movie_id}")])
                 
@@ -4612,48 +4617,51 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 nav_buttons.append(InlineKeyboardButton("NEXT ▶️" if page < total_pages else "NEXT >", callback_data=f"vpage_{movie_id}_{page+1}" if page < total_pages else "ignore"))
                 keyboard.append(nav_buttons)
 
-                # 🚀 NAYA FIX: Accordion Style Season List (Naruto Bot jaisa)
-                if view_type == "seas":
-                    keyboard.append([InlineKeyboardButton("⬇ SELECT SEASON ⬇", callback_data="ignore")])
-                    seasons = set()
-                    for f in all_qualities:
-                        extra = f[5] if len(f) > 5 else ""
-                        if extra:
-                            s = extract_season_name(extra)
-                            if s != "Extra Files": seasons.add(s)
-                    s_list = sorted(list(seasons))
-                    row = []
-                    for s in s_list:
-                        # Premium formatting (SEASON 1 -> SEASON 01)
-                        btn_text = s.upper()
-                        if btn_text.startswith("SEASON ") and len(btn_text.split(" ")[1]) == 1:
-                            btn_text = btn_text.replace("SEASON ", "SEASON 0")
-                            
-                        row.append(InlineKeyboardButton(btn_text, callback_data=f"fl_seas_{movie_id}_{s}"))
-                        if len(row) == 2:
-                            keyboard.append(row)
-                            row = []
-                    if row: keyboard.append(row)
-                    
-                    keyboard.append([
-                        InlineKeyboardButton("🔄 CLEAR FILTER", callback_data=f"fl_clear_{movie_id}_all"),
-                        InlineKeyboardButton("🔼 HIDE SEASONS", callback_data=f"v_main_{movie_id}")
-                    ])
+            # 2. SEASON MENU: 🚀 NAYA FIX - Yahan baaki kachra gayab, sirf Seasons!
+            elif view_type == "seas":
+                keyboard.append([InlineKeyboardButton("⬇ SELECT SEASON ⬇", callback_data="ignore")])
+                
+                seasons = set()
+                for f in all_qualities:
+                    extra = f[5] if len(f) > 5 else ""
+                    if extra:
+                        s = extract_season_name(extra)
+                        if s != "Extra Files": seasons.add(s)
+                        
+                s_list = sorted(list(seasons))
+                row = []
+                for s in s_list:
+                    btn_text = s.upper()
+                    if btn_text.startswith("SEASON ") and len(btn_text.split(" ")[1]) == 1:
+                        btn_text = btn_text.replace("SEASON ", "SEASON 0")
+                        
+                    row.append(InlineKeyboardButton(btn_text, callback_data=f"fl_seas_{movie_id}_{s}"))
+                    if len(row) == 2:
+                        keyboard.append(row)
+                        row = []
+                if row: keyboard.append(row)
+                
+                keyboard.append([
+                    InlineKeyboardButton("🔄 CLEAR FILTER", callback_data=f"fl_clear_{movie_id}_all"),
+                    InlineKeyboardButton("🔼 BACK TO MENU", callback_data=f"v_main_{movie_id}")
+                ])
 
+            # 3. LANGUAGE MENU
             elif view_type == "lang":
                 keyboard.append([InlineKeyboardButton("MALAYALAM", callback_data=f"fl_lang_{movie_id}_Malayalam"), InlineKeyboardButton("TAMIL", callback_data=f"fl_lang_{movie_id}_Tamil")])
                 keyboard.append([InlineKeyboardButton("ENGLISH", callback_data=f"fl_lang_{movie_id}_English"), InlineKeyboardButton("HINDI", callback_data=f"fl_lang_{movie_id}_Hindi")])
                 keyboard.append([InlineKeyboardButton("TELUGU", callback_data=f"fl_lang_{movie_id}_Telugu"), InlineKeyboardButton("KANNADA", callback_data=f"fl_lang_{movie_id}_Kannada")])
                 keyboard.append([InlineKeyboardButton("GUJARATI", callback_data=f"fl_lang_{movie_id}_Gujarati"), InlineKeyboardButton("MARATHI", callback_data=f"fl_lang_{movie_id}_Marathi")])
                 keyboard.append([InlineKeyboardButton("PUNJABI", callback_data=f"fl_lang_{movie_id}_Punjabi")])
-                keyboard.append([InlineKeyboardButton("<< BACK TO FILES >>", callback_data=f"v_main_{movie_id}")])
+                keyboard.append([InlineKeyboardButton("<< BACK TO MENU >>", callback_data=f"v_main_{movie_id}")])
 
+            # 4. QUALITY MENU
             elif view_type == "qual":
                 keyboard.append([InlineKeyboardButton("360P", callback_data=f"fl_qual_{movie_id}_360p"), InlineKeyboardButton("480P", callback_data=f"fl_qual_{movie_id}_480p")])
                 keyboard.append([InlineKeyboardButton("720P", callback_data=f"fl_qual_{movie_id}_720p"), InlineKeyboardButton("1080P", callback_data=f"fl_qual_{movie_id}_1080p")])
                 keyboard.append([InlineKeyboardButton("1440P", callback_data=f"fl_qual_{movie_id}_1440p"), InlineKeyboardButton("2160P", callback_data=f"fl_qual_{movie_id}_2160p")])
                 keyboard.append([InlineKeyboardButton("4K", callback_data=f"fl_qual_{movie_id}_4K")])
-                keyboard.append([InlineKeyboardButton("<< BACK TO FILES >>", callback_data=f"v_main_{movie_id}")])
+                keyboard.append([InlineKeyboardButton("<< BACK TO MENU >>", callback_data=f"v_main_{movie_id}")])
 
             await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
             return
