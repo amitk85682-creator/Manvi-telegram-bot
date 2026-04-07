@@ -775,7 +775,7 @@ async def fallback_extraction(caption_text):
         text = re.sub(r'^\[[^\]]+\]\s*', '', text)          # [Group] ko udayega
         
         # 2. Detect if it's a web series (contains season/episode indicators)
-        season_pattern = re.compile(r'\b(S\d{1,2}|Season\s*\d+|S\d{1,2}E\d{1,2}|\[E\d{1,2}-\d{1,2}\])\b', re.IGNORECASE)
+        season_pattern = re.compile(r'\b(S\d{1,2}|Season\s*\d+|S\d{1,2}E\d{1,3}|\[?E\d{1,3}[-~_]\d{1,3}\]?|EP\s*\d{1,3}(?:[-~_]\d{1,3})?|Episode\s*\d+|Part\s*\d+|P\d+)\b', re.IGNORECASE)
         season_match = season_pattern.search(text)
         if season_match:
             # Use existing web series logic (kept from original)
@@ -899,11 +899,13 @@ async def _extract_web_series(text, original):
         # 1. Remove language indicators line if present
         text = re.sub(r'🔊.*?(?:\n|$)', '', text, flags=re.DOTALL)
 
-        # 2. Find season/episode position to split title
+        # 2. Find season/episode/part position to split title
         split_pos = None
         season_patterns = [
+            r'\bPart\s*\d+\b', r'\bP\d+\b',
             r'\bS\d{1,2}\b', r'\bSeason\s*\d+\b',
-            r'\bS\d{1,2}E\d{1,2}\b', r'\[E\d{1,2}-\d{1,2}\]'
+            r'\bS\d{1,2}E\d{1,3}\b', r'\[?E\d{1,3}[-~_]\d{1,3}\]?',
+            r'\bEP\s*\d{1,3}(?:[-~_]\d{1,3})?\b', r'\bEpisode\s*\d+\b'
         ]
         for pattern in season_patterns:
             match = re.search(pattern, text, re.IGNORECASE)
@@ -955,17 +957,26 @@ async def _extract_web_series(text, original):
                 languages.append(name)
         language = ', '.join(dict.fromkeys(languages)) if languages else ""
 
-        # Extra info (season/episodes)
+        # Extra info (season/episodes/parts)
         extra_parts = []
+        
+        # Pehle Part dhoondo (e.g., P1, Part 1)
+        p_match = re.search(r'(?i)\b(Part\s*\d+|P\d+)\b', text)
+        if p_match:
+            extra_parts.append(p_match.group().upper())
+            
         s_match = re.search(r'(?i)(s\d{1,2}|season\s*\d+)', text)
         if s_match:
             extra_parts.append(s_match.group().upper())
-        e_match = re.search(r'(?i)(\[?(?:ep|e|episode)\s*\d{1,2}\s*[-~_]\s*\d{1,2}\]?)', text)
+            
+        e_match = re.search(r'(?i)(\[?(?:ep|e|episode)\s*\d{1,3}\s*[-~_]\s*\d{1,3}\]?|\b(?:ep|e)\s*\d{1,3}\b)', text)
         if e_match:
             ep = re.sub(r'[\[\]]', '', e_match.group()).upper()
             extra_parts.append(ep)
+            
         if re.search(r'(?i)(combined|complete|batch)', text):
             extra_parts.append('COMBINED')
+            
         extra_info = ' '.join(extra_parts)
 
         # Category
