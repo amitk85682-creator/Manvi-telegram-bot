@@ -269,6 +269,7 @@ def setup_trending_db():
             )
         """)
 
+        # Add existing missing columns
         for col in ['posted_by']:
             cur.execute(f"""
                 SELECT column_name FROM information_schema.columns
@@ -276,6 +277,14 @@ def setup_trending_db():
             """)
             if not cur.fetchone():
                 cur.execute(f"ALTER TABLE trending_history ADD COLUMN {col} TEXT DEFAULT NULL")
+
+        # 👇 NAYA: Status track karne ke liye column (alerted ya auto_posted)
+        cur.execute("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_name='trending_history' AND column_name='status'
+        """)
+        if not cur.fetchone():
+            cur.execute("ALTER TABLE trending_history ADD COLUMN status TEXT DEFAULT 'alerted'")
 
         for col in ['locked_by', 'lock_time']:
             cur.execute(f"""
@@ -289,7 +298,7 @@ def setup_trending_db():
         conn.commit()
         cur.close()
         close_db_connection(conn)
-        logger.info("✅ Trending DB ready")
+        logger.info("✅ Trending DB ready with Status Tracking")
         return True
     except Exception as e:
         logger.error(f"setup_trending_db error: {e}")
@@ -396,48 +405,37 @@ async def check_and_alert_trending(app, admin_id):
             if not title or not tmdb_id:
                 continue
 
-            # Check if already alerted
-            cur.execute("SELECT tmdb_id FROM trending_history WHERE tmdb_id = %s", (tmdb_id,))
-            if cur.fetchone():
+            # Fetch extra details to get IMDb ID
+            extra = fetch_extra_details(tmdb_id, media_type)
+            imdb_id = extra.get('imdb_id') # TMDB normally returns this for movies
+
+            # 1. HISTORY CHECK
+            cur.execute("SELECT status FROM trending_history WHERE tmdb_id = %s", (tmdb_id,))
+            hist_row = cur.fetchone()
+            hist_status = hist_row[0] if hist_row else None
+
+            # Agar already channel pe post ho chuki hai, toh kuch mat karo
+            if hist_status == 'auto_posted':
                 skipped_already += 1
                 continue
 
-            # Insert into history
-            try:
-                cur.execute("""
-                    INSERT INTO trending_history (tmdb_id, title, media_type, popularity, vote_average, posted_by)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                """, (tmdb_id, title, media_type, item.get('popularity', 0), item.get('vote_average', 0), BOT_INSTANCE_ID))
-                conn.commit()
-            except Exception as e:
-                logger.error(f"Insert error: {e}")
-                conn.rollback()
-                continue
+            # 2. MAIN DB CHECK (IMDb ID First, then EXACT Title fallback)
+            movie_row = None
+            if imdb_id:
+                cur.execute("SELECT id FROM movies WHERE imdb_id = %s LIMIT 1", (imdb_id,))
+                movie_row = cur.fetchone()
+            
+            # Agar IMDb ID se na mile (ya ID na ho), tabhi EXACT naam se dhoondo (ILIKE %title% use nahi karna)
+            if not movie_row:
+                cur.execute("SELECT id FROM movies WHERE title = %s LIMIT 1", (title,))
+                movie_row = cur.fetchone()
 
-            # Fetch extra details for message
-            extra = fetch_extra_details(tmdb_id, media_type)
-
-            # Use VERTICAL poster (portrait) for cinematic effect
-            image_url = None
-            if item.get('poster_path'):
-                image_url = f"https://image.tmdb.org/t/p/original{item['poster_path']}"
-            elif item.get('backdrop_path'):
-                image_url = f"https://image.tmdb.org/t/p/original{item['backdrop_path']}"
-
-            processed_image = None
-            if image_url:
-                processed_image = await download_and_process_poster(image_url)
-
-            # Check if movie exists in main 'movies' table
-            cur.execute("SELECT id FROM movies WHERE title ILIKE %s LIMIT 1", (f"%{title}%",))
-            movie_row = cur.fetchone()
-
+            # --- POSTING & ALERTING LOGIC ---
             if movie_row:
-                # Auto-post to channel (clean channel message)
+                # 🎬 MOVIE DATABASE MEIN MIL GAYI!
                 channel_text = build_channel_post(item, extra)
                 watch_link = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_row[0]}"
 
-                # --- 4‑BUTTON LAYOUT (exactly as in main.py) ---
                 channel_buttons = InlineKeyboardMarkup([
                     [InlineKeyboardButton("Download Now", url=watch_link),
                      InlineKeyboardButton("Download Now", url=watch_link)],
@@ -445,26 +443,64 @@ async def check_and_alert_trending(app, admin_id):
                     [InlineKeyboardButton("📢 Join Channel", url=os.environ.get('FILMFYBOX_CHANNEL_URL', 'https://t.me/FlimfyBox'))]
                 ])
 
+                # Poster process karo
+                image_url = f"https://image.tmdb.org/t/p/original{item['poster_path']}" if item.get('poster_path') else None
+                if not image_url and item.get('backdrop_path'):
+                    image_url = f"https://image.tmdb.org/t/p/original{item['backdrop_path']}"
+                
+                processed_image = await download_and_process_poster(image_url) if image_url else None
+
+                # Channel me bhejo
                 if processed_image:
                     await app.bot.send_photo(chat_id=CHANNEL_ID, photo=processed_image, caption=channel_text, parse_mode='HTML', reply_markup=channel_buttons)
                 else:
                     await app.bot.send_message(chat_id=CHANNEL_ID, text=channel_text, parse_mode='HTML', reply_markup=channel_buttons)
+                
                 auto_posted += 1
                 skipped_in_db += 1
-                logger.info(f"Auto-posted: {title}")
+                logger.info(f"Auto-posted (Found in DB): {title}")
+
+                # History update karo
+                if hist_status == 'alerted':
+                    cur.execute("UPDATE trending_history SET status = 'auto_posted' WHERE tmdb_id = %s", (tmdb_id,))
+                else:
+                    cur.execute("""
+                        INSERT INTO trending_history (tmdb_id, title, media_type, popularity, vote_average, posted_by, status)
+                        VALUES (%s, %s, %s, %s, %s, %s, 'auto_posted')
+                    """, (tmdb_id, title, media_type, item.get('popularity', 0), item.get('vote_average', 0), BOT_INSTANCE_ID))
+                conn.commit()
+
             else:
-                # Admin alert (with warning lines)
+                # 🚫 MOVIE DATABASE MEIN NAHI HAI
+                if hist_status == 'alerted':
+                    # Admin ko pehle hi bata diya tha, par usne abhi tak add nahi ki. Spam mat karo.
+                    skipped_already += 1
+                    continue
+                
+                # Nayi trending movie hai, Admin ko Alert karo!
                 admin_text, admin_buttons, admin_image_url = build_admin_alert(item, extra)
+                
+                image_url = f"https://image.tmdb.org/t/p/original{item['poster_path']}" if item.get('poster_path') else None
+                processed_image = await download_and_process_poster(image_url) if image_url else None
+
                 if processed_image:
                     await app.bot.send_photo(chat_id=admin_id, photo=processed_image, caption=admin_text, parse_mode='HTML', reply_markup=admin_buttons)
                 elif admin_image_url:
                     await app.bot.send_photo(chat_id=admin_id, photo=admin_image_url, caption=admin_text, parse_mode='HTML', reply_markup=admin_buttons)
                 else:
                     await app.bot.send_message(chat_id=admin_id, text=admin_text, parse_mode='HTML', reply_markup=admin_buttons)
+                
                 new_alerts += 1
-                logger.info(f"Admin alert: {title}")
+                logger.info(f"New Admin alert: {title}")
 
-            await asyncio.sleep(3)
+                # History me 'alerted' mark karke save kar do
+                cur.execute("""
+                    INSERT INTO trending_history (tmdb_id, title, media_type, popularity, vote_average, posted_by, status)
+                    VALUES (%s, %s, %s, %s, %s, %s, 'alerted')
+                """, (tmdb_id, title, media_type, item.get('popularity', 0), item.get('vote_average', 0), BOT_INSTANCE_ID))
+                conn.commit()
+
+            await asyncio.sleep(3) # Flood control
 
         # Summary
         summary = build_summary_message(new_alerts, total, skipped_in_db, skipped_already)
