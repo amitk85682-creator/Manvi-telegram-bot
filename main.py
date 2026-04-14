@@ -108,7 +108,7 @@ def get_safe_font(text, style=None):
     return random.choice([to_bold_italic, to_double_struck])(text)
 
 # ==================== GLOBAL VARIABLES ====================
-BATCH_18_SESSION = {'active': False, 'admin_id': None, 'posts': []}
+BATCH_18_SESSION = {'active': False, 'admin_id': None, 'files': []}
 
 background_tasks = set()
 
@@ -758,7 +758,38 @@ Example format: alias1, alias2, alias3, alias4"""
 
     return generate_basic_aliases(movie_title, year)
 
+def generate_basic_aliases(title, year=""):
+    """
+    Fallback function to generate simple search aliases without AI.
+    """
+    aliases = set()
+    title_lower = title.lower().strip()
+    aliases.add(title_lower)
+    aliases.add(title_lower.replace(" ", ""))
+    if year:
+        aliases.add(f"{title_lower} {year}")
+        aliases.add(f"{title_lower}{year}")
+    # Remove leading 'the' variations
+    if title_lower.startswith("the "):
+        base = title_lower[4:]
+        aliases.add(base)
+        if year:
+            aliases.add(f"{base} {year}")
+            aliases.add(f"{base}{year}")
+    return list(aliases)
 
+def normalize_episodes(text):
+    # 1. E12 22 -> E12-22
+    text = re.sub(r'(?i)\b(e|ep|episode)\s*(\d{1,3})\s+(\d{1,3})\b(?!\s*p)', r'\1\2-\3', text)
+    
+    # 2. E12 e22 / E12 ep22 -> E12-22
+    text = re.sub(r'(?i)\b(e|ep|episode)\s*(\d{1,3})\s+(?:e|ep|episode)\s*(\d{1,3})\b', r'\1\2-\3', text)
+    
+    # 3. E12 to 22 / E12 to22 -> E12-22
+    text = re.sub(r'(?i)\b(e|ep|episode)\s*(\d{1,3})\s*to\s*(?:e|ep|episode)?\s*(\d{1,3})\b', r'\1\2-\3', text)
+    
+    return text
+    
 async def fallback_extraction(caption_text):
     """
     SMART FALLBACK: Improved regex-based extraction for both movies and web series.
@@ -775,7 +806,7 @@ async def fallback_extraction(caption_text):
         text = re.sub(r'^\[[^\]]+\]\s*', '', text)          # [Group] ko udayega
         
         # 2. Detect if it's a web series (contains season/episode indicators)
-        season_pattern = re.compile(r'\b(S\d{1,2}|Season\s*\d+|S\d{1,2}E\d{1,3}|\[?E\d{1,3}[-~_]\d{1,3}\]?|EP\s*\d{1,3}(?:[-~_]\d{1,3})?|Episode\s*\d+|Part\s*\d+|P\d+)\b', re.IGNORECASE)
+        season_pattern = re.compile(r'\b(S\d{1,2}|Season\s*\d+|S\d{1,2}E\d{1,3}|\[?E\d{1,3}\s*(?:[-~_]|to)\s*(?:e|ep)?\d{1,3}\]?|EP\s*\d{1,3}(?:\s*(?:[-~_]|to)\s*(?:e|ep)?\d{1,3})?|Episode\s*\d+|Part\s*\d+|P\d+)\b', re.IGNORECASE)
         season_match = season_pattern.search(text)
         if season_match:
             # Use existing web series logic (kept from original)
@@ -891,12 +922,11 @@ async def fallback_extraction(caption_text):
 
 
 async def _extract_web_series(text, original):
-    """
-    Helper for web series extraction (adapted from original fallback logic).
-    """
-    # This is the original web series logic, slightly cleaned
     try:
-        # 1. Remove language indicators line if present
+        # 1. Episode formats ko normalize karo (to22, ep22, space etc.)
+        text = normalize_episodes(text)
+        
+        # 2. Remove language indicators line if present
         text = re.sub(r'🔊.*?(?:\n|$)', '', text, flags=re.DOTALL)
 
         # 2. Find season/episode/part position to split title
@@ -969,7 +999,7 @@ async def _extract_web_series(text, original):
         if s_match:
             extra_parts.append(s_match.group().upper())
             
-        e_match = re.search(r'(?i)(\[?(?:ep|e|episode)\s*\d{1,3}\s*[-~_]\s*\d{1,3}\]?|\b(?:ep|e)\s*\d{1,3}\b)', text)
+        e_match = re.search(r'(?i)(\[?(?:ep|e|episode)\s*\d{1,3}\s*(?:[-~_]|to)\s*(?:e|ep)?\s*\d{1,3}\]?|\b(?:ep|e|episode)\s*\d{1,3}\b)', text)
         if e_match:
             ep = re.sub(r'[\[\]]', '', e_match.group()).upper()
             extra_parts.append(ep)
@@ -1337,6 +1367,7 @@ def setup_database():
             CREATE TABLE IF NOT EXISTS movies (
                 id SERIAL PRIMARY KEY,
                 title TEXT NOT NULL UNIQUE,
+                title TEXT NOT NULL UNIQUE,
                 url TEXT NOT NULL DEFAULT '',
                 file_id TEXT,
                 is_unreleased BOOLEAN DEFAULT FALSE,
@@ -1530,6 +1561,92 @@ def migrate_content_type_for_restore():
         if conn:
             conn.rollback()
             close_db_connection(conn)
+def fix_channel_posts_constraint():
+    """UNIQUE constraint add karne wala function"""
+    conn = get_db_connection()
+    if not conn: return
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            DO $$ 
+            BEGIN 
+                IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'channel_posts_unique_idx') THEN
+                    ALTER TABLE channel_posts ADD CONSTRAINT channel_posts_unique_idx UNIQUE (channel_id, message_id);
+                END IF;
+            END $$;
+        """)
+        conn.commit()
+        cur.close()
+        logger.info("✅ Database UNIQUE Constraint fixed!")
+    except Exception as e:
+        logger.error(f"❌ DB Constraint Fix Error: {e}")
+    finally:
+        close_db_connection(conn)
+
+def fix_movies_title_constraint():
+    """Movies table mein title ko UNIQUE banane ke liye"""
+    conn = get_db_connection()
+    if not conn: return
+    try:
+        cur = conn.cursor()
+        # Title column ko unique banayenge taaki ON CONFLICT kaam kare
+        cur.execute("ALTER TABLE movies ADD CONSTRAINT movies_title_unique UNIQUE (title);")
+        conn.commit()
+        cur.close()
+        logger.info("✅ Movies table UNIQUE constraint added!")
+    except Exception as e:
+        logger.error(f"❌ Movies Constraint Error: {e}")
+        if conn: conn.rollback()
+    finally:
+        close_db_connection(conn)
+        
+def fix_movies_unique_constraint():
+    """Movies table mein title ko UNIQUE banata hai taaki bot crash na ho"""
+    conn = get_db_connection()
+    if not conn: return
+    try:
+        cur = conn.cursor()
+        # Title par UNIQUE constraint add kar rahe hain
+        cur.execute("""
+            DO $$ 
+            BEGIN 
+                IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'movies_title_key') THEN
+                    ALTER TABLE movies ADD CONSTRAINT movies_title_key UNIQUE (title);
+                END IF;
+            END $$;
+        """)
+        conn.commit()
+        cur.close()
+        logger.info("✅ Movies table UNIQUE constraint fixed!")
+    except Exception as e:
+        logger.error(f"❌ Movies DB Fix Error: {e}")
+    finally:
+        close_db_connection(conn)
+
+# 👇 Line 1225 ke baad yahan paste karein
+def migrate_channel_posts_v2():
+    """Ye function channel_posts table mein missing columns add karega"""
+    conn = get_db_connection()
+    if not conn: return
+    try:
+        cur = conn.cursor()
+        # Ek ek karke saare missing columns check aur add karega
+        cur.execute("ALTER TABLE channel_posts ADD COLUMN IF NOT EXISTS caption TEXT;")
+        cur.execute("ALTER TABLE channel_posts ADD COLUMN IF NOT EXISTS media_file_id TEXT;")
+        cur.execute("ALTER TABLE channel_posts ADD COLUMN IF NOT EXISTS media_type TEXT DEFAULT 'photo';")
+        cur.execute("ALTER TABLE channel_posts ADD COLUMN IF NOT EXISTS keyboard_data TEXT;")
+        cur.execute("ALTER TABLE channel_posts ADD COLUMN IF NOT EXISTS topic_id INTEGER;")
+        cur.execute("ALTER TABLE channel_posts ADD COLUMN IF NOT EXISTS content_type TEXT DEFAULT 'movies';")
+        cur.execute("ALTER TABLE channel_posts ADD COLUMN IF NOT EXISTS is_restored BOOLEAN DEFAULT FALSE;")
+        cur.execute("ALTER TABLE channel_posts ADD COLUMN IF NOT EXISTS restored_at TIMESTAMP;")
+        
+        conn.commit()
+        cur.close()
+        logger.info("✅ channel_posts table migrated to V2 successfully!")
+    except Exception as e:
+        logger.error(f"❌ Migration V2 Error: {e}")
+    finally:
+        close_db_connection(conn)
 
 def save_post_to_db(
     movie_id,
@@ -1941,6 +2058,170 @@ def auto_fetch_and_update_metadata(movie_id: int, movie_title: str):
         logger.error(f"Error in auto_fetch_and_update_metadata: {e}")
         return False
 
+# ============================================================================
+# 🔍 GOOGLE SEARCH METADATA FETCHER (Premium Edition)
+# ============================================================================
+
+async def fetch_metadata_from_google(query: str, search_year: str = ""):
+    API_KEY = os.environ.get("GOOGLE_API_KEY")
+    CX_ID = os.environ.get("GOOGLE_CX_ID")
+    
+    if not API_KEY or not CX_ID:
+        return None
+    
+    search_query = f"{query} {search_year} poster plot".strip()
+    
+    try:
+        encoded = quote(search_query)
+        
+        base_url = "https://www.googleapis.com/customsearch/v1"
+        
+        # ---------- IMAGE SEARCH ----------
+        img_url = f"{base_url}?key={API_KEY}&cx={CX_ID}&q={encoded}&num=5&searchType=image"
+        response = await run_async(requests.get, img_url, timeout=10)
+        data = response.json()
+        
+        items = data.get("items", [])
+        
+        # ---------- FALLBACK TO TEXT ----------
+        if not items:
+            txt_url = f"{base_url}?key={API_KEY}&cx={CX_ID}&q={encoded}&num=5"
+            response = await run_async(requests.get, txt_url, timeout=10)
+            data = response.json()
+            items = data.get("items", [])
+        
+        if not items:
+            return None
+        
+        # ---------- PICK BEST RESULT ----------
+        best_item = items[0]
+        
+        title = clean_title(best_item.get("title", query))
+        snippet = best_item.get("snippet", "")
+        
+        # ---------- IMAGE EXTRACTION ----------
+        image_url = None
+        pagemap = best_item.get("pagemap", {})
+        
+        if "cse_image" in pagemap:
+            image_url = pagemap["cse_image"][0].get("src")
+        elif "cse_thumbnail" in pagemap:
+            image_url = pagemap["cse_thumbnail"][0].get("src")
+        
+        # fallback: direct link image
+        if not image_url:
+            link = best_item.get("link", "")
+            if link.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+                image_url = link
+        
+        # ---------- EXTRA CLEANUPS ----------
+        plot = snippet[:300] if snippet else "Premium content available."
+        
+        # better genre detection (thoda smart banaya 😏)
+        q_lower = query.lower()
+        if any(x in q_lower for x in ['bhabhi', 'unrated', 'adult', 'hot']):
+            genre = "Adult"
+        elif any(x in q_lower for x in ['crime', 'murder', 'thriller']):
+            genre = "Crime/Thriller"
+        else:
+            genre = "Drama"
+        
+        return {
+            "title": title,
+            "poster": image_url or DEFAULT_POSTER,
+            "plot": plot,
+            "year": search_year or "2024-2026",
+            "genre": genre,
+            "category": "Web Series"
+        }
+        
+    except Exception as e:
+        logger.error(f"Google Search Error: {e}")
+        return None
+
+# ============================================================================
+# 🔧 HELPER FUNCTIONS
+# ============================================================================
+
+def clean_google_title(raw_title: str) -> str:
+    """Google title se junk hatao"""
+    # Common patterns remove karo
+    junk_patterns = [
+        r' - IMDb$', r' - Wikipedia$', r' - Rotten Tomatoes$',
+        r' \| Netflix$', r' - Prime Video$', r' \| .*?Official',
+        r'Watch ', r' Online', r' Full Movie', r' Download'
+    ]
+    
+    title = raw_title
+    for pattern in junk_patterns:
+        title = re.sub(pattern, '', title, flags=re.IGNORECASE)
+    
+    # Year hatao agar title me hai
+    title = re.sub(r'\s*\(\d{4}\)\s*', ' ', title)
+    title = re.sub(r'\s+', ' ', title).strip()
+    
+    return title
+
+
+def clean_plot(raw_snippet: str) -> str:
+    """Google snippet ko clean plot banao"""
+    # Ellipsis hatao
+    plot = raw_snippet.replace('...', ' ')
+    
+    # URLs hatao
+    plot = re.sub(r'https?://\S+', '', plot)
+    
+    # Extra spaces clean karo
+    plot = re.sub(r'\s+', ' ', plot).strip()
+    
+    # Limit karo
+    if len(plot) > 300:
+        plot = plot[:297] + "..."
+    
+    return plot if plot else "Premium content available on FlimfyBox."
+
+
+async def extract_imdb_poster(imdb_url: str) -> Optional[str]:
+    """IMDb page se poster nikalo (Fallback)"""
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.0'
+        }
+        response = await run_async(requests.get, imdb_url, headers=headers, timeout=8)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Meta tag se poster
+        meta_img = soup.find('meta', property='og:image')
+        if meta_img:
+            return meta_img.get('content')
+        
+        # JSON-LD se poster
+        script = soup.find('script', type='application/ld+json')
+        if script:
+            import json
+            data = json.loads(script.string)
+            if 'image' in data:
+                return data['image']
+                
+    except Exception as e:
+        logger.warning(f"IMDb poster extraction failed: {e}")
+    
+    return None
+
+
+def extract_tmdb_poster_from_url(tmdb_url: str) -> Optional[str]:
+    """TMDB URL se poster ID nikalo"""
+    try:
+        # Pattern: themoviedb.org/movie/12345-movie-name
+        match = re.search(r'/(movie|tv)/(\d+)', tmdb_url)
+        if match:
+            media_type, tmdb_id = match.groups()
+            # TMDB poster URL construct karo
+            return f"https://image.tmdb.org/t/p/w500/{tmdb_id}.jpg"  # Simplified
+    except:
+        pass
+    return None
+
 def fetch_cast_from_imdb(imdb_id: str, limit: int = 5) -> str:
     """Fetch cast list from TMDB using IMDb ID, return comma-separated string."""
     try:
@@ -1993,39 +2274,86 @@ def get_tmdb_backdrop(query, search_year=""):
         logger.error(f"TMDB Error: {e}")
     return None
 
-def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = ""):
-    """IMDb से डेटा और TMDb से सिर्फ Lamba (Portrait) पोस्टर निकालने वाला इंजन"""
+def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = "", adult_mode: bool = False):
+    """
+    IMDb से डेटा और TMDb से सिर्फ Lamba (Portrait) पोस्टर निकालने वाला इंजन
+    adult_mode=True होने पर TMDb सर्च में include_adult=true भेजेगा और OMDb को बायपास करेगा।
+    """
     omdb_api_key = os.environ.get("OMDB_API_KEY")
-    tmdb_api_key = "9fa44f5e9fbd41415df930ce5b81c4d7" # TMDb Key
-    
-    if not omdb_api_key:
-        logger.error("❌ OMDB_API_KEY missing in .env")
-        return None
+    tmdb_api_key = "9fa44f5e9fbd41415df930ce5b81c4d7"
 
     search_query = query.strip()
     is_imdb_id = bool(re.match(r'^tt\d{7,8}$', search_query))
 
+    # ----- एडल्ट मोड: OMDb का उपयोग न करें (क्योंकि उसमें एडल्ट डेटा नहीं) -----
+    if adult_mode:
+        # सीधे TMDb का उपयोग करें
+        try:
+            tmdb_search = f"https://api.themoviedb.org/3/search/multi?api_key={tmdb_api_key}&query={quote(search_query)}&include_adult=true"
+            if search_year and search_year.strip().isdigit():
+                tmdb_search += f"&year={search_year.strip()}"
+            t_resp = requests.get(tmdb_search, timeout=10).json()
+            if not t_resp.get('results'):
+                return None
+
+            best_match = t_resp['results'][0]
+            # वर्ष मैच करने की कोशिश
+            if search_year and str(search_year).strip().isdigit():
+                for item in t_resp['results']:
+                    item_year = str(item.get('release_date', item.get('first_air_date', '')))[:4]
+                    if str(search_year).strip() == item_year:
+                        best_match = item
+                        break
+
+            title = best_match.get('title') or best_match.get('name') or search_query
+            year_str = str(best_match.get('release_date', best_match.get('first_air_date', '')))[:4]
+            year = int(year_str) if year_str.isdigit() else 0
+            plot = best_match.get('overview', 'No story available.')
+            rating = str(round(best_match.get('vote_average', 0), 1)) if best_match.get('vote_average') else 'N/A'
+            category = "Adult"  # जबरदस्ती Adult
+            genre = "Romance, Drama"  # डिफ़ॉल्ट, TMDb जॉनर बाद में ला सकते हैं
+
+            path = best_match.get('poster_path')
+            poster_url = f"https://image.tmdb.org/t/p/original{path}" if path else None
+
+            imdb_id = None
+            try:
+                tmdb_id = best_match.get('id')
+                media_type = best_match.get('media_type', 'movie')
+                ext_url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/external_ids?api_key={tmdb_api_key}"
+                imdb_id = requests.get(ext_url, timeout=5).json().get('imdb_id')
+            except:
+                pass
+
+            return title, year, poster_url, genre, imdb_id, rating, plot, category
+        except Exception as e:
+            logger.error(f"Adult TMDb Fetch Error: {e}")
+            return None
+
+    # ----- नॉर्मल मोड (मूल कोड) -----
+    if not omdb_api_key:
+        logger.error("❌ OMDB_API_KEY missing in .env")
+        return None
+
     try:
-        # --- STEP 1: IMDb (OMDb) से बेसिक डेटा लाना ---
         if is_imdb_id:
             url = f"https://www.omdbapi.com/?i={search_query}&apikey={omdb_api_key}&plot=full"
         else:
             url = f"https://www.omdbapi.com/?t={quote(search_query)}&apikey={omdb_api_key}&plot=full"
-            # 👇 NAYA FIX: OMDb ko Year (Saal) bhi batana zaroori hai, warna wo galat movie dega!
             if search_year and str(search_year).strip().isdigit():
                 url += f"&y={str(search_year).strip()}"
 
         resp = requests.get(url, timeout=10).json()
-        
-        # 👇 NAYA FIX: Agar OMDb movie dhoondhne me fail ho jaye, toh TMDB se saara data nikalenge 👇
+
         if resp.get("Response") != "True":
+            # OMDb फेल होने पर TMDb का उपयोग करें
             tmdb_search = f"https://api.themoviedb.org/3/search/multi?api_key={tmdb_api_key}&query={quote(search_query)}"
+            if search_year and str(search_year).strip().isdigit():
+                tmdb_search += f"&year={search_year.strip()}"
             t_resp = requests.get(tmdb_search, timeout=10).json()
-            
             if not t_resp.get('results'):
-                return None  # Agar TMDB bhi fail ho jaye tabhi aage badhega
-                
-            # TMDB me saal (year) match karne ki koshish
+                return None
+
             best_match = t_resp['results'][0]
             if search_year and str(search_year).strip().isdigit():
                 for item in t_resp['results']:
@@ -2033,31 +2361,29 @@ def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = "
                     if str(search_year).strip() == item_year:
                         best_match = item
                         break
-            
-            # TMDB se data extract karna
+
             title = best_match.get('title') or best_match.get('name') or search_query
             year_str = str(best_match.get('release_date', best_match.get('first_air_date', '')))[:4]
             year = int(year_str) if year_str.isdigit() else 0
             plot = best_match.get('overview', 'No story available.')
             rating = str(round(best_match.get('vote_average', 0), 1)) if best_match.get('vote_average') else 'N/A'
             category = "Movies" if best_match.get('media_type') == 'movie' else "Web Series"
-            genre = "Action, Drama" # TMDB genres numbers me hote hain, isliye default
-            
+            genre = "Action, Drama"
             path = best_match.get('poster_path')
             poster_url = f"https://image.tmdb.org/t/p/original{path}" if path else None
-            
-            # TMDB se IMDb ID nikalna (Taaki DB crash na ho)
-            tmdb_id = best_match.get('id')
-            media_type = best_match.get('media_type', 'movie')
+
             imdb_id = None
             try:
+                tmdb_id = best_match.get('id')
+                media_type = best_match.get('media_type', 'movie')
                 ext_url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/external_ids?api_key={tmdb_api_key}"
                 imdb_id = requests.get(ext_url, timeout=5).json().get('imdb_id')
-            except: pass
-            
-            return title, year, poster_url, genre, imdb_id, rating, plot, category
-        # 👆 -------------------------------------------------------------------------------- 👆
+            except:
+                pass
 
+            return title, year, poster_url, genre, imdb_id, rating, plot, category
+
+        # OMDb से डेटा सफल
         title = resp.get('Title')
         year = int(resp.get('Year', '0').split('–')[0]) if resp.get('Year') else 0
         genre = resp.get('Genre', 'Action, Drama')
@@ -2067,43 +2393,40 @@ def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = "
         country = resp.get('Country', '')
         lang = resp.get('Language', '').lower()
 
-        # --- STEP 2: Smart Category Detection ---
         category = "Movies"
         g_low = genre.lower()
-        if "animation" in g_low or "anime" in g_low: category = "Anime"
-        elif "series" in g_low or "episode" in g_low: category = "Web Series"
+        if "animation" in g_low or "anime" in g_low:
+            category = "Anime"
+        elif "series" in g_low or "episode" in g_low:
+            category = "Web Series"
         elif "india" in country.lower():
-            if any(x in lang for x in ['telugu', 'tamil', 'kannada', 'malayalam']): category = "South"
-            else: category = "Bollywood"
-        else: category = "Hollywood"
+            if any(x in lang for x in ['telugu', 'tamil', 'kannada', 'malayalam']):
+                category = "South"
+            else:
+                category = "Bollywood"
+        else:
+            category = "Hollywood"
 
-        # --- STEP 3: TMDb से HD Poster लाना (100% Exact Match) ---
-        poster_url = resp.get('Poster') # Default OMDb
-
+        # TMDb से HD पोस्टर लाना
+        poster_url = resp.get('Poster')
         if imdb_id and imdb_id != 'N/A':
-            # 🎯 JUGAD: Agar IMDb ID hai, toh TMDB ko seedha ID do, naam nahi! Isse galti ka chance 0% ho jayega.
             tmdb_find = f"https://api.themoviedb.org/3/find/{imdb_id}?api_key={tmdb_api_key}&external_source=imdb_id"
             t_resp = requests.get(tmdb_find, timeout=10).json()
-            
-            # Movie ya TV dono me se poster nikal lo
             results = t_resp.get('movie_results', []) + t_resp.get('tv_results', [])
             if results:
                 path = results[0].get('poster_path')
                 if path:
                     poster_url = f"https://image.tmdb.org/t/p/original{path}"
         else:
-            # 🛡️ FALLBACK: Agar IMDb ID nahi hai, toh Name aur Year dono mila kar check karo
             tmdb_search = f"https://api.themoviedb.org/3/search/multi?api_key={tmdb_api_key}&query={quote(title)}"
             t_resp = requests.get(tmdb_search, timeout=10).json()
             if t_resp.get('results'):
                 for item in t_resp['results']:
                     item_year = str(item.get('release_date', item.get('first_air_date', '')))[:4]
-                    # Saal (Year) match karne ki koshish karo
                     if str(year) == item_year and item.get('poster_path'):
                         poster_url = f"https://image.tmdb.org/t/p/original{item['poster_path']}"
                         break
                 else:
-                    # Saal match na ho toh jo pehla lamba poster mile utha lo
                     path = t_resp['results'][0].get('poster_path')
                     if path:
                         poster_url = f"https://image.tmdb.org/t/p/original{path}"
@@ -2763,17 +3086,48 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
             total_pages = (len(all_qualities) + limit - 1) // limit if all_qualities else 1
             current_files = all_qualities[0:limit]
             
-            text = f"📁 **{title}**\n\n👇 **Your Requested Files Are Here**\n\n"
+            # 👇 YAHAN SE FIX SHURU HOTA HAI (HTML INLINE LINKS KE LIYE) 👇
+            bot_username = context.bot.username
+            text = f"📁 <b>{title}</b>\n\n👇 <b>Your Requested Files Are Here</b>\n\n"
+            
+            import re # Text clean karne ke liye taaki links break na hon
+            
             for idx, f_data in enumerate(current_files, start=1):
-                q_name = f_data[0]
+                q_name = str(f_data[0])
+                
+                # Kachra saaf kar rahe hain taaki deep links perfect banein
+                q_name = re.sub(r'\[([^\]]+)\]\(https?://[^\)]+\)', r'\1', q_name)
+                q_name = re.sub(r'\(https?://[^\)]+\)', '', q_name)
+                q_name = re.sub(r'https?://[^\s]+', '', q_name)
+                q_name = re.sub(r'(?i)t\.me/[^\s]+', '', q_name)
+                q_name = re.sub(r'@[a-zA-Z0-9_]+', '', q_name)
+                
                 f_size = f_data[3] if len(f_data)>3 else "Unknown"
-                e_info = f_data[5] if len(f_data)>5 else ""
-                ep_tag = f"[{e_info}] " if e_info else ""
-                text += f"**{idx}.** **{f_size} | {title} {ep_tag}{q_name}**\n\n"
+                
+                e_info = str(f_data[5]) if len(f_data)>5 else ""
+                e_info = re.sub(r'\[([^\]]+)\]\(https?://[^\)]+\)', r'\1', e_info)
+                e_info = re.sub(r'\(https?://[^\)]+\)', '', e_info)
+                e_info = re.sub(r'https?://[^\s]+', '', e_info)
+                e_info = re.sub(r'(?i)t\.me/[^\s]+', '', e_info)
+                e_info = re.sub(r'@[a-zA-Z0-9_]+', '', e_info)
+                
+                ep_tag = f"[{e_info.strip()}] " if e_info.strip() else ""
+                
+                # ✅ NAYA: HTML wala Neela (Inline) link
+                text += f"<b>{idx}.</b> <b><a href='https://t.me/{bot_username}?start=file_{movie_id}_{idx-1}'>{f_size} | {title} {ep_tag}{q_name.strip()}</a></b>\n\n"
                 
             keyboard = create_quality_selection_keyboard(movie_id, view="main", page=1, total_pages=total_pages, current_files=current_files)
             
-            msg = await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard, parse_mode='Markdown')
+            # ✅ NAYA: parse_mode='HTML' kar diya aur link preview off kar diya
+            msg = await context.bot.send_message(
+                chat_id=chat_id, 
+                text=text, 
+                reply_markup=keyboard, 
+                parse_mode='HTML', 
+                disable_web_page_preview=True
+            )
+            # 👆 FIX KHATAM 👆
+            
             track_message_for_deletion(context, chat_id, msg.message_id, 60)
             return
 
@@ -4223,6 +4577,25 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
         
+    # === CANCEL 18+ BATCH LOGIC ===
+    if query.data == "cancel_batch18":
+        if update.effective_user.id != ADMIN_USER_ID:
+            await query.answer("❌ Sirf Admin ke liye!", show_alert=True)
+            return
+
+        BATCH_18_SESSION.update({
+            'active': False, 'movie_id': None, 'movie_title': None,
+            'file_count': 0, 'admin_id': None, 'year': '', 'category': ''
+        })
+
+        await query.answer("🛑 18+ Batch Stopped!", show_alert=True)
+        await query.edit_message_text(
+            "❌ **18+ Batch Stopped & Cancelled.**\n\n"
+            "Aap chaho to manually naya batch start kar sakte ho.",
+            parse_mode='Markdown'
+        )
+        return
+    
     # === 1. VERIFY BUTTON LOGIC (UPDATED) ===
     if data == "verify":
         await query.answer("🔍 Checking membership...", show_alert=False) # Alert False rakha taki user disturb na ho
@@ -4906,8 +5279,8 @@ def get_storage_channels():
     return [int(c.strip()) for c in channels_str.split(',') if c.strip()]
 
 def generate_quality_label(file_name, file_size_str, ai_language=""):
-    """Bina hardcode kiye AI language ko use karta hai + Series/Seasons extract karta hai"""
-    name_lower = file_name.lower()
+    # Pehle episode format ko hamesha ke liye theek karo (S07E12 22 -> S07E12-22)
+    name_lower = normalize_episodes(file_name.lower())
     quality = "HD"
     
     # 1. Detect Quality
@@ -4921,12 +5294,18 @@ def generate_quality_label(file_name, file_size_str, ai_language=""):
     # 2. Add AI Detected Language
     lang_tag = f" ({ai_language})" if ai_language else ""
     
-    # 3. Detect Series (S01, S02, S01 [E01-E10], [E01-12], S01E01, Season 1)
-    # 👇 FIX: Naya Regex ab akela 'S01' ya 'Season 2' bhi aasaani se pakad lega!
-    season_match = re.search(r'(s\d{1,2}\s*\[?(?:e|ep)\s*\d{1,2}[-~e\d]*\]?|\[?(?:e|ep)\s*\d{1,2}[-~_]\d{1,2}\]?|ep\s*\d+[-~_]\d+|ep\s*\d+|s\d{1,2}e\d{1,2}|s\d{1,2}\b|season\s?\d+\b)', name_lower)
+    # 3. Detect Series (S01, S02, S01E01, S01P01, Season 1, etc.)
+    # 👇 नया पैटर्न जो S01P01 और S01E01 दोनों पकड़ेगा
+    season_match = re.search(
+        r'(?i)(s\d{1,2}\s*(?:[ep]\d{1,3})?'                 # S01 या S01E01 या S01P01
+        r'|s\d{1,2}\s*\[?(?:e|ep|episode|p|part)\s*\d{1,3}' # S01E01, S01P01
+        r'|\[?(?:e|ep|episode|p|part)\s*\d{1,3}(?:\s*(?:[-~_]|to)\s*(?:e|ep|episode|p|part)?\s*\d{1,3})?\]?'
+        r'|season\s?\d+\b)', 
+        name_lower
+    )
     
     if season_match:
-        episode_tag = season_match.group(0).upper()
+        episode_tag = season_match.group(0).upper().replace("P", "E")  # P01 को E01 जैसा दिखाने के लिए
         return f"{episode_tag} {quality}{lang_tag} [{file_size_str}]"
         
     return f"{quality}{lang_tag} [{file_size_str}]"
@@ -4943,140 +5322,6 @@ def get_readable_file_size(size_in_bytes):
     except Exception:
         return "Unknown"
     return "Unknown"
-
-def generate_aliases_gemini(movie_title, year="", category=""):
-    """
-    🎯 FIXED: AI se 50 search aliases generate karta hai
-    """
-    logger.info(f"🚀 Generating aliases for: '{movie_title}' ({year}) [{category}]")
-    
-    if not movie_title or movie_title == "UNKNOWN":
-        logger.warning("Empty movie title, skipping alias generation")
-        return []
-    
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        logger.error("❌ GEMINI_API_KEY missing!")
-        return []
-
-    try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-2.0-flash')
-        
-        # 🎯 SIMPLER, MORE EFFECTIVE PROMPT
-        prompt = f"""Generate 50 search aliases for the movie/show: "{movie_title}"
-Year: {year if year else "N/A"}
-Category: {category if category else "N/A"}
-
-Include these types of variations:
-1. Common misspellings (typos people make)
-2. With and without year
-3. Hindi transliterations if applicable
-4. Short forms and abbreviations
-5. With "movie", "film", "download" keywords
-6. Without spaces, with hyphens
-7. Regional language spellings
-
-IMPORTANT: Return ONLY comma-separated aliases, nothing else.
-Example format: alias1, alias2, alias3, alias4
-
-Do not include numbering, bullets, or explanations. Just plain comma-separated text."""
-
-        # Safety settings to avoid blocks
-        safety_settings = {
-            genai.types.HarmCategory.HARM_CATEGORY_HARASSMENT: genai.types.HarmBlockThreshold.BLOCK_NONE,
-            genai.types.HarmCategory.HARM_CATEGORY_HATE_SPEECH: genai.types.HarmBlockThreshold.BLOCK_NONE,
-            genai.types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: genai.types.HarmBlockThreshold.BLOCK_NONE,
-            genai.types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: genai.types.HarmBlockThreshold.BLOCK_NONE,
-        }
-
-        response = model.generate_content(prompt, safety_settings=safety_settings)
-        
-        # Check if response was blocked
-        if not response or not response.parts:
-            logger.warning("Gemini response was empty or blocked")
-            return generate_basic_aliases(movie_title, year)
-        
-        try:
-            ai_text = response.text.strip()
-        except ValueError as e:
-            logger.warning(f"Response blocked by safety: {e}")
-            return generate_basic_aliases(movie_title, year)
-        
-        if not ai_text:
-            logger.warning("Empty response from Gemini")
-            return generate_basic_aliases(movie_title, year)
-        
-        logger.info(f"Gemini Alias Response (first 200 chars): {ai_text[:200]}")
-        
-        # Parse aliases
-        aliases = []
-        for item in ai_text.split(','):
-            alias = item.strip().lower()
-            # Clean each alias
-            alias = re.sub(r'^\d+[\.\)]\s*', '', alias)  # Remove numbering
-            alias = alias.strip('"\'')  # Remove quotes
-            alias = alias.strip()
-            
-            if alias and len(alias) >= 2 and len(alias) <= 100:
-                aliases.append(alias)
-        
-        # Remove duplicates and limit to 50
-        aliases = list(dict.fromkeys(aliases))[:50]
-        
-        logger.info(f"✅ Generated {len(aliases)} aliases")
-        return aliases
-
-    except Exception as e:
-        logger.error(f"❌ Alias Generation Error: {e}")
-        return generate_basic_aliases(movie_title, year)
-
-
-def generate_basic_aliases(movie_title, year=""):
-    """
-    🛡️ FALLBACK: Basic aliases without AI
-    """
-    if not movie_title:
-        return []
-    
-    aliases = []
-    title_lower = movie_title.lower().strip()
-    title_no_space = title_lower.replace(" ", "")
-    title_hyphen = title_lower.replace(" ", "-")
-    title_underscore = title_lower.replace(" ", "_")
-    
-    # Basic variations
-    aliases.extend([
-        title_lower,
-        title_no_space,
-        title_hyphen,
-        title_underscore,
-        f"{title_lower} movie",
-        f"{title_lower} film",
-        f"{title_lower} download",
-        f"{title_lower} hindi",
-        f"{title_lower} full movie",
-    ])
-    
-    # With year
-    if year:
-        aliases.extend([
-            f"{title_lower} {year}",
-            f"{title_lower} ({year})",
-            f"{title_no_space}{year}",
-        ])
-    
-    # Common typos (first/last letter swap, double letters)
-    if len(title_lower) > 3:
-        # Remove vowels
-        no_vowels = re.sub(r'[aeiou]', '', title_lower)
-        if no_vowels and no_vowels != title_lower:
-            aliases.append(no_vowels)
-    
-    aliases = list(dict.fromkeys(aliases))[:20]
-    logger.info(f"✅ Generated {len(aliases)} basic aliases (fallback)")
-    return aliases
-
 
 # ============================================================================
 # 🎬 BATCH ID COMMAND (Fully Automatic via TMDB/IMDb)
@@ -5649,6 +5894,9 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     SUPER_BATCH_SESSION.update({'active': False, 'admin_id': None, 'files': []})
 
 async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # 🛡️ Ye line add karo (Line 2145 ke aas-paas)
+    if BATCH_18_SESSION.get('active') or SUPER_BATCH_SESSION.get('active'):
+        return
     # 👇 NAYA CODE: VIP Payment Screenshot Check 👇
     if context.user_data.get('payment_step') == 'screenshot' and update.message.photo:
         await payment_photo_handler(update, context)
@@ -6403,150 +6651,582 @@ async def shorten_link(long_url):
         logger.error(f"Shortener Error: {e}")
     return long_url
 
+# ==================== 18+ BATCH SYSTEM (SAME AS NORMAL BATCH) ====================
+
+BATCH_18_SESSION = {'active': False, 'movie_id': None, 'movie_title': None, 'file_count': 0, 'admin_id': None}
+
 async def batch18_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Batch Session On Karega"""
+    """18+ बैच शुरू करें - बिल्कुल /batch की तरह काम करेगा"""
     if update.effective_user.id != ADMIN_USER_ID:
         return
-        
-    BATCH_18_SESSION['active'] = True
-    BATCH_18_SESSION['admin_id'] = update.effective_user.id
-    BATCH_18_SESSION['posts'] = [] # Purani queue clear
-    
+
+    if BATCH_SESSION.get('active'):  # अगर नॉर्मल बैच चल रहा है तो 18+ नहीं चलेगा
+        await update.message.reply_text("❌ पहले से नॉर्मल बैच चल रहा है। कृपया उसे /done करें या /cancel करें।")
+        return
+
+    BATCH_18_SESSION.update({
+        'active': True,
+        'admin_id': update.effective_user.id,
+        'movie_id': None,
+        'movie_title': None,
+        'file_count': 0
+    })
+
     await update.message.reply_text(
-        "✅ **18+ Batch Mode STARTED!**\n\n"
-        "👉 Ab aap ek sath 10, 20 ya 50 posts (jisme Terabox link ho) is bot ko **Forward** karein.\n\n"
-        "👉 Jab sab forward kar lein, toh `/done18` bhejein!",
+        "🔞 **18+ बैच मोड चालू!**\n\n"
+        "👉 अब आप जिस 18+ मूवी/सीरीज़ की फ़ाइलें भेजना चाहते हैं, उसकी **पहली फ़ाइल** कैप्शन के साथ भेजें।\n"
+        "👉 बॉट उसका टाइटल, साल, भाषा आदि निकालकर आपको दिखाएगा।\n"
+        "👉 इसके बाद आप उसी मूवी की बाकी सभी फ़ाइलें (कोई भी क्वालिटी/एपिसोड) एक-एक करके भेज सकते हैं।\n"
+        "👉 सब भेजने के बाद `/done18` लिखें।",
         parse_mode='Markdown'
     )
 
+# ============================================================================
+# 🔞 18+ BATCH LISTENER (Fully Optimized & Fixed)
+# ============================================================================
+
 async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Sirf tab chalega jab Batch18 ON hoga, aur posts ko Queue me save karega"""
-    if not BATCH_18_SESSION['active'] or update.effective_user.id != BATCH_18_SESSION['admin_id']:
+    """
+    🔞 18+ BATCH LISTENER: Auto-extracts metadata and saves files.
+    Fixed: Clean logs, better adult detection, proper error handling.
+    """
+    # === GUARD CLAUSES ===
+    if not BATCH_18_SESSION.get('active'):
         return
-
-    message = update.message
-    if not message: return
     
-    if message.text and message.text.startswith('/'):
+    if update.effective_user.id != BATCH_18_SESSION.get('admin_id'):
         return
 
-    text = message.caption if message.caption else message.text
-    if not text: return
-    
-    # ✅ FIX: Ab hum saare links dhoondh rahe hain
-    links = re.findall(r'(https?://[^\s]+)', text)
-    if not links or "terabox" not in text.lower():
+    # Takrav se bachne ke liye checks
+    if BATCH_SESSION.get('active') or SUPER_BATCH_SESSION.get('active'):
         return
 
-    media_type = 'text'
-    file_id = None
-    if message.photo:
-        media_type = 'photo'
-        file_id = message.photo[-1].file_id
-    elif message.video:
-        media_type = 'video'
-        file_id = message.video.file_id
-    elif message.document:
-        media_type = 'document'
-        file_id = message.document.file_id
-
-    # ✅ FIX: 'link' ki jagah 'links' (Puri list) save kar rahe hain
-    BATCH_18_SESSION['posts'].append({
-        'media_type': media_type,
-        'file_id': file_id,
-        'links': links,  
-        'raw_text': text
-    })
-    
-    await message.reply_text(f"📥 Saved in Queue! (Found {len(links)} links. Total Posts: {len(BATCH_18_SESSION['posts'])})")
-
-
-async def batch18_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Queue ko process karke Channel par post karega with Sleep"""
-    if not BATCH_18_SESSION['active'] or update.effective_user.id != BATCH_18_SESSION['admin_id']:
+    message = update.effective_message
+    if not message or not (message.document or message.video):
         return
+
+    # === PHASE 1: FIRST FILE = METADATA & MOVIE CREATION ===
+    if BATCH_18_SESSION.get('movie_id') is None:
+        raw_caption = message.caption or ""
+        if not raw_caption:
+            await message.reply_text(
+                "❌ **18+ बैच:** पहली फाइल के साथ caption में movie का naam zaroor dein.",
+                parse_mode='Markdown'
+            )
+            return
         
-    posts = BATCH_18_SESSION['posts']
-    if not posts:
-        await update.message.reply_text("❌ Queue khali thi. Session off kar diya.")
-        BATCH_18_SESSION['active'] = False
-        return
+        # 🎯 Adult content auto-detection from filename
+        raw_lower = raw_caption.lower()
+        force_adult = any(tag in raw_lower for tag in ['unrated', '18+', 'adult', 'hot', 'bhabhi', 'mastani'])
+        
+        status_msg = await message.reply_text(
+            "🔞 **Analyzing 18+ content...**" + (" (Forced Adult Mode)" if force_adult else ""),
+            quote=True
+        )
 
-    target_channel = os.environ.get('ADULT_CHANNEL_ID')
-    if not target_channel:
-        await update.message.reply_text("❌ Error: ADULT_CHANNEL_ID missing in .env")
-        return
-
-    status_msg = await update.message.reply_text(f"🚀 **Processing {len(posts)} Posts...**\nIsme thoda time lagega, kripya wait karein...")
-    
-    success_count = 0
-    failed_count = 0
-
-    for i, post in enumerate(posts, 1):
+        # === AI EXTRACTION ===
+        image_bytes = None
         try:
-            # 1. Title nikalna aur clean karna
-            lines = post['raw_text'].strip().split('\n')
-            original_title = lines[0].strip()
-            clean_title = re.sub(r'http\S+', '', original_title).strip() 
-            if len(clean_title) < 2:
-                clean_title = "Exclusive Content"
+            ai_data = await get_movie_name_from_caption(raw_caption, image_bytes)
+            movie_name = ai_data.get("title", "UNKNOWN")
+            movie_year = ai_data.get("year", "")
+            movie_lang = ai_data.get("language", "Hindi") or "Hindi"
+            movie_extra = ai_data.get("extra_info", "")
+            
+            # Force adult if detected in filename
+            gemini_category = "Adult" if force_adult else (ai_data.get("category", "Web Series") or "Web Series")
+            
+        except Exception as e:
+            logger.error(f"AI extraction failed: {e}")
+            movie_name = clean_telegram_text(raw_caption.split('\n')[0][:50])
+            movie_year = ""
+            movie_lang = "Hindi"
+            movie_extra = ""
+            gemini_category = "Adult" if force_adult else "Web Series"
+
+        if movie_name == "UNKNOWN" or len(movie_name) < 2:
+            await status_msg.edit_text(
+                "❌ Name identify nahi ho paya. Sahi naam ke sath dobara bhejein."
+            )
+            return
+        
+        await status_msg.edit_text(
+            f"✅ **Extracted:** 🎬 `{movie_name}` ({movie_year or 'N/A'})\n"
+            f"⏳ Fetching metadata from TMDB/Google...",
+            parse_mode='Markdown'
+        )
+
+        # === METADATA FETCHING WITH CLEAN FALLBACK ===
+        title, year, poster_url, genre, imdb_id, rating, plot, category = (
+            movie_name, 
+            int(movie_year) if str(movie_year).isdigit() else 0,
+            None,  # poster_url
+            "Adult, Romance, Drama",  # default genre
+            None,  # imdb_id
+            "N/A",  # rating
+            "Watch exclusive 18+ content on FlimfyBox Premium.",  # default plot
+            gemini_category  # category
+        )
+        
+        cast_str = ""
+
+        # Try TMDB first (with adult_mode=True)
+        try:
+            metadata = await run_async(
+                fetch_movie_metadata, 
+                movie_name, 
+                movie_year, 
+                movie_lang, 
+                adult_mode=True  # Critical for 18+ content
+            )
+            
+            if metadata:
+                t_title, t_year, t_poster, t_genre, t_imdb, t_rating, t_plot, t_cat = metadata
+                # Only update if we got valid data
+                if t_title and t_title != "N/A": title = t_title
+                if t_year and t_year > 0: year = t_year
+                if t_poster and t_poster != "N/A": poster_url = t_poster
+                if t_genre and t_genre != "N/A": genre = t_genre
+                if t_imdb and t_imdb != "N/A": imdb_id = t_imdb
+                if t_rating and t_rating != "N/A": rating = t_rating
+                if t_plot and t_plot != "N/A": plot = t_plot
+                # Keep Adult category even if TMDB says something else
+                category = gemini_category if force_adult else (t_cat if t_cat else gemini_category)
                 
-            display_title = get_safe_font(clean_title)
+                logger.info(f"✅ TMDB metadata found for: {title}")
+                
+                # Fetch cast if we have IMDB ID
+                if imdb_id:
+                    cast_str = await run_async(fetch_cast_from_imdb, imdb_id, 5)
+                    
+        except Exception as e:
+            logger.warning(f"⚠️ TMDB failed for {movie_name}: {e}")
 
-            # 2. Shorten Link
-            short_link = await shorten_link(post['links'][0])
+        # If TMDB failed completely, try Google
+        if not poster_url or poster_url == "N/A":
+            try:
+                google_data = await fetch_metadata_from_google(movie_name)
+                if google_data:
+                    # Only fill missing fields from Google
+                    if not poster_url or poster_url == "N/A":
+                        poster_url = google_data.get('poster')
+                    if not genre or genre == "Adult, Romance, Drama":
+                        genre = google_data.get('genre', "Adult, Romance, Drama")
+                    if not plot or plot == "Watch exclusive 18+ content on FlimfyBox Premium.":
+                        plot = google_data.get('plot', plot)
+                    
+                    logger.info(f"✅ Google fallback used for: {title}")
+                else:
+                    logger.info(f"⚠️ No Google results for: {title}, using defaults")
+                    
+            except Exception as e:
+                logger.warning(f"⚠️ Google search failed for {title}: {e}")
 
-            # ✅ FIX: Indented this block so it stays inside the 'try'
-            # Also using 'display_title' instead of undefined 'movie_title'
-            channel_caption = (
-                f"🎬 <b>{display_title}</b>\n"
-                f"🔗 Link: {short_link}\n" # Added link since you shortened it!
-                f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
-                f"🔞 <b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
-                f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
-                f"👇 <b>Download Below</b> 👇"
+        # === DATABASE INSERTION ===
+        conn = get_db_connection()
+        if not conn:
+            await status_msg.edit_text("❌ Database Connection Failed.")
+            return
+
+        try:
+            cur = conn.cursor()
+            
+            # Check for existing movie
+            cur.execute(
+                "SELECT id, poster_url, year FROM movies WHERE title ILIKE %s",
+                (title,)
+            )
+            existing = cur.fetchone()
+
+            if existing:
+                # Update existing with better data if available
+                existing_id, existing_poster, existing_year = existing
+                final_poster = poster_url if poster_url else existing_poster
+                final_year = year if (year and year > 0) else existing_year
+                
+                cur.execute("""
+                    UPDATE movies 
+                    SET poster_url = COALESCE(%s, poster_url),
+                        year = CASE WHEN %s > 0 THEN %s ELSE year END,
+                        genre = COALESCE(%s, genre),
+                        rating = COALESCE(%s, rating),
+                        description = COALESCE(%s, description),
+                        category = %s,
+                        language = COALESCE(NULLIF(%s, ''), language),
+                        extra_info = COALESCE(NULLIF(%s, ''), extra_info),
+                        "cast" = COALESCE(%s, "cast")
+                    WHERE id = %s
+                    RETURNING id
+                """, (final_poster, final_year, final_year, genre, rating, plot, 
+                      category, movie_lang, movie_extra, cast_str, existing_id))
+                movie_id = cur.fetchone()[0]
+                logger.info(f"🔄 Updated existing movie: {title} (ID: {movie_id})")
+                
+            else:
+                # Insert new movie
+                cur.execute("""
+                    INSERT INTO movies 
+                    (title, url, imdb_id, poster_url, year, genre, rating, 
+                     description, category, language, extra_info, "cast") 
+                    VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                """, (title, imdb_id, poster_url, year, genre, rating, 
+                      plot, category, movie_lang, movie_extra, cast_str))
+                movie_id = cur.fetchone()[0]
+                logger.info(f"✅ Created new movie: {title} (ID: {movie_id})")
+
+            conn.commit()
+
+            # Check for old files
+            cur.execute("SELECT COUNT(*) FROM movie_files WHERE movie_id = %s", (movie_id,))
+            file_count_old = cur.fetchone()[0]
+            cur.close()
+
+            # Update session
+            BATCH_18_SESSION.update({
+                'movie_id': movie_id,
+                'movie_title': title,
+                'file_count': 0,
+                'year': str(year) if year else movie_year,
+                'category': category,
+                'language': movie_lang
+            })
+
+            # Build success message
+            cast_display = f"\n👥 **Cast:** {cast_str}" if cast_str else ""
+            source_info = "TMDB" if imdb_id else ("Google" if poster_url else "Default")
+            
+            success_msg = (
+                f"✅ **18+ Metadata Ready** ({source_info})\n\n"
+                f"🎬 **Title:** `{title}`\n"
+                f"📅 **Year:** {year if year else 'N/A'}\n"
+                f"🎭 **Genre:** {genre}\n"
+                f"⭐️ **Rating:** {rating}\n"
+                f"🏷️ **Category:** {category}\n"
+                f"{cast_display}\n"
+                f"🚀 **Ab files bhejein, phir `/done18` likhein.**"
             )
 
-            # 4. Post to Channel
-            if post['media_type'] == 'photo':
-                await context.bot.send_photo(chat_id=target_channel, photo=post['file_id'], caption=channel_caption, parse_mode='HTML')
-            elif post['media_type'] == 'video':
-                await context.bot.send_video(chat_id=target_channel, video=post['file_id'], caption=channel_caption, parse_mode='HTML')
-            elif post['media_type'] == 'document':
-                 await context.bot.send_document(chat_id=target_channel, document=post['file_id'], caption=channel_caption, parse_mode='HTML')
-            elif post['media_type'] == 'text':
-                 await context.bot.send_message(chat_id=target_channel, text=channel_caption, parse_mode='HTML')
+            # Build keyboard
+            keyboard = []
+            if file_count_old > 0:
+                keyboard.append([InlineKeyboardButton(
+                    "🗑️ Delete OLD Files", 
+                    callback_data=f"clearfiles_{movie_id}"
+                )])
+            keyboard.append([InlineKeyboardButton(
+                "❌ Cancel Batch", 
+                callback_data="cancel_batch18"
+            )])
 
-            success_count += 1
-
-            if i % 5 == 0:
-                try: await status_msg.edit_text(f"🚀 Processing: {i}/{len(posts)}\n✅ Success: {success_count}")
-                except: pass
-
-            await asyncio.sleep(3)
+            await status_msg.edit_text(
+                success_msg, 
+                parse_mode='Markdown', 
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
 
         except Exception as e:
-            logger.error(f"18+ Batch Post Error: {e}")
-            failed_count += 1
-    # Final Report
-    await status_msg.edit_text(
-        f"🎉 **Batch Complete!**\n\n"
-        f"✅ Posted Successfully: {success_count}\n"
-        f"❌ Failed: {failed_count}\n\n"
-        f"Session automatically OFF ho gaya hai."
+            logger.error(f"❌ 18+ DB Error: {e}")
+            if conn: conn.rollback()
+            await status_msg.edit_text(f"❌ Database Error: {e}")
+        finally:
+            close_db_connection(conn)
+        
+        return  # First file processed, wait for more
+
+    # === PHASE 2: SUBSEQUENT FILES ===
+    upload_status = await message.reply_text(
+        "⏳ Saving 18+ file...", 
+        quote=True
     )
 
-    # Session Reset
-    BATCH_18_SESSION['active'] = False
-    BATCH_18_SESSION['posts'] = []
-    BATCH_18_SESSION['admin_id'] = None
+    # Get storage channels
+    channels = get_storage_channels()
+    backup_map = {}
+    
+    if channels:
+        for chat_id in channels:
+            try:
+                sent = await message.copy(chat_id=chat_id)
+                backup_map[str(chat_id)] = sent.message_id
+            except Exception as e:
+                logger.error(f"18+ Backup failed for {chat_id}: {e}")
+
+    # Extract file info
+    file_name = (message.document.file_name if message.document 
+                 else (message.video.file_name if message.video else "File"))
+    file_size = (message.document.file_size if message.document 
+                 else (message.video.file_size if message.video else 0))
+    file_size_str = get_readable_file_size(file_size)
+
+    # Generate quality label
+    text_for_detection = message.caption if message.caption else file_name
+    current_lang = BATCH_18_SESSION.get('language', 'Hindi')
+    label = generate_quality_label(text_for_detection, file_size_str, current_lang)
+
+    # Extract extra info
+    try:
+        ai_data_f = await fallback_extraction(text_for_detection)
+        f_lang = ai_data_f.get('language', '')
+        f_extra = ai_data_f.get('extra_info', '')
+    except:
+        f_lang = ''
+        f_extra = ''
+
+    # Build main URL
+    main_url = ""
+    if channels and backup_map:
+        main_channel = channels[0]
+        main_url = f"https://t.me/c/{str(main_channel).replace('-100', '')}/{backup_map.get(str(main_channel))}"
+
+    # Save to database
+    conn = get_db_connection()
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO movie_files 
+                (movie_id, quality, file_size, url, backup_map, languages, extra_info) 
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (movie_id, quality) DO UPDATE SET 
+                    url = EXCLUDED.url, 
+                    file_size = EXCLUDED.file_size, 
+                    backup_map = EXCLUDED.backup_map,
+                    file_id = NULL,
+                    languages = EXCLUDED.languages, 
+                    extra_info = EXCLUDED.extra_info
+            """, (
+                BATCH_18_SESSION['movie_id'], 
+                label, 
+                file_size_str, 
+                main_url, 
+                json.dumps(backup_map),
+                f_lang, 
+                f_extra
+            ))
+            conn.commit()
+            cur.close()
+            
+            BATCH_18_SESSION['file_count'] += 1
+            
+            await upload_status.edit_text(
+                f"✅ **Saved:** `{BATCH_18_SESSION['movie_title']} {label}`\n"
+                f"📦 Total Files: {BATCH_18_SESSION['file_count']}",
+                parse_mode='Markdown'
+            )
+            
+        except Exception as e:
+            logger.error(f"18+ File Save Error: {e}")
+            if conn: conn.rollback()
+            await upload_status.edit_text(f"❌ Save Error: {e}")
+        finally:
+            close_db_connection(conn)
+    else:
+        await upload_status.edit_text("❌ Database connection failed")
+
+
+# ============================================================================
+# 🔞 18+ BATCH DONE (Optimized)
+# ============================================================================
+
+async def batch18_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Complete 18+ batch and post to adult channel"""
+    
+    # Validation
+    if not BATCH_18_SESSION.get('active'):
+        await update.message.reply_text("❌ कोई सक्रिय 18+ बैच नहीं है।")
+        return
+
+    if update.effective_user.id != BATCH_18_SESSION.get('admin_id'):
+        return
+
+    movie_id = BATCH_18_SESSION.get('movie_id')
+    movie_title = BATCH_18_SESSION.get('movie_title', 'Unknown')
+    file_count = BATCH_18_SESSION.get('file_count', 0)
+
+    if not movie_id or file_count == 0:
+        await update.message.reply_text(
+            "❌ कोई फ़ाइल सेव नहीं की गई। बैच रद्द किया जा रहा है।"
+        )
+        BATCH_18_SESSION.update({
+            'active': False, 'movie_id': None, 'movie_title': None,
+            'file_count': 0, 'admin_id': None
+        })
+        return
+
+    # Get adult channel
+    adult_channel_id_str = os.environ.get('ADULT_CHANNEL_ID')
+    if not adult_channel_id_str:
+        await update.message.reply_text("❌ .env में ADULT_CHANNEL_ID सेट नहीं है।")
+        return
+    
+    try:
+        ADULT_CHANNEL_ID = int(adult_channel_id_str)
+    except ValueError:
+        await update.message.reply_text("❌ ADULT_CHANNEL_ID invalid है।")
+        return
+
+    status_msg = await update.message.reply_text(
+        f"🔄 **{movie_title}** का 18+ पोस्ट बन रहा है..."
+    )
+
+    # Fetch movie data
+    conn = get_db_connection()
+    if not conn:
+        await status_msg.edit_text("❌ Database error.")
+        return
+
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT poster_url, year, genre, rating, language, description 
+            FROM movies WHERE id = %s
+        """, (movie_id,))
+        m_data = cur.fetchone()
+        
+        if not m_data:
+            await status_msg.edit_text("❌ Movie DB में नहीं मिली।")
+            return
+            
+        poster_url, year, genre, rating, language, description = m_data
+
+        # Get qualities
+        cur.execute(
+            "SELECT quality FROM movie_files WHERE movie_id = %s", 
+            (movie_id,)
+        )
+        qrows = cur.fetchall()
+        cur.close()
+        
+    except Exception as e:
+        await status_msg.edit_text(f"❌ DB Error: {e}")
+        return
+    finally:
+        close_db_connection(conn)
+
+    # Build quality string
+    res_list = set()
+    for r in qrows:
+        match = re.search(r'(\d{3,4}p)', r[0])
+        if match:
+            res_list.add(match.group(1))
+    
+    res_list = sorted(list(res_list), key=lambda x: int(x.replace('p', '')), reverse=True)
+    dynamic_res = " | ".join(res_list) if res_list else "1080p | 720p | 480p"
+
+    # Process poster
+    raw_photo = poster_url if (poster_url and poster_url != 'N/A' and poster_url.startswith('http')) else None
+    if raw_photo:
+        photo_to_send = await make_landscape_poster(raw_photo)
+    else:
+        photo_to_send = DEFAULT_POSTER
+
+    # Build caption
+    safe_title = movie_title.replace('<', '').replace('>', '')
+    unicode_title = get_safe_font(safe_title)
+    
+    style_choice = random.choice([1, 2])
+    
+    if style_choice == 1:
+        caption = (
+            f"🔞 <b>{safe_title}</b>\n"
+            f"➖➖➖➖➖➖➖➖➖➖\n"
+            f"✨ <b>Genre:</b> {genre or 'Romance, Drama'}\n"
+            f"🔊 <b>Language:</b> {language or 'Hindi'}\n"
+            f"💿 <b>Quality:</b> V2 HQ-HDTC {dynamic_res}\n"
+            f"➖➖➖➖➖➖➖➖➖➖\n"
+            f"🔞 <b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
+            f"👇 <b>Download Below</b> 👇"
+        )
+    else:
+        caption = (
+            f"🔥 <b>{unicode_title}</b>\n"
+            f" ├ ✨ Genre: {genre or 'Romance, Drama'}\n"
+            f" ├ 🔊 Language: {language or 'Hindi'}\n"
+            f" └ 💿 Quality: V2 HQ-HDTC {dynamic_res}\n"
+            f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
+            f"🔞 <b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
+            f"👇 <b>Download Below</b> 👇"
+        )
+
+    # Build keyboard
+    secure_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
+    post_keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Download Now", url=secure_url),
+            InlineKeyboardButton("Download Now", url=secure_url)
+        ],
+        [InlineKeyboardButton("⚡ Download Now", url=secure_url)],
+        [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
+    ])
+
+    # Send to adult channel
+    try:
+        if hasattr(photo_to_send, 'read'):
+            photo_to_send.seek(0)
+            
+        sent = await context.bot.send_photo(
+            chat_id=ADULT_CHANNEL_ID,
+            photo=photo_to_send,
+            caption=caption,
+            parse_mode='HTML',
+            reply_markup=post_keyboard
+        )
+
+        # Save to DB for restore feature
+        if sent:
+            save_post_to_db(
+                movie_id=movie_id,
+                channel_id=ADULT_CHANNEL_ID,
+                message_id=sent.message_id,
+                bot_username="FlimfyBox_Bot",
+                caption=caption,
+                media_file_id=sent.photo[-1].file_id if sent.photo else None,
+                media_type="photo",
+                keyboard_data=post_keyboard.to_dict(),
+                topic_id=None,
+                content_type="adult"
+            )
+
+        await status_msg.edit_text(
+            f"✅ **18+ बैच पूर्ण!**\n\n"
+            f"🎬 {movie_title}\n"
+            f"📦 कुल फ़ाइलें: {file_count}\n"
+            f"📢 एडल्ट चैनल में पोस्ट भेज दी गई।"
+        )
+
+    except Exception as e:
+        logger.error(f"18+ Post Error: {e}")
+        await status_msg.edit_text(f"❌ पोस्ट भेजने में एरर: {e}")
+
+    # Clear session
+    BATCH_18_SESSION.update({
+        'active': False,
+        'movie_id': None,
+        'movie_title': None,
+        'file_count': 0,
+        'admin_id': None,
+        'year': '',
+        'category': '',
+        'language': ''
+    })
+
+
+# ============================================================================
+# 🔞 18+ BATCH CANCEL
+# ============================================================================
 
 async def batch18_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Galti se Start ho jaye to Cancel karne ke liye"""
+    """Cancel active 18+ batch"""
     if update.effective_user.id == BATCH_18_SESSION.get('admin_id'):
-        BATCH_18_SESSION['active'] = False
-        BATCH_18_SESSION['posts'] = []
-        await update.message.reply_text("🛑 18+ Batch Cancelled & Queue Cleared!")
+        BATCH_18_SESSION.update({
+            'active': False,
+            'movie_id': None,
+            'movie_title': None,
+            'file_count': 0,
+            'admin_id': None
+        })
+        await update.message.reply_text("🛑 18+ बैच रद्द कर दिया गया।")
 
 async def admin_post_18(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Premium 18+ Post - Single Item (Fixed Crash)"""
@@ -10281,6 +10961,10 @@ async def main():
         setup_database()
         migrate_add_imdb_columns()
         migrate_content_type_for_restore()
+        migrate_channel_posts_v2()
+        fix_channel_posts_constraint()
+        fix_movies_unique_constraint()
+        fix_movies_title_constraint()
     except Exception as e:
         logger.error(f"❌ DB Setup Error: {e}")  # ← YE LINE ZAROORI HAI
 
